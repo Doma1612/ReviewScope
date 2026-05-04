@@ -1,7 +1,7 @@
-# Dataset Selection — Proposal for Discussion
+# Dataset Selection
 
 **Project:** ReviewScope  
-**Status:** Draft — open for team discussion
+**Status:** Partially decided — development order confirmed, see section headers.
 
 ---
 
@@ -19,8 +19,8 @@ All datasets listed here are openly available. None require a data sharing agree
 
 ## Proposed Datasets
 
-### 1. Yelp Open Dataset
-**Primary development dataset — short-form user-generated text**
+### 1. Yelp Open Dataset ✓ MVP Dataset
+**Initial development dataset — short-form user-generated text**
 
 6.9 million reviews across restaurants, shops, and local services, with star ratings, timestamps, and business metadata included. The volume is large enough to stress-test the pipeline properly, and the metadata allows filtering by business category, city, or rating band — which makes for more controlled experiments than throwing the full corpus at the clusterer at once.
 
@@ -51,7 +51,7 @@ The value here is generalization: if the pipeline clusters Yelp reviews well, do
 
 ---
 
-### 3. EuroParl Corpus
+### 3. EuroParl Corpus ✓ Phase 2
 **Academic / discourse analysis dataset — DATS angle**
 
 Parliamentary debate transcripts from the European Parliament, covering 21 languages. This is the kind of primary source material that social scientists and discourse analysts actually work with — long documents, formal argumentation, a clear temporal dimension, and genuine thematic variety across political topics.
@@ -104,19 +104,17 @@ The spread across short and long text, user-generated and formal language, and E
 
 ---
 
-## Suggested Development Order
+## Development Order ✓ Decided
 
-Start with **Yelp** and **EuroParl** in parallel — one covers the short-form path, the other the long-form academic path. Both are well-documented and cleanly structured. Add **Amazon Reviews** once the pipeline is stable as a cross-domain check. Bring in **All the News** when the visualization layer is ready and concept-over-time analysis is on the roadmap.
-
-This avoids the trap of spending the first weeks wrangling data instead of building the pipeline.
+1. **Yelp** — MVP. Short-form, well-understood domain, enough volume to stress-test the pipeline without needing to handle multilingual or long-form complexity first.
+2. **EuroParl** — Phase 2, once the MVP pipeline is stable. Long-form, formal language, multilingual, strong DATS relevance.
+3. **Amazon Reviews** — cross-domain generalization check once the pipeline is proven on Yelp.
+4. **All the News** — when concept-over-time visualization is on the roadmap.
 
 ---
 
-## Open Questions for the Team
+## Open Questions
 
-1. **Yelp subset:** Full dataset or filtered subset (city / category) during development?
-2. **Amazon category:** Which product category makes for the most representative demo?
-3. **EuroParl language scope:** Single language first, or multilingual from the start?
-4. **Concept-over-time scope:** Is the temporal analysis feature in scope for the course, or post-course?
-5. **Additional sources:** Are there domain-specific datasets relevant to team members' interests that would make the project more personally engaging?
-6. **German-language data:** Given the potential DATS / UHH connection, should we prioritize at least one German-language corpus to demonstrate multilingual capability?
+1. **Yelp subset:** Work with a filtered subset (one city or business category) during early development, or load a larger slice from the start?
+2. **EuroParl language scope:** Start with a single language (English or German) or treat multilingual capability as a feature from the beginning? The latter requires evaluating multilingual embedding models earlier.
+3. **German-language data:** Given the DATS / UHH angle, should at least one German-language corpus be prioritized to demonstrate multilingual capability?
