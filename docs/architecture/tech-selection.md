@@ -1,7 +1,7 @@
-# Tech Stack — Proposal for Discussion
+# Tech Stack
 
 **Project:** ReviewScope  
-**Status:** Draft — open for team discussion
+**Status:** Partially decided — decided items are marked. Open items are in the Open Questions section.
 
 ---
 
@@ -18,7 +18,7 @@ The second point is a nice-to-have for the course scope but a strong framing if 
 
 ---
 
-## Proposed Architecture — Ports & Adapters
+## Software Architecture — TBD
 
 Rather than microservices (operationally expensive for a project of this size and timeline) or a tightly coupled monolith (hard to extend or plug into DATS later), the proposal is a **modular monolith with hexagonal architecture** (also called ports & adapters).
 
@@ -40,13 +40,13 @@ Every swappable concern gets a port:
 | Auth | Internal JWT | Host platform token passthrough |
 | Vector store | pgvector | pgvector (unchanged) |
 
-**Open question for the team:** Does this level of abstraction feel like the right investment for the project scope, or is it over-engineering given the timeline?
+**Open question:** Does this level of abstraction feel like the right investment for the project scope, or is it over-engineering given the timeline?
 
 ---
 
-## Backend — FastAPI (Python)
+## Backend — FastAPI (Python) ✓ Decided
 
-**Proposal:** FastAPI with Python 3.12.
+**Decision:** FastAPI with Python 3.12.
 
 Python is the natural fit for an NLP project — the ML ecosystem lives there. Within Python web frameworks, FastAPI seems like the right choice:
 
@@ -60,39 +60,41 @@ Flask would need significant scaffolding to reach the same level of async suppor
 
 ---
 
-## Task Queue — Celery + Redis
+## Task Queue — Celery + Redis ✓ Decided
 
 The NLP pipeline is not a request-response operation. Embedding a corpus, running UMAP, fitting HDBSCAN, and labeling clusters with an LLM can take minutes. Jobs need to run in the background, support retries, and report progress back to the frontend.
 
-**Proposal:** Celery with Redis as the broker and result backend.
+**Decision:** Celery with Redis as the broker and result backend.
 
 Celery handles task prioritization, progress callbacks, failure retries, and chaining pipeline steps. Redis doubles as a cache layer.
 
-ARQ (async Redis queue) is a lighter alternative worth considering — less overhead, async-native. The tradeoff is less tooling around task introspection, which matters if we want to show pipeline progress in the UI.
+---
 
-**Open question for the team:** Celery vs ARQ — does the added complexity of Celery pay off, or is ARQ sufficient?
+## CI/CD — GitHub Actions ✓ Decided
+
+**Decision:** GitHub Actions for all continuous integration and delivery.
+
+Every push and pull request triggers a pipeline that runs linting, type checking, and tests. On merge to `main`, the pipeline builds and publishes a Docker image to a container registry.
+
+The ports & adapters architecture makes this straightforward: the application layer and domain have no external dependencies, so unit tests are fast and isolated. Integration tests spin up real backing services (Postgres, Redis) using GitHub Actions service containers — no mocking of infrastructure.
+
+The frontend runs its own parallel job covering type checking, linting, and a production build verification.
 
 ---
 
-## Database — PostgreSQL + pgvector
+## Database — PostgreSQL + pgvector ✓ Decided
 
 Two things need storing: relational data (projects, documents, clusters, users) and embedding vectors (for similarity search and RAG).
 
-**Proposal:** PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension.
+**Decision:** PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension, accessed via SQLAlchemy 2.0 (async).
 
-pgvector adds vector storage and approximate nearest-neighbor search to Postgres, keeping everything in one database. For a research-scale project this is more than sufficient, and it avoids running a second database service during development.
-
-The vector store port means switching to Qdrant or Weaviate later is a configuration change, not a refactor. But starting with pgvector keeps the local setup simple.
-
-**Alternatives worth discussing:**
-- **Qdrant** — purpose-built vector DB, excellent performance, easy to self-host. Real option if we expect large corpora.
-- **Weaviate** — more feature-rich, has built-in RAG primitives. More complex to operate.
+pgvector adds vector storage and approximate nearest-neighbor search to Postgres, keeping everything in one database. For a research-scale project this is more than sufficient, and it avoids running a second database service during development. If corpora grow beyond what pgvector handles comfortably, the vector store port means switching to Qdrant is a configuration change, not a refactor.
 
 ---
 
-## Frontend — React + TypeScript (Vite)
+## Frontend — React + TypeScript (Vite) ✓ Decided
 
-**Proposal:** React 19 with TypeScript, built with Vite.
+**Decision:** React 19 with TypeScript, built with Vite.
 
 The frontend has some specific requirements that drove this thinking:
 
@@ -114,17 +116,12 @@ React has the best ecosystem for all of these, particularly for scientific visua
 | UI components | shadcn/ui + Tailwind | Composable, accessible, not a black-box library |
 | API client | auto-generated from OpenAPI | FastAPI generates the spec; `openapi-ts` generates a typed client |
 
-**Alternatives worth discussing:**
-- **Vue 3** — comparable DX, good TypeScript support, slightly thinner ecosystem for scientific viz.
-- **Svelte / SvelteKit** — much lighter bundle, but React's maturity is an asset as the app grows.
-
-**Open question for the team:** Is anyone strongly opposed to React, or does someone have a strong case for Vue?
 
 ---
 
-## NLP / ML Stack
+## NLP / ML Stack — Upcoming
 
-> **Note:** This section is an outline for future discussion — not part of the current tech selection. Decisions here will follow once the core architecture is agreed on.
+> **Note:** Decisions here are upcoming. The pipeline stages are agreed on; specific model/library choices will follow experimentation.
 
 - **Preprocessing**
   - Junk removal, deduplication
@@ -149,12 +146,11 @@ React has the best ecosystem for all of these, particularly for scientific visua
   - Reproducibility across runs is an open problem for all density-based methods
 
 - **Cluster Labeling & Summarization (LLM)**
-  - Preference: open-source models, self-hosted — proprietary APIs (Anthropic, OpenAI) as fallback only
-  - Serving: [vLLM](https://github.com/vllm-project/vllm) on university GPU compute (high-throughput inference, OpenAI-compatible API)
-  - Local dev: [Ollama](https://ollama.com) (runs the same model family on CPU/consumer GPU, no infra setup)
-  - Model candidates: Llama 3.1 / 3.3, Mistral, Qwen 2.5 — to be evaluated on labeling quality vs. size tradeoff
-  - All LLM calls go through a labeler port — switching from vLLM to Anthropic or OpenAI is a config change, not a code change
-  - Input context strategy matters: centroid-based sampling vs. TF-IDF representative docs vs. metadata-enriched prompts — to be investigated
+  - Preference: open-source models, self-hosted — proprietary APIs as fallback only
+  - Serving: [vLLM](https://github.com/vllm-project/vllm) if university GPU compute is available; [Ollama](https://ollama.com) for local dev on CPU/consumer GPU
+  - **Model choice: to be determined by benchmarking.** All viable vendors and model families (Llama 3.x, Mistral, Qwen 2.5, etc.) will be tested against available hardware. The model that delivers the best labeling quality within the hardware constraints wins. All LLM calls go through a labeler port, so switching models or providers is a config change, not a code change.
+  - Input context strategy: centroid-based sampling vs. TF-IDF representative docs vs. metadata-enriched prompts — to be investigated
+  - **Prerequisite: clarify available hardware.** University GPU compute access needs to be confirmed before committing to a serving strategy. See Open Questions.
 
 - **Cluster Summarization**
   - See section below
@@ -252,13 +248,11 @@ University GPU/CPU compute for embedding generation is worth investigating — s
 
 ---
 
-## Open Questions for the Team
+## Open Questions
 
-1. **Architecture depth:** Is the ports & adapters pattern the right investment, or does it add too much abstraction for a single-semester project?
-2. **Celery vs ARQ:** Is Celery's task introspection worth the added complexity?
-3. **Vector DB:** Start with pgvector or go straight to Qdrant if we expect larger corpora?
-4. **Frontend framework:** Any strong opinions on Vue over React?
-5. **External platform integration scope:** Is the sidecar integration (e.g. into DATS) a goal for the course, or a post-course contribution?
-6. **LLM model choice:** Which open-source model (Llama 3.x, Mistral, Qwen 2.5) gives the best labeling quality at a reasonable size? Is university GPU compute available for vLLM?
-7. **Reproducibility:** How strictly do we need to handle non-deterministic clustering across runs?
-8. **NLP/ML stack:** To be discussed separately — see outline in the NLP / ML Stack section.
+1. **Software architecture pattern:** Is the ports & adapters pattern the right investment, or does it add too much abstraction for a single-semester project?
+2. **Hardware & GPU compute:** What hardware do team members have available locally? Can we access university GPU resources for embedding generation and LLM inference (vLLM)? This determines the feasible model sizes and serving strategy.
+3. **LLM model choice:** To be decided by benchmarking all viable vendors and model families against available hardware. No pre-selection — results drive the decision.
+4. **NLP/ML stack specifics:** Embedding model, clustering library choices, preprocessing depth — upcoming, to be discussed once hardware is clarified.
+5. **External platform integration scope:** Is the DATS sidecar integration a goal for the course, or a post-course contribution?
+6. **Reproducibility:** Not a concern for the initial MVP (file upload → pipeline → visualization). Full project scope aims to include time series analysis and comparative runs — reproducibility becomes relevant there, but is deferred until the MVP is stable.
