@@ -170,6 +170,19 @@ class PipelineConfig:
     def data_path(self) -> Path:
         return self.cache_dir / self.data_file
 
+    @property
+    def corpus_slug(self) -> str:
+        """Corpus identity for cache keys, e.g. 'hotels' or 'automotive'.
+
+        Derived from the benchmark filename (sample_<corpus>_<size>.jsonl).
+        Cached artifacts from different corpora at the same sample size must
+        never collide — 'hotels' is the historical default and keeps the
+        original unprefixed cache filenames.
+        """
+        stem = Path(self.data_file).stem
+        s = stem[len("sample_"):] if stem.startswith("sample_") else stem
+        return s.rsplit("_", 1)[0] if "_" in s else s
+
     def ensure_dirs(self) -> None:
         """Create all cache subdirectories if they don't exist."""
         for d in [

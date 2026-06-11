@@ -48,6 +48,7 @@ def embedding_path(
     model_name: str,
     sample_size: int,
     instruction: str = "no_inst",
+    prefix: str = "",
 ) -> Path:
     """
     Path for a cached embedding array.
@@ -56,8 +57,11 @@ def embedding_path(
     ----------
     instruction : slug identifying which instruction was used, e.g.
                   "no_inst", "generic", "domain", "sentiment"
+    prefix : corpus namespace for non-hotel benchmarks (e.g. "automotive__");
+             empty for the original hotel benchmark so existing caches and
+             notebook conventions stay valid.
     """
-    name = f"{make_slug(model_name)}__{make_slug(instruction)}__{_k(sample_size)}.npy"
+    name = f"{prefix}{make_slug(model_name)}__{make_slug(instruction)}__{_k(sample_size)}.npy"
     return base_dir / "embeddings" / name
 
 

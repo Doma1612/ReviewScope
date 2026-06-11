@@ -16,6 +16,17 @@ class TestConfig:
         cfg = load_config(sample_size=1_000, data_file="custom.jsonl")
         assert cfg.data_file == "custom.jsonl"
 
+    def test_corpus_slug(self):
+        assert load_config(sample_size=50_000).corpus_slug == "hotels"
+        assert (
+            load_config(data_file="sample_automotive_50k.jsonl").corpus_slug
+            == "automotive"
+        )
+        assert (
+            load_config(data_file="sample_beauty___spas_5k.jsonl").corpus_slug
+            == "beauty___spas"
+        )
+
     def test_project_root_env_override(self, tmp_path, monkeypatch):
         monkeypatch.setenv("REVIEWSCOPE_ROOT", str(tmp_path))
         cfg = load_config()
@@ -55,6 +66,12 @@ class TestCacheKeys:
         b = embedding_path(tmp_path, "org/Model-X", 5_000, instruction="domain")
         assert a == b
         assert a.name == "model-x__domain__5k.npy"
+
+    def test_embedding_path_corpus_namespace(self, tmp_path):
+        hotels = embedding_path(tmp_path, "m", 50_000)
+        auto = embedding_path(tmp_path, "m", 50_000, prefix="automotive__")
+        assert hotels != auto
+        assert auto.name.startswith("automotive__")
 
     def test_paths_distinguish_all_axes(self, tmp_path):
         base = dict(min_dist=0.0, metric="cosine", sample_size=5_000)

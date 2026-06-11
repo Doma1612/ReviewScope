@@ -140,8 +140,15 @@ def embed_with_cache(
     """
     import time
 
+    corpus = cfg.corpus_slug
     path = embedding_path(
-        cfg.cache_dir, embedder.model_name, len(texts), instruction=embedder.instruction
+        cfg.cache_dir,
+        embedder.model_name,
+        len(texts),
+        instruction=embedder.instruction,
+        # hotels keeps the historical bare filenames; other corpora must not
+        # collide with them at the same sample size
+        prefix="" if corpus == "hotels" else f"{corpus}__",
     )
     if path.exists():
         return load_array(path), 0.0

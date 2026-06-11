@@ -138,7 +138,7 @@ def _render_report(
     seeds: Sequence[int],
 ) -> str:
     lines = [
-        f"# Pipeline comparison — {cfg.sample_size:,} hotel reviews",
+        f"# Pipeline comparison — {cfg.sample_size:,} reviews",
         "",
         f"Benchmark: `{cfg.data_file}` · device: {cfg.device} · seeds: {list(seeds)}",
         "",
@@ -314,9 +314,14 @@ if __name__ == "__main__":
     parser.add_argument("--instruction", default=None,
                         choices=["no_inst", "generic", "domain", "sentiment"],
                         help="instruction slug for instruction-tuned models")
+    parser.add_argument("--data-file", default=None,
+                        help="benchmark JSONL in data/cache for non-hotel "
+                             "categories (e.g. sample_automotive_50k.jsonl)")
     args = parser.parse_args()
 
     overrides = {"sample_size": args.sample_size, "device": args.device}
+    if args.data_file:
+        overrides["data_file"] = args.data_file
     if args.batch_size:
         overrides["batch_size"] = args.batch_size
     elif args.device == "cuda":
@@ -335,7 +340,14 @@ if __name__ == "__main__":
     cfg.ensure_dirs()
     from ..core.cache import make_slug
 
-    tag = make_slug(args.embedding_model) if args.embedding_model else ""
+    # Separate report dirs per (category, embedding model) so sweeps and
+    # cross-domain runs never overwrite each other's results.
+    tag_parts = []
+    if args.data_file:
+        tag_parts.append(Path(args.data_file).stem.removeprefix("sample_").rsplit("_", 1)[0])
+    if args.embedding_model:
+        tag_parts.append(make_slug(args.embedding_model))
+    tag = "_".join(tag_parts)
     log_path = cfg.runs_dir / f"comparison_{cfg.sample_size}{'_' + tag if tag else ''}.log"
     handler = logging.FileHandler(log_path)
     handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
@@ -348,4 +360,5 @@ if __name__ == "__main__":
         label_clusters=not args.no_llm,
         embedding_model=args.embedding_model,
         instruction=args.instruction,
+        tag=tag or None,
     )

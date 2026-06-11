@@ -64,16 +64,17 @@ def run_pipeline(
     """
     seed = cfg.seed if seed is None else seed
     if run_name is None:
-        run_name = f"{spec.variant}__{cfg.sample_size}__s{seed}"
-        # Embedding-model sweeps: non-default models get their own run dirs,
-        # otherwise a sweep would silently overwrite the default-model run.
+        # Non-default corpus or embedding model gets its own run dir,
+        # otherwise sweeps would silently overwrite the default run.
         from .spec import default_specs
 
+        parts = [spec.variant]
+        if cfg.corpus_slug != "hotels":
+            parts.append(cfg.corpus_slug)
         if spec.embedding_model != default_specs()[spec.variant].embedding_model:
-            run_name = (
-                f"{spec.variant}__{make_slug(spec.embedding_model)}"
-                f"__{cfg.sample_size}__s{seed}"
-            )
+            parts.append(make_slug(spec.embedding_model))
+        parts += [str(cfg.sample_size), f"s{seed}"]
+        run_name = "__".join(parts)
     run_dir = cfg.runs_dir / run_name
 
     from ..pipelines.artifacts import load_run
@@ -264,9 +265,15 @@ def cluster_labels_only(
 
 # ── Variant internals ─────────────────────────────────────────────────────────
 
+def _corpus_prefix(cfg: PipelineConfig) -> str:
+    """Cache namespace per corpus; hotels (the original benchmark) stays bare."""
+    return "" if cfg.corpus_slug == "hotels" else f"{cfg.corpus_slug}__"
+
+
 def _seed_prefix(cfg: PipelineConfig, seed: int, base: str = "") -> str:
-    """Distinct cache namespace for non-default seeds (stability runs)."""
-    return base if seed == cfg.seed else f"s{seed}_{base}"
+    """Distinct cache namespace for corpus + non-default seeds (stability runs)."""
+    corpus = _corpus_prefix(cfg)
+    return f"{corpus}{base}" if seed == cfg.seed else f"{corpus}s{seed}_{base}"
 
 
 def _reduce_cached(
