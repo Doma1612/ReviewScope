@@ -65,11 +65,7 @@ def sweep(
             variant="sentence_level" if sentence_level else "custom_hdbscan",
             embedding_model=cand.model,
             instruction=cand.instruction,
-            cluster=(
-                {"min_cluster_size": 25, "min_samples": 10}
-                if sentence_level
-                else {"min_cluster_size": 15, "min_samples": 5}
-            ),
+            cluster={"min_cluster_size": "auto", "min_samples": "auto"},
         )
         embedder = SentenceTransformerEmbedder(
             cand.model, instruction=cand.instruction,
@@ -143,7 +139,7 @@ def _log_row(cfg, cand, dim, embed_s, metrics) -> None:
         "umap_n_components": 10, "umap_n_neighbors": 15,
         "umap_min_dist": 0.0, "umap_metric": "cosine",
         "clustering_algo": "hdbscan",
-        "cluster_params": json.dumps({"min_cluster_size": 15, "min_samples": 5}),
+        "cluster_params": json.dumps({"min_cluster_size": "auto_0.003", "min_samples": "auto"}),
         **{k: v for k, v in metrics.items()
            if k in ("n_docs", "n_clusters", "noise_count", "noise_ratio",
                     "silhouette", "davies_bouldin", "calinski_harabasz",
@@ -180,8 +176,8 @@ def _render(cfg, rows, sentence_level: bool = False) -> str:
     lines = [
         f"# Embedding model sweep — {cfg.sample_size:,} reviews (`{cfg.data_file}`){unit_note}",
         "",
-        "Fixed downstream pipeline: UMAP(10d, nn=15, cosine) + "
-        + ("HDBSCAN(mcs=25, ms=10)." if sentence_level else "HDBSCAN(mcs=15, ms=5)."),
+        "Fixed downstream pipeline: UMAP(10d, nn=15, cosine) + HDBSCAN with "
+        "size-scaled parameters (mcs = 0.3% of units, floor 15; ms = mcs/3).",
         "Ranked by mean rank across silhouette (excl./incl. noise), C_v, rating entropy.",
         "Shortlist only — confirm the winner with the full pipeline comparison and",
         "human inspection; instruction-tuned silhouette gains without coherence gains",

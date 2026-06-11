@@ -144,6 +144,17 @@ artifacts and adds stability + noise-fairness, which the notebooks lacked.
   including noise as a pseudo-cluster, plus the noise fraction, and the
   report instructs readers to use them together. There is no single fair
   number; we publish the disagreement instead of hiding it.
+- **min_cluster_size is scale-dependent — handled, but heuristically.**
+  HDBSCAN's mcs is an absolute count whose meaning is relative: mcs=15 on the
+  5k benchmark (0.3% of the corpus) is a topic threshold; the same 15 at 50k
+  (0.03%) produces blob-and-crumbs. Default specs therefore use
+  ``"auto"``: mcs = 0.3% of the clustered units (floor 15), ms = mcs/3 —
+  *anchored to* notebook 06's decision, which means it reproduces the decided
+  behaviour at 5k and extrapolates linearly elsewhere. The linearity is an
+  assumption, not a finding; the proper validation is a per-scale sweep (see
+  the tuning roadmap in docs/pipeline-guide.md). BERTopic deliberately keeps
+  its stock min_topic_size=10 — it is the "off-the-shelf, no thinking"
+  baseline, scale problems included.
 - **The two-stage clusterer's macro count heuristic** (≈√n_micro, clamped to
   [5, 30]) is a readability heuristic, not an optimum; it has no validation
   beyond "produces human-reviewable counts". Treated as a reviewable

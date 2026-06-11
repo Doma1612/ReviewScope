@@ -413,20 +413,48 @@ def _reduce_cached(
     return reduced
 
 
-def _make_backend(spec: PipelineSpec, seed: int):
+def _make_backend(spec: PipelineSpec, seed: int, n_units: int):
+    """
+    Build the clustering backend, resolving ``"auto"`` size parameters
+    against the actual number of clustered units.
+
+    HDBSCAN's min_cluster_size is an absolute count whose *meaning* is
+    relative to corpus size (see ``cluster.scaled_min_cluster_size``) —
+    "auto" keeps the notebook-decided behaviour at 5k and scales it to other
+    corpus sizes instead of silently reusing 5k-tuned absolutes. Explicit
+    numeric values are always respected. k for the partitioners is a topic
+    count, not a density parameter — more documents mean bigger topics, not
+    more topics — so it deliberately does not scale.
+    """
+    from ..cluster import scaled_min_cluster_size
+
+    c = dict(spec.cluster)
     if spec.variant in ("custom_hdbscan", "sentence_level"):
-        return HDBSCANBackend(**spec.cluster)
+        if c.get("min_cluster_size") == "auto":
+            c["min_cluster_size"] = scaled_min_cluster_size(n_units)
+        if c.get("min_samples") == "auto":
+            # 3:1 mcs:ms — the ratio notebook 06 selected (15:5).
+            c["min_samples"] = max(5, c["min_cluster_size"] // 3)
+        return HDBSCANBackend(**c)
     if spec.variant == "flat_agglomerative":
-        return AgglomerativeBackend(**spec.cluster)
+        return AgglomerativeBackend(**c)
     if spec.variant == "two_stage":
-        return TwoStageBackend(**spec.cluster)
+        if c.get("micro_min_cluster_size") == "auto":
+            # Micro pass wants fine, pure clusters: 0.1% of units, floor 5
+            # (anchored to the 5k default micro_mcs=5).
+            c["micro_min_cluster_size"] = scaled_min_cluster_size(
+                n_units, fraction=0.001, floor=5
+            )
+        if c.get("micro_min_samples") == "auto":
+            c["micro_min_samples"] = max(3, round(c["micro_min_cluster_size"] * 0.6))
+        return TwoStageBackend(**c)
     raise ValueError(f"no clustering backend for variant {spec.variant!r}")
 
 
 def _cluster_cached(
     cfg: PipelineConfig, spec: PipelineSpec, reduced: np.ndarray, seed: int
 ):
-    backend = _make_backend(spec, seed)
+    backend = _make_backend(spec, seed, n_units=len(reduced))
     umap_slug = (
         f"{_seed_prefix(cfg, spec, seed)}{make_slug(spec.embedding_model)}"
         f"__{make_slug(spec.instruction)}"
@@ -529,7 +557,9 @@ def _log_to_results_csv(
                      "umap_n_neighbors": 15, "umap_min_dist": 0.0, "umap_metric": "cosine"}
         pipeline = "bertopic"
     else:
-        backend = _make_backend(spec, metrics.get("seed", cfg.seed))
+        backend = _make_backend(
+            spec, metrics.get("seed", cfg.seed), n_units=metrics.get("n_docs", 0)
+        )
         algo, params = backend.algorithm, backend.params
         r = spec.reducer
         reduction = {

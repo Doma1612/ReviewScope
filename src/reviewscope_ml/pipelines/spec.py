@@ -70,9 +70,16 @@ def default_specs() -> dict[str, PipelineSpec]:
             embedding_model="sentence-transformers/all-MiniLM-L6-v2",
             cluster={"min_topic_size": 10},
         ),
+        # "auto" size parameters resolve against the actual unit count at run
+        # time (runner._make_backend): mcs = 0.3% of units (floor 15), the
+        # ratio anchored to notebook 06's mcs=15 at 5k. k for the
+        # partitioners stays fixed — topic count does not grow with corpus
+        # size, topic *size* does. BERTopic stays stock (min_topic_size=10):
+        # it is the "what you get without thinking" baseline by definition,
+        # including its scale problems.
         "custom_hdbscan": PipelineSpec(
             variant="custom_hdbscan",
-            cluster={"min_cluster_size": 15, "min_samples": 5},
+            cluster={"min_cluster_size": "auto", "min_samples": "auto"},
         ),
         "flat_agglomerative": PipelineSpec(
             variant="flat_agglomerative",
@@ -80,12 +87,11 @@ def default_specs() -> dict[str, PipelineSpec]:
         ),
         "two_stage": PipelineSpec(
             variant="two_stage",
-            cluster={"micro_min_cluster_size": 5, "micro_min_samples": 3, "n_macro": None},
+            cluster={"micro_min_cluster_size": "auto", "micro_min_samples": "auto",
+                     "n_macro": None},
         ),
-        # Sentence level multiplies the point count ~6x, so the minimum
-        # cluster size scales up with it; a heuristic, reviewable via HITL.
         "sentence_level": PipelineSpec(
             variant="sentence_level",
-            cluster={"min_cluster_size": 25, "min_samples": 10},
+            cluster={"min_cluster_size": "auto", "min_samples": "auto"},
         ),
     }

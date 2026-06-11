@@ -1,6 +1,62 @@
 import numpy as np
 
-from reviewscope_ml.cluster import TwoStageBackend
+from reviewscope_ml.cluster import TwoStageBackend, scaled_min_cluster_size
+from reviewscope_ml.pipelines.runner import _make_backend
+from reviewscope_ml.pipelines.spec import PipelineSpec
+
+
+class TestScaledMinClusterSize:
+    def test_anchored_to_notebook_decision(self):
+        # 0.3% of 5k = 15 — exactly the notebook 06 choice
+        assert scaled_min_cluster_size(5_000) == 15
+
+    def test_scales_to_50k(self):
+        assert scaled_min_cluster_size(50_000) == 150
+
+    def test_floor_protects_smoke_runs(self):
+        assert scaled_min_cluster_size(1_000) == 15
+        assert scaled_min_cluster_size(0) == 15
+
+    def test_custom_fraction_and_floor(self):
+        assert scaled_min_cluster_size(50_000, fraction=0.001, floor=5) == 50
+
+
+class TestAutoBackendResolution:
+    def test_auto_resolves_against_unit_count(self):
+        spec = PipelineSpec(
+            variant="custom_hdbscan",
+            cluster={"min_cluster_size": "auto", "min_samples": "auto"},
+        )
+        b = _make_backend(spec, seed=42, n_units=50_000)
+        assert b.min_cluster_size == 150
+        assert b.min_samples == 50
+
+    def test_explicit_values_respected(self):
+        spec = PipelineSpec(
+            variant="custom_hdbscan",
+            cluster={"min_cluster_size": 30, "min_samples": 7},
+        )
+        b = _make_backend(spec, seed=42, n_units=50_000)
+        assert b.min_cluster_size == 30
+        assert b.min_samples == 7
+
+    def test_two_stage_micro_scaling(self):
+        spec = PipelineSpec(
+            variant="two_stage",
+            cluster={"micro_min_cluster_size": "auto",
+                     "micro_min_samples": "auto", "n_macro": None},
+        )
+        b = _make_backend(spec, seed=42, n_units=50_000)
+        assert b.micro_min_cluster_size == 50
+        assert b.micro_min_samples == 30
+
+    def test_benchmark_scale_matches_notebook_defaults(self):
+        spec = PipelineSpec(
+            variant="custom_hdbscan",
+            cluster={"min_cluster_size": "auto", "min_samples": "auto"},
+        )
+        b = _make_backend(spec, seed=42, n_units=5_000)
+        assert (b.min_cluster_size, b.min_samples) == (15, 5)
 
 
 def three_groups(seed=0):
