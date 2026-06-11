@@ -49,9 +49,9 @@ category (`--category Automotive` → 228k reviews, disjoint vocabulary).
 ## 2. The pipeline, stage by stage
 
 ```
-ingest → preprocess → [segment] → embed → reduce → cluster → represent → label
-                                                       ↓
-            feedback ← HITL review ← report ← evaluate ┘
+ingest → preprocess → [segment] → embed → reduce → cluster → sentiment → represent → label
+                                                                  ↓
+                       feedback ← HITL review ← report ← evaluate ┘
 ```
 
 | Stage | What it does | Decided how | Module |
@@ -62,6 +62,7 @@ ingest → preprocess → [segment] → embed → reduce → cluster → represe
 | Embed | text → vector; cached per (model, instruction, corpus, unit, size) | nb 04 + model sweep | `embed/` |
 | Reduce | UMAP 768d→10d for clustering; separate 2D/3D for plots | nb 05 sweep | `reduce/` |
 | Cluster | five interchangeable backends (below) | nb 06 + comparison harness | `cluster/` |
+| Sentiment | tweet-RoBERTa per unit: score = P(pos)−P(neg), label at ±0.2; per-cluster avg + distribution | team decision; **metadata about clusters, never input to clustering** (Tier 3 polices sentiment-driven clusters) | `sentiment/` |
 | Represent | c-TF-IDF top terms, word-cloud frequencies | BERTopic-style | `represent/` |
 | Label | Ollama LLM label+summary per cluster; term fallback when LLM down | nb 08 prompts, centroid context | `label/` |
 | Evaluate | three tiers + fairness + stability + failure flags | this project | `eval/` |

@@ -16,7 +16,7 @@ pytest                      # pure-logic tests, no GPU, no model downloads
 | `embed/` | 3 Embed | sentence-transformers (+instruction prompts), disk-cached, device-aware, CUDA-OOM batch backoff; `models.py` = curated candidate registry |
 | `reduce/` | 4 Reduce | UMAP / PCA→UMAP, seeded; separate 2-D/3-D viz projections |
 | `cluster/` | 5 Cluster | HDBSCAN, KMeans, agglomerative, two-stage micro→macro |
-| (sentiment) | 6 Sentiment | not in this package yet; Tier-3 rating entropy covers the benchmark's needs |
+| `sentiment/` | 6 Sentiment | tweet-RoBERTa per unit: score = P(pos)−P(neg), labels at ±0.2; per-cluster avg + distribution; cached, fails soft |
 | `represent/` | feeds 7 + word clouds | c-TF-IDF & TF-IDF terms, word frequencies |
 | `label/` | 7 Label | Ollama label+summary, prompt-hash recorded, term fallback when LLM is down |
 | `pipelines/` | 8 Finalize | five end-to-end variants (incl. sentence-level mentions), one artifact schema (assignments, coords, clusters, manifest, doc membership) |
