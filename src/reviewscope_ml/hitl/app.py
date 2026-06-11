@@ -120,18 +120,64 @@ def main() -> None:
 
     # ── 2-D scatter ───────────────────────────────────────────────────────
     with left:
+        import pandas as pd
         import plotly.express as px
 
-        labels_str = [str(l) if l != -1 else "noise" for l in art.labels]
-        fig = px.scatter(
-            x=art.coords_2d[:, 0], y=art.coords_2d[:, 1],
-            color=labels_str,
-            hover_name=[texts.get(d, "")[:120] for d in art.doc_ids],
-            opacity=0.6,
+        cluster_names = {
+            cid: f"{cid} — {art.clusters[cid].label}" for cid in art.cluster_ids
+        }
+        focus = st.multiselect(
+            "Cluster fokussieren (leer = alle)",
+            options=art.cluster_ids,
+            format_func=lambda c: cluster_names[c],
+            key="focus_clusters",
         )
-        fig.update_traces(marker=dict(size=4))
+
+        df = pd.DataFrame({
+            "x": art.coords_2d[:, 0],
+            "y": art.coords_2d[:, 1],
+            "cluster": [
+                cluster_names.get(int(l), "noise") for l in art.labels
+            ],
+            "doc_id": art.doc_ids,
+            "text": [texts.get(d, "")[:160] for d in art.doc_ids],
+            "sentiment": (
+                art.sentiment_labels
+                if art.sentiment_labels is not None
+                else [""] * len(art.doc_ids)
+            ),
+        })
+        if focus:
+            wanted = {cluster_names[c] for c in focus}
+            df["dimmed"] = ~df["cluster"].isin(wanted)
+            front = df[~df["dimmed"]]
+            back = df[df["dimmed"]]
+        else:
+            front, back = df, df.iloc[0:0]
+
+        fig = px.scatter(
+            front, x="x", y="y", color="cluster",
+            custom_data=["cluster", "doc_id", "text", "sentiment"],
+            opacity=0.7,
+        )
+        fig.update_traces(
+            marker=dict(size=5 if focus else 4),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>%{customdata[2]}"
+                "<br><i>%{customdata[3]}</i> · %{customdata[1]}<extra></extra>"
+            ),
+        )
+        if len(back):
+            fig.add_scatter(
+                x=back["x"], y=back["y"], mode="markers",
+                marker=dict(size=3, color="lightgrey", opacity=0.25),
+                hoverinfo="skip", showlegend=False,
+            )
         fig.update_layout(height=600, showlegend=False)
         st.plotly_chart(fig, width="stretch")
+        if focus:
+            n = int(sum(~df["dimmed"]))
+            st.caption(f"{n} Punkte in {len(focus)} fokussierten Clustern; Rest ausgegraut.")
 
         st.subheader("Sign-off")
         st.caption(
@@ -148,11 +194,16 @@ def main() -> None:
         if st.button("Reassign") and doc_id:
             _record("reassign_doc", doc_id=doc_id, target_cluster_id=int(target))
 
-    # ── Cluster list ──────────────────────────────────────────────────────
+    # ── Cluster list (follows the focus selection from the scatter) ──────
     with right:
-        st.subheader(f"Clusters ({len(art.clusters)})")
+        focused = st.session_state.get("focus_clusters") or []
+        shown_ids = focused if focused else art.cluster_ids
+        st.subheader(
+            f"Clusters ({len(shown_ids)}/{len(art.clusters)})"
+            if focused else f"Clusters ({len(art.clusters)})"
+        )
         other_ids = art.cluster_ids
-        for cid in other_ids:
+        for cid in shown_ids:
             info = art.clusters[cid]
             terms = ", ".join(w for w, _ in (tuple(t) for t in info.top_terms[:8]))
             stars = f" · {info.mean_stars}★" if info.mean_stars is not None else ""
