@@ -46,13 +46,30 @@ def run_comparison(
     specs: Optional[dict[str, PipelineSpec]] = None,
     seeds: Sequence[int] = STABILITY_SEEDS,
     label_clusters: bool = True,
+    embedding_model: Optional[str] = None,
+    instruction: Optional[str] = None,
+    tag: Optional[str] = None,
 ) -> Path:
     """
     Run every variant once with full artifacts (first seed) plus cheap
     label-free repeats for the remaining seeds (stability), then write
-    ``data/runs/comparison_{size}/report.md`` + charts.
+    ``data/runs/comparison_{size}[_{tag}]/report.md`` + charts.
+
+    ``embedding_model``/``instruction`` override the three custom variants
+    (BERTopic stays stock — that is what "off-the-shelf baseline" means), so
+    a model sweep is one CLI call per candidate; ``tag`` defaults to the
+    model slug to keep each sweep's report separate.
     """
     specs = specs or default_specs()
+    if embedding_model:
+        from ..core.cache import make_slug
+
+        for name, spec in specs.items():
+            if spec.variant != "bertopic":
+                spec.embedding_model = embedding_model
+                if instruction:
+                    spec.instruction = instruction
+        tag = tag or make_slug(embedding_model)
     reviews = load_benchmark(cfg)
     base_seed, *extra_seeds = list(seeds)
 
@@ -73,7 +90,8 @@ def run_comparison(
             )
         stability[name] = stability_ari(label_runs)
 
-    out_dir = cfg.runs_dir / f"comparison_{cfg.sample_size}"
+    suffix = f"_{tag}" if tag else ""
+    out_dir = cfg.runs_dir / f"comparison_{cfg.sample_size}{suffix}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     finalists = _shortlist(arts)
@@ -285,18 +303,49 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the four-pipeline comparison")
     parser.add_argument("--sample-size", type=int, default=1_000)
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="embedding batch size (suggested: 64 cpu, 256 cuda)")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(STABILITY_SEEDS))
     parser.add_argument("--no-llm", action="store_true",
                         help="skip Ollama labeling (term-fallback labels)")
+    parser.add_argument("--embedding-model", default=None,
+                        help="override the custom variants' embedding model "
+                             "(e.g. BAAI/bge-m3); BERTopic stays stock")
+    parser.add_argument("--instruction", default=None,
+                        choices=["no_inst", "generic", "domain", "sentiment"],
+                        help="instruction slug for instruction-tuned models")
     args = parser.parse_args()
 
-    cfg = load_config(sample_size=args.sample_size, device=args.device)
+    overrides = {"sample_size": args.sample_size, "device": args.device}
+    if args.batch_size:
+        overrides["batch_size"] = args.batch_size
+    elif args.device == "cuda":
+        overrides["batch_size"] = 64
+
     if args.device == "cuda":
         # Shared-box etiquette: pick the freest GPU programmatically and pin.
         from ..runtime.gpu import claim_gpu
 
-        claim = claim_gpu()
-        cfg = load_config(
-            sample_size=args.sample_size, device=claim.device, gpu_id=claim.gpu_id
-        )
-    run_comparison(cfg, seeds=args.seeds, label_clusters=not args.no_llm)
+        claim = claim_gpu(require_gpu=True)
+        overrides.update(device=claim.device, gpu_id=claim.gpu_id)
+    cfg = load_config(**overrides)
+
+    # Persist the full progress log next to the artifacts: long runs are
+    # usually followed via `tail -f` from another shell or after a reconnect.
+    cfg.ensure_dirs()
+    from ..core.cache import make_slug
+
+    tag = make_slug(args.embedding_model) if args.embedding_model else ""
+    log_path = cfg.runs_dir / f"comparison_{cfg.sample_size}{'_' + tag if tag else ''}.log"
+    handler = logging.FileHandler(log_path)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+    logging.getLogger().addHandler(handler)
+    logger.info("logging to %s", log_path)
+
+    run_comparison(
+        cfg,
+        seeds=args.seeds,
+        label_clusters=not args.no_llm,
+        embedding_model=args.embedding_model,
+        instruction=args.instruction,
+    )

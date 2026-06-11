@@ -37,6 +37,10 @@ INSTRUCTIONS: dict[str, Optional[str]] = {
 }
 
 
+def _is_cuda_oom(e: Exception) -> bool:
+    return "CUDA out of memory" in str(e) or type(e).__name__ == "OutOfMemoryError"
+
+
 class SentenceTransformerEmbedder:
     """Lazy-loading embedder; weights load on first encode, ``close`` frees them."""
 
@@ -46,6 +50,7 @@ class SentenceTransformerEmbedder:
         instruction: str = "no_inst",
         device: str = "cpu",
         batch_size: int = 64,
+        show_progress: bool = True,
     ):
         if instruction not in INSTRUCTIONS:
             raise ValueError(f"Unknown instruction slug {instruction!r}; known: {list(INSTRUCTIONS)}")
@@ -53,6 +58,9 @@ class SentenceTransformerEmbedder:
         self.instruction = instruction
         self.device = device
         self.batch_size = batch_size
+        # tqdm progress for encode: the embed stage is the longest single step
+        # at 50k, and a silent half hour looks like a hang on the GPU server.
+        self.show_progress = show_progress
         self._model = None
 
     @property
@@ -73,14 +81,39 @@ class SentenceTransformerEmbedder:
         return self._model
 
     def encode(self, texts: list[str]) -> np.ndarray:
+        """
+        Encode with CUDA-OOM protection: our VRAM share is hard-capped at
+        cuda_mem_fraction (~6 GB on a TITAN X), so an over-ambitious batch
+        size raises OutOfMemoryError instead of stealing a neighbour's memory.
+        We catch it, halve the batch, and retry down to batch 8 rather than
+        killing an hours-long run over a tunable.
+        """
         model = self._load()
+        batch = self.batch_size
+        while True:
+            logger.info(
+                "encoding %d texts with %s (batch %d, device %s)",
+                len(texts), self.model_name, batch, self.device,
+            )
+            try:
+                return self._encode_once(model, texts, batch)
+            except Exception as e:
+                if not _is_cuda_oom(e) or batch <= 8:
+                    raise
+                batch //= 2
+                release_cuda_memory()
+                logger.warning("CUDA OOM at batch %d — retrying with %d", batch * 2, batch)
+
+    def _encode_once(self, model, texts: list[str], batch: int) -> np.ndarray:
         instr_text = INSTRUCTIONS[self.instruction]
         if self._is_instructor and instr_text:
             pairs = [[instr_text, t] for t in texts]
             return np.asarray(
-                model.encode(pairs, batch_size=self.batch_size, show_progress_bar=False)
+                model.encode(pairs, batch_size=batch,
+                             show_progress_bar=self.show_progress)
             )
-        kwargs = dict(batch_size=self.batch_size, show_progress_bar=False, convert_to_numpy=True)
+        kwargs = dict(batch_size=batch,
+                      show_progress_bar=self.show_progress, convert_to_numpy=True)
         if instr_text and not self._is_instructor:
             kwargs["prompt"] = instr_text
         return np.asarray(model.encode(texts, **kwargs))

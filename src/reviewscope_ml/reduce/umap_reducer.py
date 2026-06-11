@@ -51,6 +51,13 @@ class UMAPReducer:
         import umap
 
         x = embeddings
+        # Announce before fitting: a seeded (single-threaded) UMAP at 50k can
+        # run 30+ minutes with no output of its own — this line is what tells
+        # a log reader the process is working, not hung.
+        logger.info(
+            "fitting %s: %d docs %dd -> %dd (nn=%d, seeded/single-threaded)",
+            self.method, len(x), x.shape[1], self.n_components, self.n_neighbors,
+        )
         t0 = time.time()
         if self.pca_components:
             from sklearn.decomposition import PCA
@@ -78,6 +85,7 @@ def viz_projection(
     """2-D/3-D scatter coordinates (min_dist=0.1 spreads points for reading)."""
     import umap
 
+    logger.info("fitting viz projection: %d docs -> %dd", len(embeddings), n_components)
     reducer = umap.UMAP(
         n_components=n_components,
         n_neighbors=n_neighbors,

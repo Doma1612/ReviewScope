@@ -43,7 +43,9 @@ python -m reviewscope_ml.hitl.apply_feedback two_stage__1000__s42 --sample-size 
 ## Running on the shared GPU server (etiquette is enforced, not optional)
 
 The box has 4× TITAN X (12 GB), no scheduler; other groups are usually on
-GPUs 0–1. Every GPU entry point goes through `runtime.gpu.claim_gpu()`, which
+GPUs 0–1. **torch must be 2.7.1+cu126** — newer wheels dropped Pascal
+(sm_61) kernels and fail at the first CUDA op (see requirements.txt).
+Every GPU entry point goes through `runtime.gpu.claim_gpu()`, which
 
 1. queries `nvidia-smi`, picks the **emptiest** device,
 2. pins the process to it via `CUDA_VISIBLE_DEVICES`,

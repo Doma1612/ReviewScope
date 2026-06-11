@@ -65,6 +65,15 @@ def run_pipeline(
     seed = cfg.seed if seed is None else seed
     if run_name is None:
         run_name = f"{spec.variant}__{cfg.sample_size}__s{seed}"
+        # Embedding-model sweeps: non-default models get their own run dirs,
+        # otherwise a sweep would silently overwrite the default-model run.
+        from .spec import default_specs
+
+        if spec.embedding_model != default_specs()[spec.variant].embedding_model:
+            run_name = (
+                f"{spec.variant}__{make_slug(spec.embedding_model)}"
+                f"__{cfg.sample_size}__s{seed}"
+            )
     run_dir = cfg.runs_dir / run_name
 
     from ..pipelines.artifacts import load_run
