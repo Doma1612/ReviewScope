@@ -37,20 +37,39 @@ def sweep(
     cfg: PipelineConfig,
     models: Optional[list[EmbeddingCandidate]] = None,
     compute_coherence: bool = True,
+    sentence_level: bool = False,
 ) -> Path:
-    """Run the sweep; returns the path of the ranking report."""
+    """Run the sweep; returns the path of the ranking report.
+
+    ``sentence_level=True`` evaluates the candidates on sentence segments
+    instead of whole reviews — short texts are a different embedding regime
+    (long-context advantages vanish, small models close the gap), so if the
+    sentence_level pipeline is a serious finalist, pick its model here, not
+    from the document-level ranking.
+    """
     models = models if models is not None else candidates()
     reviews = load_benchmark(cfg)
+    if sentence_level:
+        from ..data.segment import segment_reviews
+
+        units = segment_reviews(reviews)
+        logger.info("sentence sweep: %d reviews -> %d segments", len(reviews), len(units))
+    else:
+        units = reviews
     device = cfg.apply_runtime_limits()
 
     rows: list[dict] = []
     for cand in models:
         logger.info("=== %s (%dM, instr=%s) ===", cand.model, cand.params_m, cand.instruction)
         spec = PipelineSpec(
-            variant="custom_hdbscan",
+            variant="sentence_level" if sentence_level else "custom_hdbscan",
             embedding_model=cand.model,
             instruction=cand.instruction,
-            cluster={"min_cluster_size": 15, "min_samples": 5},
+            cluster=(
+                {"min_cluster_size": 25, "min_samples": 10}
+                if sentence_level
+                else {"min_cluster_size": 15, "min_samples": 5}
+            ),
         )
         embedder = SentenceTransformerEmbedder(
             cand.model, instruction=cand.instruction,
@@ -59,7 +78,10 @@ def sweep(
             max_seq=cand.encode_seq,
         )
         try:
-            embeddings, embed_s = embed_with_cache(cfg, embedder, reviews.texts)
+            embeddings, embed_s = embed_with_cache(
+                cfg, embedder, units.texts,
+                prefix_extra="sent__" if sentence_level else "",
+            )
         except Exception as e:
             # Gated models without HF login, network failures: skip, don't die.
             logger.warning("SKIPPING %s: %s", cand.model, e)
@@ -71,9 +93,16 @@ def sweep(
         reduced = _reduce_cached(cfg, spec, embeddings, cfg.seed)
         labels, _, _ = _cluster_cached(cfg, spec, reduced, cfg.seed)
         metrics = evaluate_labels(
-            reduced, labels, reviews.texts, reviews.stars,
+            reduced, labels, units.texts, units.stars,
             runtime_s=embed_s, compute_coh=compute_coherence, seed=cfg.seed,
         )
+        if sentence_level:
+            # Customers, not mentions (same dedup as the pipeline runner).
+            from ..core.metrics import compute_rating_entropy
+            from ..pipelines.runner import _dedup_parent_stats
+
+            dstars, dlabels = _dedup_parent_stats(units.ids, units.stars, labels)
+            metrics["rating_entropy"] = compute_rating_entropy(dstars, dlabels)
         rows.append({
             "model": cand.model,
             "params_m": cand.params_m,
@@ -90,8 +119,9 @@ def sweep(
         )
 
     corpus = "" if cfg.corpus_slug == "hotels" else f"_{cfg.corpus_slug}"
-    out = cfg.runs_dir / f"model_sweep_{cfg.sample_size}{corpus}.md"
-    out.write_text(_render(cfg, rows))
+    unit = "_sent" if sentence_level else ""
+    out = cfg.runs_dir / f"model_sweep_{cfg.sample_size}{corpus}{unit}.md"
+    out.write_text(_render(cfg, rows, sentence_level=sentence_level))
     logger.info("model sweep report -> %s", out)
     return out
 
@@ -122,7 +152,7 @@ def _log_row(cfg, cand, dim, embed_s, metrics) -> None:
     })
 
 
-def _render(cfg, rows) -> str:
+def _render(cfg, rows, sentence_level: bool = False) -> str:
     def fmt(v):
         if v is None:
             return "—"
@@ -143,10 +173,15 @@ def _render(cfg, rows) -> str:
             )
     scored.sort(key=lambda r: sum(r["_ranks"]) / len(r["_ranks"]))
 
+    unit_note = (
+        " · unit: sentence segments (mention-level; entropy deduplicated per review)"
+        if sentence_level else ""
+    )
     lines = [
-        f"# Embedding model sweep — {cfg.sample_size:,} reviews (`{cfg.data_file}`)",
+        f"# Embedding model sweep — {cfg.sample_size:,} reviews (`{cfg.data_file}`){unit_note}",
         "",
-        "Fixed downstream pipeline: UMAP(10d, nn=15, cosine) + HDBSCAN(mcs=15, ms=5).",
+        "Fixed downstream pipeline: UMAP(10d, nn=15, cosine) + "
+        + ("HDBSCAN(mcs=25, ms=10)." if sentence_level else "HDBSCAN(mcs=15, ms=5)."),
         "Ranked by mean rank across silhouette (excl./incl. noise), C_v, rating entropy.",
         "Shortlist only — confirm the winner with the full pipeline comparison and",
         "human inspection; instruction-tuned silhouette gains without coherence gains",
@@ -187,6 +222,10 @@ if __name__ == "__main__":
                         help="subset of registry models (substring match)")
     parser.add_argument("--max-params-m", type=int, default=700)
     parser.add_argument("--no-coherence", action="store_true")
+    parser.add_argument("--sentence-level", action="store_true",
+                        help="evaluate candidates on sentence segments instead "
+                             "of whole reviews (~6x more texts; pick the model "
+                             "for the sentence_level pipeline here)")
     args = parser.parse_args()
 
     overrides = {"sample_size": args.sample_size, "device": args.device}
@@ -219,4 +258,9 @@ if __name__ == "__main__":
     handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
     logging.getLogger().addHandler(handler)
 
-    sweep(cfg, models=selected, compute_coherence=not args.no_coherence)
+    sweep(
+        cfg,
+        models=selected,
+        compute_coherence=not args.no_coherence,
+        sentence_level=args.sentence_level,
+    )
