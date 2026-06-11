@@ -42,7 +42,8 @@ def _load_run(run_dir: str):
 
 
 @st.cache_resource
-def _load_texts(sample_size: int, data_file: str, unit: str):
+def _load_unit_data(sample_size: int, data_file: str, unit: str):
+    """id -> text and id -> star maps for the run's unit (docs or segments)."""
     cfg = load_config(sample_size=sample_size, data_file=data_file)
     reviews = load_benchmark(cfg)
     if unit == "sentence":
@@ -51,7 +52,9 @@ def _load_texts(sample_size: int, data_file: str, unit: str):
         from reviewscope_ml.data.segment import segment_reviews
 
         reviews = segment_reviews(reviews)
-    return dict(zip(reviews.ids, reviews.raw_texts))
+    texts = dict(zip(reviews.ids, reviews.raw_texts))
+    stars = dict(zip(reviews.ids, (float(s) for s in reviews.stars)))
+    return texts, stars
 
 
 def _record(action: str, **kwargs) -> None:
@@ -63,6 +66,111 @@ def _record(action: str, **kwargs) -> None:
     )
     append_record(st.session_state["session_file"], rec)
     st.toast(f"recorded: {action}")
+
+
+def _open_detail(cluster_ids: list[int]) -> None:
+    st.session_state["view"] = "detail"
+    st.session_state["detail_ids"] = list(cluster_ids)
+
+
+def _back_to_overview() -> None:
+    st.session_state["view"] = "overview"
+
+
+def _detail_view(art, texts: dict, stars: dict) -> None:
+    """
+    Drill-down: every data point of the selected cluster(s) with full
+    metadata, plus the cluster actions (rename/approve/junk/merge) so a
+    reviewer can investigate and act in one place. Like everything in this
+    app, actions only append feedback records — artifacts change on
+    apply_feedback, never live.
+    """
+    import pandas as pd
+
+    ids = [c for c in st.session_state.get("detail_ids", []) if c in art.clusters]
+    st.button("← Zurück zur Übersicht", on_click=_back_to_overview)
+    if not ids:
+        st.warning("Keine (existierenden) Cluster ausgewählt.")
+        return
+
+    st.title("Cluster-Detailansicht")
+    for cid in ids:
+        info = art.clusters[cid]
+        senti = (
+            f" · Sentiment {info.sentiment_avg:+.2f}"
+            if info.sentiment_avg is not None else ""
+        )
+        docs = f" in {info.n_documents} Reviews" if info.n_documents is not None else ""
+        st.markdown(
+            f"**{cid} — {info.label}** · {info.size} Einträge{docs}{senti} · "
+            f"Terms: {', '.join(w for w, _ in (tuple(t) for t in info.top_terms[:8]))}"
+        )
+
+    # ── Datentabelle: alle Punkte der ausgewählten Cluster ────────────────
+    mask = np.isin(art.labels, ids)
+    idxs = np.flatnonzero(mask)
+    has_sentiment = art.sentiment_scores is not None
+    df = pd.DataFrame({
+        "cluster": [int(art.labels[i]) for i in idxs],
+        "label": [art.clusters[int(art.labels[i])].label for i in idxs],
+        "text": [texts.get(art.doc_ids[i], "") for i in idxs],
+        "sentiment_score": (
+            [round(float(art.sentiment_scores[i]), 3) for i in idxs]
+            if has_sentiment else None
+        ),
+        "sentiment": (
+            [art.sentiment_labels[i] for i in idxs] if has_sentiment else None
+        ),
+        "stars": [stars.get(art.doc_ids[i]) for i in idxs],
+        "doc_id": [art.doc_ids[i] for i in idxs],
+        **(
+            {"micro_cluster": [int(art.micro_labels[i]) for i in idxs]}
+            if art.micro_labels is not None else {}
+        ),
+    })
+
+    fcol1, fcol2 = st.columns([1, 2])
+    if has_sentiment:
+        senti_filter = fcol1.multiselect(
+            "Sentiment-Filter", ["negative", "neutral", "positive"], default=[]
+        )
+        if senti_filter:
+            df = df[df["sentiment"].isin(senti_filter)]
+    query = fcol2.text_input("Textsuche in diesen Clustern")
+    if query:
+        df = df[df["text"].str.contains(query, case=False, na=False)]
+
+    st.caption(f"{len(df):,} Datenpunkte (sortierbar per Klick auf die Spaltenköpfe)")
+    st.dataframe(df, height=480, width="stretch", hide_index=True)
+
+    # ── Aktionen ──────────────────────────────────────────────────────────
+    st.subheader("Aktionen")
+    if len(ids) > 1:
+        mcol1, mcol2 = st.columns([2, 1])
+        target = mcol1.selectbox(
+            "Alle ausgewählten Cluster mergen in:",
+            ids,
+            format_func=lambda c: f"{c} — {art.clusters[c].label}",
+        )
+        if mcol2.button(f"Merge {len(ids) - 1} → {target}"):
+            for cid in ids:
+                if cid != target:
+                    _record("merge_clusters", cluster_id=cid, merge_into=int(target))
+            st.info(
+                "Merge aufgezeichnet — wird beim nächsten apply_feedback wirksam."
+            )
+
+    for cid in ids:
+        info = art.clusters[cid]
+        c1, c2, c3 = st.columns([3, 1, 1])
+        new_label = c1.text_input(f"Label Cluster {cid}", value=info.label, key=f"dlbl{cid}")
+        if c2.button("Approve / rename", key=f"dapp{cid}"):
+            if new_label != info.label:
+                _record("rename_label", cluster_id=cid, new_label=new_label)
+            else:
+                _record("approve_label", cluster_id=cid)
+        if c3.button("Junk", key=f"djnk{cid}"):
+            _record("mark_junk", cluster_id=cid)
 
 
 def main() -> None:
@@ -93,11 +201,15 @@ def main() -> None:
         st.session_state["session_file"] = session_file(cfg.feedback_dir, art.run_name)
         st.session_state["session_run"] = art.run_name
 
-    texts = _load_texts(
+    texts, stars = _load_unit_data(
         art.manifest.get("sample_size", len(art.doc_ids)),
         art.manifest.get("data_file", "sample_hotels_5k.jsonl"),
         art.manifest.get("unit", "document"),
     )
+
+    if st.session_state.get("view") == "detail":
+        _detail_view(art, texts, stars)
+        return
     if art.manifest.get("unit") == "sentence":
         st.caption(
             "Sentence-level run: each point/sample is one **mention** (sentence); "
@@ -137,6 +249,13 @@ def main() -> None:
             options=art.cluster_ids,
             format_func=lambda c: cluster_names[c],
             key="focus_clusters",
+        )
+        st.button(
+            f"🔍 Detailansicht für Auswahl ({len(focus)} Cluster)" if focus
+            else "🔍 Detailansicht (erst Cluster auswählen)",
+            disabled=not focus,
+            on_click=_open_detail,
+            args=(focus,),
         )
 
         n = len(art.doc_ids)
@@ -226,14 +345,20 @@ def main() -> None:
         for cid in shown_ids:
             info = art.clusters[cid]
             terms = ", ".join(w for w, _ in (tuple(t) for t in info.top_terms[:8]))
-            stars = f" · {info.mean_stars}★" if info.mean_stars is not None else ""
+            stars_str = f" · {info.mean_stars}★" if info.mean_stars is not None else ""
             if info.n_documents is not None:
                 count = f"{info.size} mentions in {info.n_documents} reviews"
             else:
                 count = f"{info.size} docs"
             with st.expander(
-                f"**{cid} — {info.label}** ({count}{stars}) · {info.label_source}"
+                f"**{cid} — {info.label}** ({count}{stars_str}) · {info.label_source}"
             ):
+                st.button(
+                    "🔍 Detailansicht (alle Datenpunkte + Metadaten)",
+                    key=f"det{cid}",
+                    on_click=_open_detail,
+                    args=([cid],),
+                )
                 st.caption(f"Top terms: {terms}")
                 if info.sentiment_avg is not None:
                     d = info.sentiment_dist or {}
