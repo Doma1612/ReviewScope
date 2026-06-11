@@ -177,6 +177,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Embedding model sweep")
     parser.add_argument("--sample-size", type=int, default=5_000)
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--gpus", default="auto",
+                        help="'auto' = claim every idle GPU; or a number, e.g. 2")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--data-file", default=None)
     parser.add_argument("--models", nargs="+", default=None,
@@ -196,8 +198,9 @@ if __name__ == "__main__":
     if args.device == "cuda":
         from ..runtime.gpu import claim_gpu
 
-        claim = claim_gpu(require_gpu=True)
-        overrides.update(device=claim.device, gpu_id=claim.gpu_id)
+        max_gpus = None if args.gpus == "auto" else int(args.gpus)
+        claim = claim_gpu(require_gpu=True, max_gpus=max_gpus)
+        overrides.update(device=claim.device, gpu_ids=claim.gpu_ids)
     cfg = load_config(**overrides)
     cfg.ensure_dirs()
 

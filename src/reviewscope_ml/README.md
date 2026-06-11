@@ -55,11 +55,17 @@ GPUs 0–1. **torch must be 2.7.1+cu126** — newer wheels dropped Pascal
 (sm_61) kernels and fail at the first CUDA op (see requirements.txt).
 Every GPU entry point goes through `runtime.gpu.claim_gpu()`, which
 
-1. queries `nvidia-smi`, picks the **emptiest** device,
-2. pins the process to it via `CUDA_VISIBLE_DEVICES`,
+1. queries `nvidia-smi` and claims **idle devices only** — by default every
+   idle GPU (`--gpus auto`); the embed stage runs data-parallel across them
+   for a near-linear speedup. Busy devices are never touched,
+2. pins the process to the claim via `CUDA_VISIBLE_DEVICES`,
 3. **refuses to start** if no device has ≥ 6 GB free (falls back to CPU or
    tells you to come back later — never squeeze in),
 4. logs the claim and the release.
+
+`--gpus 1` restores the conservative single-device claim; only embedding
+parallelises (UMAP/HDBSCAN are CPU), so multi-GPU shortens the embed stage,
+not the whole run.
 
 ```bash
 # 0) look before you leap (claim_gpu does this too, but look anyway)

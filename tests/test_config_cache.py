@@ -33,6 +33,20 @@ class TestConfig:
         assert cfg.project_root == tmp_path
         assert cfg.cache_dir == tmp_path / "data" / "cache"
 
+    def test_gpu_ids_pinning(self, monkeypatch):
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        load_config(device="cuda", gpu_ids=[2, 3])
+        import os
+
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "2,3"
+
+    def test_gpu_ids_takes_precedence_over_gpu_id(self, monkeypatch):
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        load_config(device="cuda", gpu_id=1, gpu_ids=[3])
+        import os
+
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
+
     def test_cpu_thread_env_pinning(self, monkeypatch):
         for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS"):
             monkeypatch.delenv(var, raising=False)

@@ -63,7 +63,10 @@ class PipelineConfig:
     # share. Check `nvidia-smi` first and set gpu_id to the emptiest device,
     # or use reviewscope_ml.runtime.gpu.claim_gpu() to do it programmatically.
     gpu_id: Optional[int] = None     # physical GPU index to claim (cuda only)
-    cuda_mem_fraction: float = 0.5   # hard cap on our share of that GPU's VRAM
+    # Multiple *idle* devices may be claimed for the data-parallel embed stage
+    # (claim_gpu(max_gpus=...) decides which); takes precedence over gpu_id.
+    gpu_ids: Optional[list[int]] = None
+    cuda_mem_fraction: float = 0.5   # hard cap on our share of each claimed GPU's VRAM
     cpu_threads: int = 4             # cap CPU threads (UMAP/HDBSCAN/torch on 32-core box)
 
     # ── Internal: project root resolved once at construction ──────────────
@@ -83,10 +86,15 @@ class PipelineConfig:
         """
         self._project_root = Path(self._project_root)
 
-        if self.device == "cuda" and self.gpu_id is not None:
+        if self.device == "cuda":
             # Make every other GPU invisible to this process: we physically
-            # cannot touch our neighbours' devices, and ours becomes "cuda:0".
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
+            # cannot touch our neighbours' devices; ours become "cuda:0..k-1".
+            if self.gpu_ids:
+                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                    str(i) for i in self.gpu_ids
+                )
+            elif self.gpu_id is not None:
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
 
         # Be a good citizen on the shared 32-core CPU (UMAP/HDBSCAN/BLAS/numba).
         for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
@@ -109,8 +117,10 @@ class PipelineConfig:
         torch.set_num_threads(self.cpu_threads)
 
         if self.device == "cuda" and torch.cuda.is_available():
-            # After CUDA_VISIBLE_DEVICES pinning, our GPU is index 0.
-            torch.cuda.set_per_process_memory_fraction(self.cuda_mem_fraction, 0)
+            # After CUDA_VISIBLE_DEVICES pinning, our GPUs are indices 0..k-1;
+            # cap our VRAM share on every one of them.
+            for i in range(torch.cuda.device_count()):
+                torch.cuda.set_per_process_memory_fraction(self.cuda_mem_fraction, i)
             return "cuda"
         return "cpu"
 

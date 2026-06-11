@@ -87,46 +87,66 @@ def query_gpus(timeout_s: float = 10.0) -> list[GpuStatus]:
     return gpus
 
 
+def pick_idle_gpus(
+    gpus: Optional[list[GpuStatus]] = None,
+    min_free_mb: int = 6_000,
+    max_gpus: Optional[int] = None,
+) -> list[int]:
+    """
+    Return the indices of claimable GPUs, emptiest first.
+
+    A device qualifies only if it is not busy (see :meth:`GpuStatus.is_busy`)
+    AND has at least *min_free_mb* free — we scale onto *idle* devices, never
+    next to a neighbour's job. ``max_gpus=None`` means "all idle devices"
+    (the data-parallel embed stage speeds up near-linearly); ``max_gpus=1``
+    is the conservative single-device claim.
+    """
+    if gpus is None:
+        gpus = query_gpus()
+    candidates = sorted(
+        (g for g in gpus if not g.is_busy and g.memory_free_mb >= min_free_mb),
+        key=lambda g: g.memory_free_mb,
+        reverse=True,
+    )
+    if max_gpus is not None:
+        candidates = candidates[:max_gpus]
+    return [g.index for g in candidates]
+
+
 def pick_freest_gpu(
     gpus: Optional[list[GpuStatus]] = None,
     min_free_mb: int = 6_000,
 ) -> Optional[int]:
-    """
-    Return the index of the emptiest GPU, or None if none qualifies.
-
-    A device qualifies only if it is not busy (see :meth:`GpuStatus.is_busy`)
-    AND has at least *min_free_mb* free. The default of 6 GB is half a TITAN X:
-    with ``cuda_mem_fraction=0.5`` that is exactly the slice we may claim, so
-    anything less means we would be competing with a neighbour for memory.
-    """
-    if gpus is None:
-        gpus = query_gpus()
-    candidates = [g for g in gpus if not g.is_busy and g.memory_free_mb >= min_free_mb]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda g: g.memory_free_mb).index
+    """Single emptiest claimable GPU, or None (see :func:`pick_idle_gpus`)."""
+    idle = pick_idle_gpus(gpus, min_free_mb=min_free_mb, max_gpus=1)
+    return idle[0] if idle else None
 
 
 class GpuClaim:
     """
-    A logged, released claim on a single GPU (or an explicit CPU fallback).
+    A logged, released claim on one or more idle GPUs (or a CPU fallback).
 
     Use as a context manager so release happens even on crashes::
 
-        with claim_gpu() as claim:
-            cfg = load_config(device=claim.device, gpu_id=claim.gpu_id, ...)
+        with claim_gpu(max_gpus=None) as claim:   # all idle devices
+            cfg = load_config(device=claim.device, gpu_ids=claim.gpu_ids, ...)
             ...
     """
 
-    def __init__(self, gpu_id: Optional[int], reason: str):
-        self.gpu_id = gpu_id
+    def __init__(self, gpu_ids: list[int], reason: str):
+        self.gpu_ids = gpu_ids
         self.reason = reason
         self.claimed_at = datetime.now(timezone.utc)
         self.released_at: Optional[datetime] = None
 
     @property
+    def gpu_id(self) -> Optional[int]:
+        """First claimed device — kept for single-GPU call sites."""
+        return self.gpu_ids[0] if self.gpu_ids else None
+
+    @property
     def device(self) -> str:
-        return "cpu" if self.gpu_id is None else "cuda"
+        return "cpu" if not self.gpu_ids else "cuda"
 
     def __enter__(self) -> "GpuClaim":
         return self
@@ -138,25 +158,26 @@ class GpuClaim:
         if self.released_at is not None:
             return
         self.released_at = datetime.now(timezone.utc)
-        if self.gpu_id is not None:
+        if self.gpu_ids:
             release_cuda_memory()
             held = (self.released_at - self.claimed_at).total_seconds()
             logger.info(
-                "released GPU %d at %s (held %.0fs)",
-                self.gpu_id, self.released_at.isoformat(timespec="seconds"), held,
+                "released GPU(s) %s at %s (held %.0fs)",
+                self.gpu_ids, self.released_at.isoformat(timespec="seconds"), held,
             )
 
 
 def claim_gpu(
     require_gpu: bool = False,
     min_free_mb: int = 6_000,
+    max_gpus: Optional[int] = 1,
 ) -> GpuClaim:
     """
-    Select and pin the freest GPU; fall back to CPU if all are busy.
+    Select and pin idle GPU(s); fall back to CPU if all are busy.
 
     Sets ``CUDA_VISIBLE_DEVICES`` immediately, so call this BEFORE importing
-    torch or anything that initialises CUDA. The selected id must still be
-    passed to ``load_config(gpu_id=...)`` so the VRAM fraction cap applies.
+    torch or anything that initialises CUDA. The selected ids must still be
+    passed to ``load_config(gpu_ids=...)`` so the VRAM fraction cap applies.
 
     Parameters
     ----------
@@ -164,12 +185,15 @@ def claim_gpu(
                   Use for stages where a CPU run would silently take hours;
                   the right reaction to a full box is to come back later or
                   run a smaller sample — not to squeeze in.
+    max_gpus :    how many idle devices to claim. 1 = conservative default;
+                  None = every idle device (the embed stage parallelises
+                  across them). Busy devices are never claimed regardless.
     """
     gpus = query_gpus()
     if not gpus:
         if require_gpu:
             raise RuntimeError("No NVIDIA GPU visible (nvidia-smi unavailable).")
-        claim = GpuClaim(None, "no NVIDIA driver — CPU fallback")
+        claim = GpuClaim([], "no NVIDIA driver — CPU fallback")
         logger.info("GPU claim: %s", claim.reason)
         return claim
 
@@ -180,23 +204,24 @@ def claim_gpu(
             g.utilization_pct, "  [busy]" if g.is_busy else "",
         )
 
-    chosen = pick_freest_gpu(gpus, min_free_mb=min_free_mb)
-    if chosen is None:
+    chosen = pick_idle_gpus(gpus, min_free_mb=min_free_mb, max_gpus=max_gpus)
+    if not chosen:
         msg = (
             "all GPUs busy or below the free-memory floor "
             f"({min_free_mb} MB) — refusing to squeeze in next to other users"
         )
         if require_gpu:
             raise RuntimeError(f"GPU required but {msg}. Retry later or reduce sample_size.")
-        claim = GpuClaim(None, f"{msg}; CPU fallback")
+        claim = GpuClaim([], f"{msg}; CPU fallback")
         logger.warning("GPU claim: %s", claim.reason)
         return claim
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(chosen)
-    claim = GpuClaim(chosen, "freest device")
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in chosen)
+    claim = GpuClaim(chosen, "idle devices")
     logger.info(
-        "claimed GPU %d at %s (CUDA_VISIBLE_DEVICES=%d)",
-        chosen, claim.claimed_at.isoformat(timespec="seconds"), chosen,
+        "claimed GPU(s) %s at %s (CUDA_VISIBLE_DEVICES=%s)",
+        chosen, claim.claimed_at.isoformat(timespec="seconds"),
+        os.environ["CUDA_VISIBLE_DEVICES"],
     )
     return claim
 

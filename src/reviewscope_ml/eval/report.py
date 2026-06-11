@@ -315,8 +315,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the four-pipeline comparison")
     parser.add_argument("--sample-size", type=int, default=1_000)
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--gpus", default="auto",
+                        help="'auto' = claim every idle GPU (embed stage runs "
+                             "data-parallel across them); or a number, e.g. 2. "
+                             "Busy GPUs are never claimed either way")
     parser.add_argument("--batch-size", type=int, default=None,
-                        help="embedding batch size (suggested: 64 cpu, 256 cuda)")
+                        help="embedding batch size PER GPU (suggested: 64 cpu, 256 cuda)")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(STABILITY_SEEDS))
     parser.add_argument("--no-llm", action="store_true",
                         help="skip Ollama labeling (term-fallback labels)")
@@ -345,11 +349,12 @@ if __name__ == "__main__":
         overrides["batch_size"] = 64
 
     if args.device == "cuda":
-        # Shared-box etiquette: pick the freest GPU programmatically and pin.
+        # Shared-box etiquette: claim idle devices only, programmatically.
         from ..runtime.gpu import claim_gpu
 
-        claim = claim_gpu(require_gpu=True)
-        overrides.update(device=claim.device, gpu_id=claim.gpu_id)
+        max_gpus = None if args.gpus == "auto" else int(args.gpus)
+        claim = claim_gpu(require_gpu=True, max_gpus=max_gpus)
+        overrides.update(device=claim.device, gpu_ids=claim.gpu_ids)
     cfg = load_config(**overrides)
 
     # Persist the full progress log next to the artifacts: long runs are

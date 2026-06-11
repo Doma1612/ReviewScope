@@ -104,6 +104,21 @@ class SentenceTransformerEmbedder:
                 release_cuda_memory()
                 logger.warning("CUDA OOM at batch %d — retrying with %d", batch * 2, batch)
 
+    def _multi_devices(self) -> Optional[list[str]]:
+        """All visible CUDA devices, when there is more than one.
+
+        CUDA_VISIBLE_DEVICES is already pinned to *idle* devices only (the
+        claim refuses busy ones), so spreading the encode across everything
+        visible is safe by construction. sentence-transformers >= 5 spawns
+        one worker process per device and splits the batch stream.
+        """
+        if self.device != "cuda" or self._is_instructor:
+            return None
+        import torch
+
+        n = torch.cuda.device_count()
+        return [f"cuda:{i}" for i in range(n)] if n > 1 else None
+
     def _encode_once(self, model, texts: list[str], batch: int) -> np.ndarray:
         instr_text = INSTRUCTIONS[self.instruction]
         if self._is_instructor and instr_text:
@@ -116,6 +131,10 @@ class SentenceTransformerEmbedder:
                       show_progress_bar=self.show_progress, convert_to_numpy=True)
         if instr_text and not self._is_instructor:
             kwargs["prompt"] = instr_text
+        devices = self._multi_devices()
+        if devices:
+            logger.info("data-parallel encode across %s", devices)
+            kwargs["device"] = devices
         return np.asarray(model.encode(texts, **kwargs))
 
     def close(self) -> None:
