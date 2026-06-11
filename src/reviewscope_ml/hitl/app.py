@@ -119,7 +119,7 @@ def main() -> None:
         )
         fig.update_traces(marker=dict(size=4))
         fig.update_layout(height=600, showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         st.subheader("Sign-off")
         st.caption(

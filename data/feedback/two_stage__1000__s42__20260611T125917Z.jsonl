@@ -1,0 +1,4 @@
+{"run_name": "two_stage__1000__s42", "reviewer": "demo-reviewer", "action": "rename_label", "timestamp": "2026-06-11T12:59:17+00:00", "cluster_id": 0, "new_label": "Front desk & check-in experience"}
+{"run_name": "two_stage__1000__s42", "reviewer": "demo-reviewer", "action": "approve_label", "timestamp": "2026-06-11T12:59:17+00:00", "cluster_id": 1}
+{"run_name": "two_stage__1000__s42", "reviewer": "demo-reviewer", "action": "merge_clusters", "timestamp": "2026-06-11T12:59:17+00:00", "cluster_id": 3, "merge_into": 2, "note": "same theme, split by phrasing"}
+{"run_name": "two_stage__1000__s42", "reviewer": "demo-reviewer", "action": "split_cluster", "timestamp": "2026-06-11T12:59:17+00:00", "cluster_id": 4, "note": "mixes two distinct complaints"}

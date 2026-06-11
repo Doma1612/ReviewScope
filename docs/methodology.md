@@ -37,6 +37,14 @@ clusters that are distinguishable *by topic* rather than by cuisine.
   over-represents whichever cities come first in the dump. Acceptable for
   comparing pipelines against each other (all candidates see the same bias),
   not acceptable for claims about Yelp hotels in general.
+- **Category co-occurrence leakage.** "Hotels"-tagged Yelp businesses are
+  frequently co-tagged (restaurants, nightlife, venues), so the benchmark
+  contains substantial restaurant/bar content — visible in the 1k smoke run,
+  where a finalist's largest cluster is about oysters on Bourbon Street, not
+  rooms. The qualitative inspection caught this; no metric did. Either accept
+  it (it is what "hotel business reviews" really are) or tighten the filter
+  to businesses tagged *only* Hotels — a decision to revisit before the 50k
+  GPU benchmark.
 - **Minimum length filter.** Dropping < 50-char reviews removes exactly the
   documents that are hardest to embed and cluster. Production data will
   contain them; the preprocess Celery step replicates the filter, but that
