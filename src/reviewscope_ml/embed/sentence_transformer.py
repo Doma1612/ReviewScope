@@ -129,6 +129,7 @@ def embed_with_cache(
     cfg: PipelineConfig,
     embedder: SentenceTransformerEmbedder,
     texts: list[str],
+    prefix_extra: str = "",
 ) -> tuple[np.ndarray, float]:
     """
     Encode *texts* through the on-disk embedding cache.
@@ -147,8 +148,9 @@ def embed_with_cache(
         len(texts),
         instruction=embedder.instruction,
         # hotels keeps the historical bare filenames; other corpora must not
-        # collide with them at the same sample size
-        prefix="" if corpus == "hotels" else f"{corpus}__",
+        # collide with them at the same sample size. prefix_extra namespaces
+        # non-document units (e.g. "sent__" for sentence segments).
+        prefix=("" if corpus == "hotels" else f"{corpus}__") + prefix_extra,
     )
     if path.exists():
         return load_array(path), 0.0

@@ -42,9 +42,15 @@ def _load_run(run_dir: str):
 
 
 @st.cache_resource
-def _load_texts(sample_size: int, data_file: str):
+def _load_texts(sample_size: int, data_file: str, unit: str):
     cfg = load_config(sample_size=sample_size, data_file=data_file)
     reviews = load_benchmark(cfg)
+    if unit == "sentence":
+        # Segmentation is deterministic, so segment ids in the artifact
+        # resolve against a re-derived segment set.
+        from reviewscope_ml.data.segment import segment_reviews
+
+        reviews = segment_reviews(reviews)
     return dict(zip(reviews.ids, reviews.raw_texts))
 
 
@@ -90,7 +96,13 @@ def main() -> None:
     texts = _load_texts(
         art.manifest.get("sample_size", len(art.doc_ids)),
         art.manifest.get("data_file", "sample_hotels_5k.jsonl"),
+        art.manifest.get("unit", "document"),
     )
+    if art.manifest.get("unit") == "sentence":
+        st.caption(
+            "Sentence-level run: each point/sample is one **mention** (sentence); "
+            "cluster sizes show mentions and distinct reviews."
+        )
 
     st.title(f"Run: {art.run_name}")
     m = art.metrics
@@ -144,8 +156,12 @@ def main() -> None:
             info = art.clusters[cid]
             terms = ", ".join(w for w, _ in (tuple(t) for t in info.top_terms[:8]))
             stars = f" · {info.mean_stars}★" if info.mean_stars is not None else ""
+            if info.n_documents is not None:
+                count = f"{info.size} mentions in {info.n_documents} reviews"
+            else:
+                count = f"{info.size} docs"
             with st.expander(
-                f"**{cid} — {info.label}** ({info.size} docs{stars}) · {info.label_source}"
+                f"**{cid} — {info.label}** ({count}{stars}) · {info.label_source}"
             ):
                 st.caption(f"Top terms: {terms}")
                 if info.summary:

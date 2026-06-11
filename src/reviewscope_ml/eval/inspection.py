@@ -56,8 +56,12 @@ def render_inspection(art: RunArtifacts, reviews: ReviewSet) -> str:
         info = art.clusters[cid]
         terms = ", ".join(w for w, _ in (tuple(t) for t in info.top_terms[:8]))
         stars = f" · avg {info.mean_stars}★" if info.mean_stars is not None else ""
+        if info.n_documents is not None:
+            count = f"{info.size} mentions in {info.n_documents} reviews"
+        else:
+            count = f"{info.size} docs"
         lines += [
-            f"### Cluster {cid} — “{info.label}” ({info.size} docs{stars}, label: {info.label_source})",
+            f"### Cluster {cid} — “{info.label}” ({count}{stars}, label: {info.label_source})",
             f"**Top terms:** {terms}",
             "",
         ]

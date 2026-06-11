@@ -87,6 +87,21 @@ def run_pipeline(
     if reviews is None:
         reviews = load_benchmark(cfg)
 
+    # Sentence-level: the working unit becomes the mention (segment); the
+    # review stays the container. Everything downstream operates on `units`;
+    # per-review statistics are deduplicated via the segment ids' parent part.
+    is_sentence = spec.variant == "sentence_level"
+    if is_sentence:
+        from ..data.segment import segment_reviews
+
+        units = segment_reviews(reviews)
+        logger.info(
+            "sentence segmentation: %d reviews -> %d segments",
+            len(reviews), len(units),
+        )
+    else:
+        units = reviews
+
     monitor = StageMonitor()
 
     # ── Embed (cached; model released immediately after) ──────────────────
@@ -98,7 +113,10 @@ def run_pipeline(
             batch_size=cfg.batch_size,
         )
         try:
-            embeddings, embed_s = embed_with_cache(cfg, embedder, reviews.texts)
+            embeddings, embed_s = embed_with_cache(
+                cfg, embedder, units.texts,
+                prefix_extra="sent__" if is_sentence else "",
+            )
         finally:
             embedder.close()
 
@@ -107,7 +125,7 @@ def run_pipeline(
     micro_to_macro = None
     if spec.variant == "bertopic":
         with monitor.stage("reduce_cluster"):
-            labels, reduced = _bertopic_fit(cfg, spec, reviews, embeddings, seed)
+            labels, reduced = _bertopic_fit(cfg, spec, units, embeddings, seed)
     else:
         with monitor.stage("reduce"):
             reduced = _reduce_cached(cfg, spec, embeddings, seed)
@@ -123,16 +141,16 @@ def run_pipeline(
 
     # ── Represent ─────────────────────────────────────────────────────────
     with monitor.stage("represent"):
-        top_terms = ctfidf_terms(reviews.texts, labels)
-        tfidf_terms = tfidf_top_terms(reviews.texts, labels)
-        word_freqs = word_frequencies(reviews.texts, labels)
+        top_terms = ctfidf_terms(units.texts, labels)
+        tfidf_terms = tfidf_top_terms(units.texts, labels)
+        word_freqs = word_frequencies(units.texts, labels)
 
     # ── Label ─────────────────────────────────────────────────────────────
     with monitor.stage("label"):
         if label_clusters:
             labeler = OllamaLabeler(model=spec.label_model)
             cluster_labels = labeler.label_clusters(
-                reviews.texts, labels, embeddings, top_terms
+                units.texts, labels, embeddings, top_terms
             )
         else:
             from ..label import term_fallback_label
@@ -150,27 +168,47 @@ def run_pipeline(
         metrics = evaluate_labels(
             reduced,
             labels,
-            reviews.texts,
-            reviews.stars,
+            units.texts,
+            units.stars,
             runtime_s=pipeline_s,
             compute_coh=compute_coherence,
             seed=seed,
         )
+        if is_sentence:
+            # Mention-weighted entropy lets one rambling review dominate a
+            # cluster's star profile; recompute on distinct (review, cluster)
+            # pairs so Tier 3 counts customers, not sentences.
+            from ..core.metrics import compute_rating_entropy
+
+            dstars, dlabels = _dedup_parent_stats(units.ids, units.stars, labels)
+            metrics["rating_entropy"] = compute_rating_entropy(dstars, dlabels)
         metrics["failure_flags"] = failure_flags(metrics, top_terms)
         metrics["seed"] = seed
+        metrics["unit"] = "sentence" if is_sentence else "document"
 
     # ── Assemble artifacts ────────────────────────────────────────────────
+    from ..data.segment import parent_id
+
     rng = np.random.default_rng(seed)
     clusters: dict[int, ClusterInfo] = {}
     for cid in sorted(int(c) for c in set(labels) if c != -1):
         mask = labels == cid
-        member_ids = [reviews.ids[i] for i in np.flatnonzero(mask)]
+        member_ids = [units.ids[i] for i in np.flatnonzero(mask)]
         sample = list(
             rng.choice(member_ids, size=min(N_SAMPLE_DOCS, len(member_ids)), replace=False)
         )
         cl = cluster_labels[cid]
-        member_stars = reviews.stars[mask]
-        member_stars = member_stars[~np.isnan(member_stars)]
+        if is_sentence:
+            # Customers, not mentions: dedupe stars per parent review.
+            by_parent: dict[str, float] = {}
+            for i in np.flatnonzero(mask):
+                by_parent.setdefault(parent_id(units.ids[i]), float(units.stars[i]))
+            member_stars = np.array([s for s in by_parent.values() if not np.isnan(s)])
+            n_documents = len(by_parent)
+        else:
+            member_stars = units.stars[mask]
+            member_stars = member_stars[~np.isnan(member_stars)]
+            n_documents = None
         clusters[cid] = ClusterInfo(
             cluster_id=cid,
             size=int(mask.sum()),
@@ -186,6 +224,7 @@ def run_pipeline(
             micro_cluster_ids=sorted(
                 m for m, g in (micro_to_macro or {}).items() if g == cid
             ),
+            n_documents=n_documents,
         )
 
     manifest = {
@@ -194,6 +233,8 @@ def run_pipeline(
         "spec": spec.to_dict(),
         "sample_size": cfg.sample_size,
         "data_file": cfg.data_file,
+        "unit": "sentence" if is_sentence else "document",
+        "n_units": len(units),
         "seed": seed,
         "device": cfg.device,
         "stages": monitor.records,
@@ -203,7 +244,7 @@ def run_pipeline(
     art = RunArtifacts(
         run_name=run_name,
         manifest=manifest,
-        doc_ids=reviews.ids,
+        doc_ids=units.ids,
         labels=labels,
         coords_2d=coords_2d,
         coords_3d=coords_3d,
@@ -212,6 +253,8 @@ def run_pipeline(
         micro_labels=micro_labels,
     )
     save_run(run_dir, art)
+    if is_sentence:
+        _write_doc_membership(run_dir, units.ids, labels)
     _log_to_results_csv(cfg, spec, embeddings.shape[1], embed_s, metrics)
     logger.info("run %s complete: %d clusters, flags: %s",
                 run_name, metrics["n_clusters"], metrics["failure_flags"] or "none")
@@ -234,6 +277,12 @@ def cluster_labels_only(
     if reviews is None:
         reviews = load_benchmark(cfg)
 
+    is_sentence = spec.variant == "sentence_level"
+    if is_sentence:
+        from ..data.segment import segment_reviews
+
+        reviews = segment_reviews(reviews)
+
     embedder = SentenceTransformerEmbedder(
         spec.embedding_model,
         instruction=spec.instruction,
@@ -241,7 +290,10 @@ def cluster_labels_only(
         batch_size=cfg.batch_size,
     )
     try:
-        embeddings, _ = embed_with_cache(cfg, embedder, reviews.texts)
+        embeddings, _ = embed_with_cache(
+            cfg, embedder, reviews.texts,
+            prefix_extra="sent__" if is_sentence else "",
+        )
     finally:
         embedder.close()
 
@@ -249,7 +301,7 @@ def cluster_labels_only(
         path = clustering_path(
             cfg.cache_dir, "bertopic",
             f"mts{spec.cluster.get('min_topic_size', 10)}",
-            f"{_seed_prefix(cfg, seed)}{make_slug(spec.embedding_model)}",
+            f"{_seed_prefix(cfg, spec, seed)}{make_slug(spec.embedding_model)}",
             cfg.sample_size,
         )
         if path.exists():
@@ -270,10 +322,67 @@ def _corpus_prefix(cfg: PipelineConfig) -> str:
     return "" if cfg.corpus_slug == "hotels" else f"{cfg.corpus_slug}__"
 
 
-def _seed_prefix(cfg: PipelineConfig, seed: int, base: str = "") -> str:
-    """Distinct cache namespace for corpus + non-default seeds (stability runs)."""
-    corpus = _corpus_prefix(cfg)
-    return f"{corpus}{base}" if seed == cfg.seed else f"{corpus}s{seed}_{base}"
+def _unit_prefix(spec: PipelineSpec) -> str:
+    """Sentence-level arrays must never collide with document-level caches."""
+    return "sent__" if spec.variant == "sentence_level" else ""
+
+
+def _seed_prefix(cfg: PipelineConfig, spec: PipelineSpec, seed: int, base: str = "") -> str:
+    """Distinct cache namespace for corpus + unit + non-default seeds."""
+    ns = f"{_corpus_prefix(cfg)}{_unit_prefix(spec)}"
+    return f"{ns}{base}" if seed == cfg.seed else f"{ns}s{seed}_{base}"
+
+
+def _dedup_parent_stats(
+    ids: list[str], stars: np.ndarray, labels: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """One (star, label) pair per distinct (parent review, cluster)."""
+    from ..data.segment import parent_id
+
+    seen: set[tuple[str, int]] = set()
+    out_stars: list[float] = []
+    out_labels: list[int] = []
+    for i, seg_id in enumerate(ids):
+        label = int(labels[i])
+        if label == -1:
+            continue
+        key = (parent_id(seg_id), label)
+        if key in seen:
+            continue
+        seen.add(key)
+        out_stars.append(float(stars[i]))
+        out_labels.append(label)
+    return np.array(out_stars), np.array(out_labels)
+
+
+def _write_doc_membership(run_dir, segment_ids: list[str], labels: np.ndarray) -> None:
+    """
+    Per-review membership map for sentence-level runs:
+    ``{review_id: {"primary": cid, "clusters": {cid: share}, "n_segments": n}}``.
+
+    ``share`` is the fraction of the review's segments in that cluster; the
+    primary cluster (most segments, noise never wins over a real cluster) is
+    what the app's one-cluster-per-document field should use.
+    """
+    from collections import Counter, defaultdict
+
+    from ..data.segment import parent_id
+
+    per_doc: dict[str, Counter] = defaultdict(Counter)
+    for seg_id, label in zip(segment_ids, labels):
+        per_doc[parent_id(seg_id)][int(label)] += 1
+
+    membership = {}
+    for doc, counts in per_doc.items():
+        n = sum(counts.values())
+        real = {c: k for c, k in counts.items() if c != -1}
+        primary = max(real, key=real.get) if real else -1
+        membership[doc] = {
+            "primary": primary,
+            "clusters": {str(c): round(k / n, 4) for c, k in counts.items()},
+            "n_segments": n,
+        }
+    (run_dir / "doc_membership.json").write_text(json.dumps(membership, indent=1))
 
 
 def _reduce_cached(
@@ -290,7 +399,7 @@ def _reduce_cached(
         r["metric"],
         cfg.sample_size,
         instruction=spec.instruction,
-        prefix=_seed_prefix(cfg, seed, "pca50_" if r.get("pca_components") else ""),
+        prefix=_seed_prefix(cfg, spec, seed, "pca50_" if r.get("pca_components") else ""),
     )
     if path.exists():
         return load_array(path)
@@ -300,7 +409,7 @@ def _reduce_cached(
 
 
 def _make_backend(spec: PipelineSpec, seed: int):
-    if spec.variant == "custom_hdbscan":
+    if spec.variant in ("custom_hdbscan", "sentence_level"):
         return HDBSCANBackend(**spec.cluster)
     if spec.variant == "flat_agglomerative":
         return AgglomerativeBackend(**spec.cluster)
@@ -314,7 +423,7 @@ def _cluster_cached(
 ):
     backend = _make_backend(spec, seed)
     umap_slug = (
-        f"{_seed_prefix(cfg, seed)}{make_slug(spec.embedding_model)}"
+        f"{_seed_prefix(cfg, spec, seed)}{make_slug(spec.embedding_model)}"
         f"__{make_slug(spec.instruction)}"
         f"__nc{spec.reducer['n_components']}__nn{spec.reducer['n_neighbors']}"
     )
@@ -360,7 +469,7 @@ def _viz_cached(
         "cosine",
         cfg.sample_size,
         instruction=spec.instruction,
-        prefix=_seed_prefix(cfg, seed, "viz_" if n_components == 2 else "viz3d_"),
+        prefix=_seed_prefix(cfg, spec, seed, "viz_" if n_components == 2 else "viz3d_"),
     )
     if path.exists():
         return load_array(path)

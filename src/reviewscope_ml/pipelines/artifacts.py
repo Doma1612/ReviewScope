@@ -45,6 +45,9 @@ class ClusterInfo:
     mean_stars: Optional[float] = None
     prompt_hash: Optional[str] = None
     micro_cluster_ids: list[int] = field(default_factory=list)  # two-stage only
+    # Sentence-level runs: `size` counts mentions (segments); this counts the
+    # distinct parent reviews, deduplicated. None for document-level runs.
+    n_documents: Optional[int] = None
 
 
 @dataclass

@@ -13,13 +13,23 @@ b. ``custom_hdbscan``     — our embed -> UMAP -> HDBSCAN with the parameters
 c. ``flat_agglomerative`` — same embed/reduce, agglomerative (ward) cut.
 d. ``two_stage``          — fine HDBSCAN micro-clusters, agglomerative merge
                             of micro centroids into macro topics.
+e. ``sentence_level``     — reviews are split into sentences before embedding;
+                            the unit of clustering becomes the *mention*, so
+                            multi-aspect reviews stop averaging their aspects
+                            into one vector and clusters become aspect themes.
+                            Cluster size counts mentions; distinct-review
+                            counts and the per-review membership map are in
+                            the artifacts (``n_documents``,
+                            ``doc_membership.json``).
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-VARIANTS = ("bertopic", "custom_hdbscan", "flat_agglomerative", "two_stage")
+VARIANTS = (
+    "bertopic", "custom_hdbscan", "flat_agglomerative", "two_stage", "sentence_level",
+)
 
 # Notebook 04 decision (5k hotel benchmark): mpnet without instruction beat the
 # instruction-tuned candidates once coherence/entropy were taken into account.
@@ -71,5 +81,11 @@ def default_specs() -> dict[str, PipelineSpec]:
         "two_stage": PipelineSpec(
             variant="two_stage",
             cluster={"micro_min_cluster_size": 5, "micro_min_samples": 3, "n_macro": None},
+        ),
+        # Sentence level multiplies the point count ~6x, so the minimum
+        # cluster size scales up with it; a heuristic, reviewable via HITL.
+        "sentence_level": PipelineSpec(
+            variant="sentence_level",
+            cluster={"min_cluster_size": 25, "min_samples": 10},
         ),
     }

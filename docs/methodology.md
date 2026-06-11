@@ -152,6 +152,45 @@ artifacts and adds stability + noise-fairness, which the notebooks lacked.
   issue and additionally assumes roughly isotropic clusters; its k is fixed
   by hand. It earns its slot as the no-noise contrast candidate.
 
+## 5b. Sentence-level (aspect) clustering — the fifth variant
+
+**Decision.** ``sentence_level`` splits each review into sentence segments
+(regex splitter, segments < 20 chars dropped, > 600 chars hard-wrapped) and
+clusters the segments. Motivation: the median review has 8 sentences covering
+several aspects; one embedding per review averages those aspects into one
+vector, and ~10% of reviews are silently truncated at the embedder's token
+window. At sentence level the clustered unit is the *mention* and both
+problems disappear.
+
+**Counting semantics** (the part that is easy to get wrong):
+
+- Cluster ``size`` counts **mentions**; ``n_documents`` counts **distinct
+  parent reviews** — both are stored and displayed together ("3,180 mentions
+  in 2,410 reviews"). Anything that should reflect customers rather than
+  verbosity (per-cluster mean stars, Tier-3 rating entropy) is computed on
+  deduplicated (review, cluster) pairs, so one rambling reviewer cannot
+  dominate a cluster's star profile.
+- ``doc_membership.json`` maps every review to its cluster shares and a
+  *primary* cluster (most mentions; noise never outranks a real cluster) —
+  this is what fills the app's one-cluster-per-document field.
+
+**Weaknesses.**
+
+- The regex splitter mis-handles abbreviations; accepted as noise, swap in a
+  proper sentence splitter behind ``data/segment.py`` if inspection shows it
+  matters.
+- Short evaluative sentences carry sentiment but no topic; the minimum-length
+  filter removes the worst, but expect one or two **generic praise/complaint
+  clusters** — that is normal at sentence level and exactly what the HITL
+  ``mark_junk`` action is for. Watch Tier 3 on these.
+- ~6x more points: the seeded (single-threaded) UMAP fit dominates runtime at
+  50k documents (~300k segments). Run it deliberately, not casually.
+- Metrics are computed on segments, so Tier-1/Tier-2 numbers are **not
+  directly comparable** to the document-level variants — same corpus,
+  different unit. Only the entropy (deduplicated) and the human inspection
+  compare fairly across the unit boundary; the report ranks them together
+  regardless, which is a known limitation to keep in mind when reading it.
+
 ## 6. Sentiment/topic entanglement (why Tier 3 exists)
 
 Review embeddings encode sentiment as strongly as topic — angry reviews

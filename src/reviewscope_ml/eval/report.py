@@ -221,9 +221,21 @@ def _render_report(
         "",
     ]
 
+    # Sentence-level artifacts store segment ids; rebuild the (deterministic)
+    # segment set so inspection shows the actual clustered sentences.
+    seg_reviews = None
     for name in finalists:
-        lines += [render_inspection(arts[name], reviews), ""]
-        lines += [render_intruder_test(arts[name], reviews), ""]
+        art = arts[name]
+        if art.manifest.get("unit") == "sentence":
+            if seg_reviews is None:
+                from ..data.segment import segment_reviews
+
+                seg_reviews = segment_reviews(reviews)
+            unit_set = seg_reviews
+        else:
+            unit_set = reviews
+        lines += [render_inspection(art, unit_set), ""]
+        lines += [render_intruder_test(art, unit_set), ""]
 
     lines += [
         "---",
@@ -317,6 +329,11 @@ if __name__ == "__main__":
     parser.add_argument("--data-file", default=None,
                         help="benchmark JSONL in data/cache for non-hotel "
                              "categories (e.g. sample_automotive_50k.jsonl)")
+    parser.add_argument("--variants", nargs="+", default=None,
+                        choices=list(default_specs()),
+                        help="subset of pipeline variants to run (default: all). "
+                             "Note: sentence_level multiplies points ~6x — its "
+                             "UMAP fit dominates runtime at 50k")
     args = parser.parse_args()
 
     overrides = {"sample_size": args.sample_size, "device": args.device}
@@ -354,8 +371,13 @@ if __name__ == "__main__":
     logging.getLogger().addHandler(handler)
     logger.info("logging to %s", log_path)
 
+    specs = default_specs()
+    if args.variants:
+        specs = {k: v for k, v in specs.items() if k in args.variants}
+
     run_comparison(
         cfg,
+        specs=specs,
         seeds=args.seeds,
         label_clusters=not args.no_llm,
         embedding_model=args.embedding_model,

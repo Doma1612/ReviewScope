@@ -12,14 +12,14 @@ pytest                      # pure-logic tests, no GPU, no model downloads
 
 | Module | Celery step (app spec) | Notes |
 |---|---|---|
-| `data/` (ingest, preprocess) | 1 Ingest, 2 Preprocess | benchmark builder + the "minimal" preprocessing decided in nb 02 |
-| `embed/` | 3 Embed | sentence-transformers (+instruction prompts), disk-cached, device-aware |
+| `data/` (ingest, preprocess, segment) | 1 Ingest, 2 Preprocess | benchmark builder (any Yelp category), "minimal" preprocessing (nb 02), sentence segmentation for aspect-level clustering |
+| `embed/` | 3 Embed | sentence-transformers (+instruction prompts), disk-cached, device-aware, CUDA-OOM batch backoff; `models.py` = curated candidate registry |
 | `reduce/` | 4 Reduce | UMAP / PCA→UMAP, seeded; separate 2-D/3-D viz projections |
 | `cluster/` | 5 Cluster | HDBSCAN, KMeans, agglomerative, two-stage micro→macro |
 | (sentiment) | 6 Sentiment | not in this package yet; Tier-3 rating entropy covers the benchmark's needs |
 | `represent/` | feeds 7 + word clouds | c-TF-IDF & TF-IDF terms, word frequencies |
 | `label/` | 7 Label | Ollama label+summary, prompt-hash recorded, term fallback when LLM is down |
-| `pipelines/` | 8 Finalize | four end-to-end variants, one artifact schema (assignments, coords, clusters, manifest) |
+| `pipelines/` | 8 Finalize | five end-to-end variants (incl. sentence-level mentions), one artifact schema (assignments, coords, clusters, manifest, doc membership) |
 | `eval/` | — (WP5 harness) | three-tier metrics, noise fairness, multi-seed ARI, inspection + intruder test, comparison report |
 | `hitl/` | — (review loop) | Streamlit review app, versioned JSONL feedback, apply-on-rerun |
 | `runtime/` | — (ops) | shared-GPU claim/release etiquette, per-stage wall/RSS/VRAM monitor |
@@ -32,6 +32,14 @@ python -m reviewscope_ml.data.ingest --sample-size 5000
 
 # CPU smoke test — REQUIRED before any GPU run
 python -m reviewscope_ml.eval.report --sample-size 1000 --device cpu
+
+# Embedding model sweep (curated registry in embed/models.py; nb 04 protocol)
+python -m reviewscope_ml.eval.model_sweep --sample-size 5000 --device cuda
+#   subset: --models qwen3 bge-m3      gated EmbeddingGemma needs `hf auth login`
+
+# Subset of pipeline variants (sentence_level is the expensive one at 50k)
+python -m reviewscope_ml.eval.report --sample-size 50000 --device cuda \
+    --variants custom_hdbscan two_stage sentence_level
 
 # Review a finished run, record feedback
 streamlit run src/reviewscope_ml/hitl/app.py
