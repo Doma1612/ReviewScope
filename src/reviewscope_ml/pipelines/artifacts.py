@@ -48,6 +48,10 @@ class ClusterInfo:
     # Sentence-level runs: `size` counts mentions (segments); this counts the
     # distinct parent reviews, deduplicated. None for document-level runs.
     n_documents: Optional[int] = None
+    # Sentiment (tweet-RoBERTa, score = P(pos) - P(neg), labels at ±0.2):
+    # mean score over the cluster's units + share of negative/neutral/positive.
+    sentiment_avg: Optional[float] = None
+    sentiment_dist: Optional[dict[str, float]] = None
 
 
 @dataclass
@@ -61,6 +65,8 @@ class RunArtifacts:
     clusters: dict[int, ClusterInfo]
     metrics: dict[str, Any]
     micro_labels: Optional[np.ndarray] = None  # two-stage only
+    sentiment_scores: Optional[np.ndarray] = None   # per unit, [-1, 1]
+    sentiment_labels: Optional[list[str]] = None    # per unit, thresholded
 
     @property
     def cluster_ids(self) -> list[int]:
@@ -77,8 +83,13 @@ def save_run(run_dir: Path, art: RunArtifacts) -> Path:
 
     with open(run_dir / "assignments.csv", "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["doc_id", "cluster_id", "micro_cluster_id", "x2", "y2", "x3", "y3", "z3"])
+        writer.writerow([
+            "doc_id", "cluster_id", "micro_cluster_id",
+            "x2", "y2", "x3", "y3", "z3",
+            "sentiment_score", "sentiment_label",
+        ])
         micro = art.micro_labels if art.micro_labels is not None else [None] * len(art.doc_ids)
+        has_sentiment = art.sentiment_scores is not None
         for i, doc_id in enumerate(art.doc_ids):
             writer.writerow([
                 doc_id,
@@ -86,6 +97,8 @@ def save_run(run_dir: Path, art: RunArtifacts) -> Path:
                 "" if micro[i] is None else int(micro[i]),
                 *(round(float(v), 5) for v in art.coords_2d[i]),
                 *(round(float(v), 5) for v in art.coords_3d[i]),
+                round(float(art.sentiment_scores[i]), 4) if has_sentiment else "",
+                art.sentiment_labels[i] if has_sentiment else "",
             ])
 
     clusters_payload = {str(cid): asdict(info) for cid, info in art.clusters.items()}
@@ -114,7 +127,9 @@ def load_run(run_dir: Path) -> RunArtifacts:
     manifest = json.loads((run_dir / "manifest.json").read_text())
 
     doc_ids, labels, micro, c2, c3 = [], [], [], [], []
+    sent_scores, sent_labels = [], []
     has_micro = False
+    has_sentiment = False
     with open(run_dir / "assignments.csv") as f:
         for row in csv.DictReader(f):
             doc_ids.append(row["doc_id"])
@@ -126,6 +141,14 @@ def load_run(run_dir: Path) -> RunArtifacts:
                 micro.append(-1)
             c2.append([float(row["x2"]), float(row["y2"])])
             c3.append([float(row["x3"]), float(row["y3"]), float(row["z3"])])
+            # Sentiment columns are optional (runs predating the stage).
+            if row.get("sentiment_score"):
+                has_sentiment = True
+                sent_scores.append(float(row["sentiment_score"]))
+                sent_labels.append(row.get("sentiment_label", ""))
+            else:
+                sent_scores.append(float("nan"))
+                sent_labels.append("")
 
     clusters_raw = json.loads((run_dir / "clusters.json").read_text())
     clusters = {int(cid): ClusterInfo(**info) for cid, info in clusters_raw.items()}
@@ -142,6 +165,8 @@ def load_run(run_dir: Path) -> RunArtifacts:
         clusters=clusters,
         metrics=metrics,
         micro_labels=np.array(micro, dtype=int) if has_micro else None,
+        sentiment_scores=np.array(sent_scores, dtype=np.float32) if has_sentiment else None,
+        sentiment_labels=sent_labels if has_sentiment else None,
     )
 
 

@@ -164,6 +164,14 @@ def main() -> None:
                 f"**{cid} — {info.label}** ({count}{stars}) · {info.label_source}"
             ):
                 st.caption(f"Top terms: {terms}")
+                if info.sentiment_avg is not None:
+                    d = info.sentiment_dist or {}
+                    st.caption(
+                        f"Sentiment: {info.sentiment_avg:+.2f} · "
+                        f"😞 {d.get('negative', 0):.0%} / "
+                        f"😐 {d.get('neutral', 0):.0%} / "
+                        f"😊 {d.get('positive', 0):.0%}"
+                    )
                 if info.summary:
                     st.write(info.summary)
                 st.markdown("**Random samples** (not centroid-picked):")

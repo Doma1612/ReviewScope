@@ -142,6 +142,26 @@ def run_pipeline(
         coords_2d = _viz_cached(cfg, spec, embeddings, seed, n_components=2)
         coords_3d = _viz_cached(cfg, spec, embeddings, seed, n_components=3)
 
+    # ── Sentiment (app-spec step 6) ───────────────────────────────────────
+    # Metadata about clusters, never input to clustering: depends only on
+    # the texts. score = P(pos) - P(neg), labels at ±0.2. Best at sentence
+    # level (tweet-length training regime); fails soft if the model is
+    # unavailable.
+    with monitor.stage("sentiment"):
+        sentiment_scores = None
+        sentiment_labels = None
+        try:
+            from ..sentiment import score_to_label, sentiment_with_cache
+
+            sentiment_scores, _sent_s = sentiment_with_cache(
+                cfg, units.texts,
+                device=cfg.apply_runtime_limits(),
+                prefix_extra="sent__" if is_sentence else "",
+            )
+            sentiment_labels = [score_to_label(float(s)) for s in sentiment_scores]
+        except Exception as e:
+            logger.warning("sentiment stage failed (continuing without): %s", e)
+
     # ── Represent ─────────────────────────────────────────────────────────
     with monitor.stage("represent"):
         top_terms = ctfidf_terms(units.texts, labels)
@@ -212,6 +232,14 @@ def run_pipeline(
             member_stars = units.stars[mask]
             member_stars = member_stars[~np.isnan(member_stars)]
             n_documents = None
+        if sentiment_scores is not None:
+            from ..sentiment import aggregate_cluster_sentiment
+
+            sent_avg, sent_dist = aggregate_cluster_sentiment(
+                sentiment_scores, labels, cid
+            )
+        else:
+            sent_avg, sent_dist = None, None
         clusters[cid] = ClusterInfo(
             cluster_id=cid,
             size=int(mask.sum()),
@@ -228,6 +256,8 @@ def run_pipeline(
                 m for m, g in (micro_to_macro or {}).items() if g == cid
             ),
             n_documents=n_documents,
+            sentiment_avg=sent_avg,
+            sentiment_dist=sent_dist,
         )
 
     manifest = {
@@ -254,6 +284,8 @@ def run_pipeline(
         clusters=clusters,
         metrics=metrics,
         micro_labels=micro_labels,
+        sentiment_scores=sentiment_scores,
+        sentiment_labels=sentiment_labels,
     )
     save_run(run_dir, art)
     if is_sentence:
