@@ -49,6 +49,7 @@ def run_comparison(
     embedding_model: Optional[str] = None,
     instruction: Optional[str] = None,
     tag: Optional[str] = None,
+    force: bool = False,
 ) -> Path:
     """
     Run every variant once with full artifacts (first seed) plus cheap
@@ -78,7 +79,8 @@ def run_comparison(
     for name, spec in specs.items():
         logger.info("=== variant %s (seed %d) ===", name, base_seed)
         art = run_pipeline(
-            cfg, spec, reviews=reviews, seed=base_seed, label_clusters=label_clusters
+            cfg, spec, reviews=reviews, seed=base_seed,
+            label_clusters=label_clusters, force=force,
         )
         arts[name] = art
 
@@ -338,6 +340,10 @@ if __name__ == "__main__":
                         help="subset of pipeline variants to run (default: all). "
                              "Note: sentence_level multiplies points ~6x — its "
                              "UMAP fit dominates runtime at 50k")
+    parser.add_argument("--force", action="store_true",
+                        help="rebuild artifacts even for complete runs (heavy "
+                             "intermediates still come from cache — use to add "
+                             "newly introduced fields like sentiment to old runs)")
     args = parser.parse_args()
 
     overrides = {"sample_size": args.sample_size, "device": args.device}
@@ -388,4 +394,5 @@ if __name__ == "__main__":
         embedding_model=args.embedding_model,
         instruction=args.instruction,
         tag=tag or None,
+        force=args.force,
     )
