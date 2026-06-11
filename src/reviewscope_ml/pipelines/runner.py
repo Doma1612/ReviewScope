@@ -32,6 +32,7 @@ from ..cluster import (
 )
 from ..data.ingest import ReviewSet, load_benchmark
 from ..embed import SentenceTransformerEmbedder, embed_with_cache
+from ..embed.models import encode_settings
 from ..eval.harness import evaluate_labels, failure_flags
 from ..label import OllamaLabeler
 from ..reduce import UMAPReducer, viz_projection
@@ -106,11 +107,13 @@ def run_pipeline(
 
     # ── Embed (cached; model released immediately after) ──────────────────
     with monitor.stage("embed"):
+        batch, seq_cap = encode_settings(spec.embedding_model, cfg.batch_size)
         embedder = SentenceTransformerEmbedder(
             spec.embedding_model,
             instruction=spec.instruction,
             device=cfg.apply_runtime_limits(),
-            batch_size=cfg.batch_size,
+            batch_size=batch,
+            max_seq=seq_cap,
         )
         try:
             embeddings, embed_s = embed_with_cache(
@@ -283,11 +286,13 @@ def cluster_labels_only(
 
         reviews = segment_reviews(reviews)
 
+    batch, seq_cap = encode_settings(spec.embedding_model, cfg.batch_size)
     embedder = SentenceTransformerEmbedder(
         spec.embedding_model,
         instruction=spec.instruction,
         device=cfg.apply_runtime_limits(),
-        batch_size=cfg.batch_size,
+        batch_size=batch,
+        max_seq=seq_cap,
     )
     try:
         embeddings, _ = embed_with_cache(

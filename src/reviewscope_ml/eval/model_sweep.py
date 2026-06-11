@@ -54,7 +54,9 @@ def sweep(
         )
         embedder = SentenceTransformerEmbedder(
             cand.model, instruction=cand.instruction,
-            device=device, batch_size=cfg.batch_size,
+            device=device,
+            batch_size=min(cfg.batch_size, cand.batch_hint),
+            max_seq=cand.encode_seq,
         )
         try:
             embeddings, embed_s = embed_with_cache(cfg, embedder, reviews.texts)

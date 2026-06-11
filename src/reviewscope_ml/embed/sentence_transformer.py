@@ -42,7 +42,16 @@ def _is_cuda_oom(e: Exception) -> bool:
 
 
 class SentenceTransformerEmbedder:
-    """Lazy-loading embedder; weights load on first encode, ``close`` frees them."""
+    """Lazy-loading embedder; weights load on first encode, ``close`` frees them.
+
+    Multi-GPU strategy: one model replica per visible CUDA device, driven by
+    threads in THIS process (contiguous text shards, results re-concatenated
+    in order). Deliberately not sentence-transformers' multi-process pool:
+    spawned workers do not inherit the per-process VRAM cap, and a worker
+    that dies (e.g. OOM) deadlocks the parent on its result queue. With
+    in-process replicas the cap applies everywhere and an OOM propagates as
+    a normal exception into the batch-halving retry below.
+    """
 
     def __init__(
         self,
@@ -51,6 +60,7 @@ class SentenceTransformerEmbedder:
         device: str = "cpu",
         batch_size: int = 64,
         show_progress: bool = True,
+        max_seq: Optional[int] = None,
     ):
         if instruction not in INSTRUCTIONS:
             raise ValueError(f"Unknown instruction slug {instruction!r}; known: {list(INSTRUCTIONS)}")
@@ -61,24 +71,42 @@ class SentenceTransformerEmbedder:
         # tqdm progress for encode: the embed stage is the longest single step
         # at 50k, and a silent half hour looks like a hang on the GPU server.
         self.show_progress = show_progress
-        self._model = None
+        # Cap on tokenised sequence length at encode time. Long-context models
+        # (bge-m3: 8k) pad batches to the longest member — one batch of long
+        # reviews then allocates activations no 12 GB card can hold.
+        self.max_seq = max_seq
+        self._replicas: dict[str, object] = {}
 
     @property
     def _is_instructor(self) -> bool:
         return "instructor" in self.model_name.lower() and self.model_name.startswith("hkunlp/")
 
-    def _load(self):
-        if self._model is not None:
-            return self._model
+    def _target_devices(self) -> list[str]:
+        """One entry per visible CUDA device; CUDA_VISIBLE_DEVICES is already
+        pinned to idle devices only, so using all of them is safe."""
+        if self.device != "cuda" or self._is_instructor:
+            return [self.device]
+        import torch
+
+        n = max(1, torch.cuda.device_count())
+        return [f"cuda:{i}" for i in range(n)]
+
+    def _load(self, device: Optional[str] = None):
+        device = device or self._target_devices()[0]
+        if device in self._replicas:
+            return self._replicas[device]
         if self._is_instructor:
             from InstructorEmbedding import INSTRUCTOR
 
-            self._model = INSTRUCTOR(self.model_name, device=self.device)
+            model = INSTRUCTOR(self.model_name, device=device)
         else:
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self.model_name, device=self.device)
-        return self._model
+            model = SentenceTransformer(self.model_name, device=device)
+            if self.max_seq is not None:
+                model.max_seq_length = min(model.max_seq_length, self.max_seq)
+        self._replicas[device] = model
+        return model
 
     def encode(self, texts: list[str]) -> np.ndarray:
         """
@@ -88,15 +116,15 @@ class SentenceTransformerEmbedder:
         We catch it, halve the batch, and retry down to batch 8 rather than
         killing an hours-long run over a tunable.
         """
-        model = self._load()
         batch = self.batch_size
         while True:
             logger.info(
-                "encoding %d texts with %s (batch %d, device %s)",
+                "encoding %d texts with %s (batch %d, device %s%s)",
                 len(texts), self.model_name, batch, self.device,
+                f", seq<={self.max_seq}" if self.max_seq else "",
             )
             try:
-                return self._encode_once(model, texts, batch)
+                return self._encode_once(texts, batch)
             except Exception as e:
                 if not _is_cuda_oom(e) or batch <= 8:
                     raise
@@ -104,42 +132,45 @@ class SentenceTransformerEmbedder:
                 release_cuda_memory()
                 logger.warning("CUDA OOM at batch %d — retrying with %d", batch * 2, batch)
 
-    def _multi_devices(self) -> Optional[list[str]]:
-        """All visible CUDA devices, when there is more than one.
+    def _encode_once(self, texts: list[str], batch: int) -> np.ndarray:
+        devices = self._target_devices()
+        if len(devices) == 1 or len(texts) < 2 * batch:
+            return self._encode_on(devices[0], texts, batch, progress=self.show_progress)
 
-        CUDA_VISIBLE_DEVICES is already pinned to *idle* devices only (the
-        claim refuses busy ones), so spreading the encode across everything
-        visible is safe by construction. sentence-transformers >= 5 spawns
-        one worker process per device and splits the batch stream.
-        """
-        if self.device != "cuda" or self._is_instructor:
-            return None
-        import torch
+        from concurrent.futures import ThreadPoolExecutor
 
-        n = torch.cuda.device_count()
-        return [f"cuda:{i}" for i in range(n)] if n > 1 else None
+        logger.info("data-parallel encode across %s (in-process replicas)", devices)
+        bounds = np.linspace(0, len(texts), len(devices) + 1, dtype=int)
+        shards = [
+            (dev, texts[a:b], i == 0)
+            for i, (dev, a, b) in enumerate(zip(devices, bounds[:-1], bounds[1:]))
+            if b > a
+        ]
+        with ThreadPoolExecutor(max_workers=len(shards)) as pool:
+            futures = [
+                pool.submit(self._encode_on, dev, shard, batch,
+                            progress=self.show_progress and first)
+                for dev, shard, first in shards
+            ]
+            parts = [f.result() for f in futures]
+        return np.vstack(parts)
 
-    def _encode_once(self, model, texts: list[str], batch: int) -> np.ndarray:
+    def _encode_on(self, device: str, texts: list[str], batch: int, progress: bool) -> np.ndarray:
+        model = self._load(device)
         instr_text = INSTRUCTIONS[self.instruction]
         if self._is_instructor and instr_text:
             pairs = [[instr_text, t] for t in texts]
             return np.asarray(
-                model.encode(pairs, batch_size=batch,
-                             show_progress_bar=self.show_progress)
+                model.encode(pairs, batch_size=batch, show_progress_bar=progress)
             )
-        kwargs = dict(batch_size=batch,
-                      show_progress_bar=self.show_progress, convert_to_numpy=True)
+        kwargs = dict(batch_size=batch, show_progress_bar=progress, convert_to_numpy=True)
         if instr_text and not self._is_instructor:
             kwargs["prompt"] = instr_text
-        devices = self._multi_devices()
-        if devices:
-            logger.info("data-parallel encode across %s", devices)
-            kwargs["device"] = devices
         return np.asarray(model.encode(texts, **kwargs))
 
     def close(self) -> None:
         """Release weights immediately — no idle process may squat on VRAM."""
-        self._model = None
+        self._replicas.clear()
         release_cuda_memory()
         logger.info("released embedding model %s", self.model_name)
 

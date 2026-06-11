@@ -96,6 +96,12 @@ class PipelineConfig:
             elif self.gpu_id is not None:
                 os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
 
+        # Variable-length review batches fragment the CUDA allocator badly
+        # (observed: 5 GB reserved-but-unallocated next to a failing 2 GB
+        # request). Expandable segments lets the allocator grow segments
+        # instead of hoarding mismatched ones. Must be set before CUDA init.
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
         # Be a good citizen on the shared 32-core CPU (UMAP/HDBSCAN/BLAS/numba).
         for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
                     "OPENBLAS_NUM_THREADS", "NUMBA_NUM_THREADS"):
