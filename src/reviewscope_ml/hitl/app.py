@@ -119,9 +119,15 @@ def main() -> None:
     left, right = st.columns([1, 1])
 
     # ── 2-D scatter ───────────────────────────────────────────────────────
+    # Performance rules (sentence runs have 40k+ points and crashed browsers):
+    # WebGL traces only (Scattergl, never SVG), exactly two traces regardless
+    # of cluster count, a hard cap on displayed points, and hover payloads
+    # built only for the points actually shown.
+    MAX_PLOT_POINTS = 12_000
+
     with left:
-        import pandas as pd
         import plotly.express as px
+        import plotly.graph_objects as go
 
         cluster_names = {
             cid: f"{cid} — {art.clusters[cid].label}" for cid in art.cluster_ids
@@ -133,51 +139,65 @@ def main() -> None:
             key="focus_clusters",
         )
 
-        df = pd.DataFrame({
-            "x": art.coords_2d[:, 0],
-            "y": art.coords_2d[:, 1],
-            "cluster": [
-                cluster_names.get(int(l), "noise") for l in art.labels
-            ],
-            "doc_id": art.doc_ids,
-            "text": [texts.get(d, "")[:160] for d in art.doc_ids],
-            "sentiment": (
-                art.sentiment_labels
-                if art.sentiment_labels is not None
-                else [""] * len(art.doc_ids)
-            ),
-        })
-        if focus:
-            wanted = {cluster_names[c] for c in focus}
-            df["dimmed"] = ~df["cluster"].isin(wanted)
-            front = df[~df["dimmed"]]
-            back = df[df["dimmed"]]
+        n = len(art.doc_ids)
+        if n > MAX_PLOT_POINTS:
+            rng = np.random.default_rng(42)  # stable sample across reruns
+            idx = np.sort(rng.choice(n, size=MAX_PLOT_POINTS, replace=False))
         else:
-            front, back = df, df.iloc[0:0]
+            idx = np.arange(n)
+        xs, ys = art.coords_2d[idx, 0], art.coords_2d[idx, 1]
+        point_labels = art.labels[idx]
 
-        fig = px.scatter(
-            front, x="x", y="y", color="cluster",
-            custom_data=["cluster", "doc_id", "text", "sentiment"],
-            opacity=0.7,
+        focus_set = set(focus)
+        dimmed = (
+            np.array([int(l) not in focus_set for l in point_labels])
+            if focus else np.zeros(len(idx), dtype=bool)
         )
-        fig.update_traces(
-            marker=dict(size=5 if focus else 4),
-            hovertemplate=(
-                "<b>%{customdata[0]}</b><br>%{customdata[2]}"
-                "<br><i>%{customdata[3]}</i> · %{customdata[1]}<extra></extra>"
-            ),
-        )
-        if len(back):
-            fig.add_scatter(
-                x=back["x"], y=back["y"], mode="markers",
+
+        palette = px.colors.qualitative.Alphabet
+        fig = go.Figure()
+        if dimmed.any():
+            fig.add_trace(go.Scattergl(
+                x=xs[dimmed], y=ys[dimmed], mode="markers",
                 marker=dict(size=3, color="lightgrey", opacity=0.25),
                 hoverinfo="skip", showlegend=False,
+            ))
+        shown = ~dimmed
+        shown_idx = idx[shown]
+        hover = []
+        for i, l in zip(shown_idx, point_labels[shown]):
+            doc_id = art.doc_ids[i]
+            name = cluster_names.get(int(l), "noise")
+            snippet = texts.get(doc_id, "")[:120]
+            senti = (
+                f" · {art.sentiment_labels[i]}"
+                if art.sentiment_labels is not None else ""
             )
-        fig.update_layout(height=600, showlegend=False)
+            hover.append(f"<b>{name}</b><br>{snippet}<br><i>{doc_id}</i>{senti}")
+        fig.add_trace(go.Scattergl(
+            x=xs[shown], y=ys[shown], mode="markers",
+            marker=dict(
+                size=5 if focus else 4,
+                opacity=0.75,
+                color=[
+                    "lightgrey" if l == -1 else palette[int(l) % len(palette)]
+                    for l in point_labels[shown]
+                ],
+            ),
+            text=hover,
+            hovertemplate="%{text}<extra></extra>",
+            showlegend=False,
+        ))
+        fig.update_layout(height=600)
         st.plotly_chart(fig, width="stretch")
+
+        notes = []
+        if n > MAX_PLOT_POINTS:
+            notes.append(f"Anzeige: {MAX_PLOT_POINTS:,} von {n:,} Punkten (Zufallsstichprobe)")
         if focus:
-            n = int(sum(~df["dimmed"]))
-            st.caption(f"{n} Punkte in {len(focus)} fokussierten Clustern; Rest ausgegraut.")
+            notes.append(f"{int(shown.sum()):,} Punkte in {len(focus)} fokussierten Clustern")
+        if notes:
+            st.caption(" · ".join(notes))
 
         st.subheader("Sign-off")
         st.caption(
