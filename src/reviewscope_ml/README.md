@@ -41,6 +41,12 @@ python -m reviewscope_ml.eval.model_sweep --sample-size 5000 --device cuda
 python -m reviewscope_ml.eval.report --sample-size 50000 --device cuda \
     --variants custom_hdbscan two_stage sentence_level
 
+# LLM labels: Ollama runs rootless from the home directory on the uni server
+# (pip only ships the client; grab ollama-linux-amd64.tar.zst from GitHub
+# releases). Pin it to an idle GPU:
+CUDA_VISIBLE_DEVICES=<idle-gpu> nohup ~/ollama/bin/ollama serve > ~/ollama/serve.log 2>&1 &
+~/ollama/bin/ollama pull llama3.2
+
 # Review a finished run, record feedback
 streamlit run src/reviewscope_ml/hitl/app.py
 
