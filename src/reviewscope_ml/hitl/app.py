@@ -88,12 +88,12 @@ def _detail_view(art, texts: dict, stars: dict) -> None:
     import pandas as pd
 
     ids = [c for c in st.session_state.get("detail_ids", []) if c in art.clusters]
-    st.button("← Zurück zur Übersicht", on_click=_back_to_overview)
+    st.button("← Back to overview", on_click=_back_to_overview)
     if not ids:
-        st.warning("Keine (existierenden) Cluster ausgewählt.")
+        st.warning("No (existing) clusters selected.")
         return
 
-    st.title("Cluster-Detailansicht")
+    st.title("Cluster detail view")
     for cid in ids:
         info = art.clusters[cid]
         senti = (
@@ -102,7 +102,7 @@ def _detail_view(art, texts: dict, stars: dict) -> None:
         )
         docs = f" in {info.n_documents} Reviews" if info.n_documents is not None else ""
         st.markdown(
-            f"**{cid} — {info.label}** · {info.size} Einträge{docs}{senti} · "
+            f"**{cid} — {info.label}** · {info.size} units{docs}{senti} · "
             f"Terms: {', '.join(w for w, _ in (tuple(t) for t in info.top_terms[:8]))}"
         )
 
@@ -132,23 +132,23 @@ def _detail_view(art, texts: dict, stars: dict) -> None:
     fcol1, fcol2 = st.columns([1, 2])
     if has_sentiment:
         senti_filter = fcol1.multiselect(
-            "Sentiment-Filter", ["negative", "neutral", "positive"], default=[]
+            "Sentiment filter", ["negative", "neutral", "positive"], default=[]
         )
         if senti_filter:
             df = df[df["sentiment"].isin(senti_filter)]
-    query = fcol2.text_input("Textsuche in diesen Clustern")
+    query = fcol2.text_input("Text search within these clusters")
     if query:
         df = df[df["text"].str.contains(query, case=False, na=False)]
 
-    st.caption(f"{len(df):,} Datenpunkte (sortierbar per Klick auf die Spaltenköpfe)")
+    st.caption(f"{len(df):,} data points (sort by clicking the column headers)")
     st.dataframe(df, height=480, width="stretch", hide_index=True)
 
     # ── Aktionen ──────────────────────────────────────────────────────────
-    st.subheader("Aktionen")
+    st.subheader("Actions")
     if len(ids) > 1:
         mcol1, mcol2 = st.columns([2, 1])
         target = mcol1.selectbox(
-            "Alle ausgewählten Cluster mergen in:",
+            "Merge all selected clusters into:",
             ids,
             format_func=lambda c: f"{c} — {art.clusters[c].label}",
         )
@@ -157,13 +157,13 @@ def _detail_view(art, texts: dict, stars: dict) -> None:
                 if cid != target:
                     _record("merge_clusters", cluster_id=cid, merge_into=int(target))
             st.info(
-                "Merge aufgezeichnet — wird beim nächsten apply_feedback wirksam."
+                "Merge recorded — takes effect on the next apply_feedback."
             )
 
     for cid in ids:
         info = art.clusters[cid]
         c1, c2, c3 = st.columns([3, 1, 1])
-        new_label = c1.text_input(f"Label Cluster {cid}", value=info.label, key=f"dlbl{cid}")
+        new_label = c1.text_input(f"Label cluster {cid}", value=info.label, key=f"dlbl{cid}")
         if c2.button("Approve / rename", key=f"dapp{cid}"):
             if new_label != info.label:
                 _record("rename_label", cluster_id=cid, new_label=new_label)
@@ -245,14 +245,14 @@ def main() -> None:
             cid: f"{cid} — {art.clusters[cid].label}" for cid in art.cluster_ids
         }
         focus = st.multiselect(
-            "Cluster fokussieren (leer = alle)",
+            "Focus clusters (empty = all)",
             options=art.cluster_ids,
             format_func=lambda c: cluster_names[c],
             key="focus_clusters",
         )
         st.button(
-            f"🔍 Detailansicht für Auswahl ({len(focus)} Cluster)" if focus
-            else "🔍 Detailansicht (erst Cluster auswählen)",
+            f"🔍 Detail view for selection ({len(focus)} clusters)" if focus
+            else "🔍 Detail view (select clusters first)",
             disabled=not focus,
             on_click=_open_detail,
             args=(focus,),
@@ -312,9 +312,9 @@ def main() -> None:
 
         notes = []
         if n > MAX_PLOT_POINTS:
-            notes.append(f"Anzeige: {MAX_PLOT_POINTS:,} von {n:,} Punkten (Zufallsstichprobe)")
+            notes.append(f"showing {MAX_PLOT_POINTS:,} of {n:,} points (random sample)")
         if focus:
-            notes.append(f"{int(shown.sum()):,} Punkte in {len(focus)} fokussierten Clustern")
+            notes.append(f"{int(shown.sum()):,} points in {len(focus)} focused clusters")
         if notes:
             st.caption(" · ".join(notes))
 
@@ -354,7 +354,7 @@ def main() -> None:
                 f"**{cid} — {info.label}** ({count}{stars_str}) · {info.label_source}"
             ):
                 st.button(
-                    "🔍 Detailansicht (alle Datenpunkte + Metadaten)",
+                    "🔍 Detail view (all data points + metadata)",
                     key=f"det{cid}",
                     on_click=_open_detail,
                     args=([cid],),
