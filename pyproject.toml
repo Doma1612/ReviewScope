@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reviewscope-ml"
+version = "0.1.0"
+description = "ReviewScope ML pipeline: embed -> reduce -> cluster -> represent -> label, with evaluation harness and HITL review"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "scikit-learn>=1.0",
+    "umap-learn>=0.5.6",
+    "hdbscan>=0.8.33",
+    "sentence-transformers>=3.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Tier-2 coherence + BERTopic baseline pipeline
+eval = ["gensim>=4.3", "bertopic>=0.16", "matplotlib>=3.7"]
+# Human-in-the-loop review GUI
+hitl = ["streamlit>=1.30", "plotly>=5.0"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,39 @@
+# ── Core NLP ──────────────────────────────────────────────────────────────────
+# TITAN X Pascal (sm_61) support was dropped from torch wheels in 2.8 —
+# torch >= 2.8 reports cuda.is_available()=True on the university server but
+# every CUDA kernel fails. 2.7.1+cu126 is the last Pascal-compatible build:
+#   pip install "torch==2.7.1" --index-url https://download.pytorch.org/whl/cu126
+torch==2.7.1
+sentence-transformers>=3.0.0
+InstructorEmbedding>=1.0.1        # hkunlp/instructor-* models
+
+# ── Dimensionality reduction + clustering ────────────────────────────────────
+umap-learn>=0.5.6
+hdbscan>=0.8.33
+
+# ── Topic modeling (BERTopic baseline + C_v coherence) ──────────────────────
+bertopic>=0.16.0
+gensim>=4.3.0                     # C_v topic coherence (Tier 2 evaluation)
+
+# ── Standard ML ──────────────────────────────────────────────────────────────
+scikit-learn>=1.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+pandas>=2.0.0
+
+# ── Visualization ────────────────────────────────────────────────────────────
+matplotlib>=3.7.0
+seaborn>=0.13.0
+plotly>=5.0.0
+
+# ── LLM serving client (notebook 08) ─────────────────────────────────────────
+requests>=2.31.0
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+jupyter>=1.0.0
+ipykernel>=6.0.0
+
+# ── GPU server extras (do NOT install locally) ───────────────────────────────
+# cuml-cu12    # RAPIDS GPU-accelerated UMAP + HDBSCAN; install via conda-forge
