@@ -38,3 +38,6 @@ build/
 .env
 .env.local
 *.pem
+
+# Pipeline run artifacts — regenerable, keep out of git (feedback JSONL stays tracked)
+data/runs/
