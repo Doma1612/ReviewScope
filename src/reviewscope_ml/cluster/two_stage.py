@@ -61,7 +61,7 @@ class TwoStageBackend:
             min_cluster_size=self.micro_min_cluster_size,
             min_samples=self.micro_min_samples,
         ).fit_predict(reduced)
-        micro_ids = sorted(c for c in set(micro) if c != -1)
+        micro_ids = sorted(int(c) for c in set(micro) if c != -1)
 
         if len(micro_ids) < 2:
             # Degenerate corpus (e.g. tiny smoke sample): nothing to merge.

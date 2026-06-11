@@ -26,7 +26,7 @@ import numpy as np
 from ..core.config import PipelineConfig
 from ..data.ingest import load_benchmark
 from ..pipelines.artifacts import RunArtifacts
-from ..pipelines.runner import run_pipeline
+from ..pipelines.runner import cluster_labels_only, run_pipeline
 from ..pipelines.spec import PipelineSpec, default_specs
 from .harness import stability_ari
 from .inspection import render_inspection, render_intruder_test
@@ -68,11 +68,9 @@ def run_comparison(
         label_runs = [art.labels]
         for s in extra_seeds:
             logger.info("--- stability repeat: %s seed %d ---", name, s)
-            repeat = run_pipeline(
-                cfg, spec, reviews=reviews, seed=s,
-                compute_coherence=False, label_clusters=False,
+            label_runs.append(
+                cluster_labels_only(cfg, spec, reviews=reviews, seed=s)
             )
-            label_runs.append(repeat.labels)
         stability[name] = stability_ari(label_runs)
 
     out_dir = cfg.runs_dir / f"comparison_{cfg.sample_size}"

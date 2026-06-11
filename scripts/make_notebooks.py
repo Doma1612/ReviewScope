@@ -19,8 +19,7 @@ def code(source):
 
 
 def save(nb, name):
-    for cell in nb.cells:
-        cell.pop("id", None)
+    nbf.validate(nb)
     path = NB_DIR / name
     nbf.write(nb, path)
     print(f"wrote {path}")

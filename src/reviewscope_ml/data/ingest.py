@@ -102,8 +102,10 @@ def _open_tar_member(raw_dir: Path, name_contains: str) -> tuple[IO[bytes], obje
         )
     zf = zipfile.ZipFile(zip_path)
     tar_entry = next(n for n in zf.namelist() if n.endswith(".tar"))
-    # "r|" = forward-only streaming: no seeks on the (decompressing) zip stream.
-    tar = tarfile.open(fileobj=zf.open(tar_entry), mode="r|")
+    # "r|*" = forward-only streaming with compression auto-detect: the shipped
+    # yelp_dataset.tar is actually gzip-compressed despite its name, and a
+    # streaming mode avoids seeks on the (decompressing) zip stream.
+    tar = tarfile.open(fileobj=zf.open(tar_entry), mode="r|*")
     for member in tar:
         if name_contains in member.name.lower():
             return tar.extractfile(member), (tar, zf)

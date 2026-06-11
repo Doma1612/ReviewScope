@@ -86,9 +86,24 @@ def save_run(run_dir: Path, art: RunArtifacts) -> Path:
             ])
 
     clusters_payload = {str(cid): asdict(info) for cid, info in art.clusters.items()}
-    (run_dir / "clusters.json").write_text(json.dumps(clusters_payload, indent=2))
-    (run_dir / "metrics.json").write_text(json.dumps(art.metrics, indent=2, default=str))
+    (run_dir / "clusters.json").write_text(
+        json.dumps(clusters_payload, indent=2, default=_json_default)
+    )
+    (run_dir / "metrics.json").write_text(
+        json.dumps(art.metrics, indent=2, default=_json_default)
+    )
     return run_dir
+
+
+def _json_default(obj):
+    """Numpy scalars sneak into cluster payloads (ids, counts) — unwrap them."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.str_):
+        return str(obj)
+    return str(obj)
 
 
 def load_run(run_dir: Path) -> RunArtifacts:

@@ -208,6 +208,51 @@ def run_pipeline(
     return art
 
 
+def cluster_labels_only(
+    cfg: PipelineConfig,
+    spec: PipelineSpec,
+    reviews: Optional[ReviewSet] = None,
+    seed: Optional[int] = None,
+) -> np.ndarray:
+    """
+    Embed (cached) + reduce + cluster for one seed, skipping viz projections,
+    representation, labeling and artifact writes. This is what the multi-seed
+    stability check needs — at 50k each skipped UMAP fit is minutes, so the
+    repeats must not pay for artifacts nobody reads.
+    """
+    seed = cfg.seed if seed is None else seed
+    if reviews is None:
+        reviews = load_benchmark(cfg)
+
+    embedder = SentenceTransformerEmbedder(
+        spec.embedding_model,
+        instruction=spec.instruction,
+        device=cfg.apply_runtime_limits(),
+        batch_size=cfg.batch_size,
+    )
+    try:
+        embeddings, _ = embed_with_cache(cfg, embedder, reviews.texts)
+    finally:
+        embedder.close()
+
+    if spec.variant == "bertopic":
+        path = clustering_path(
+            cfg.cache_dir, "bertopic",
+            f"mts{spec.cluster.get('min_topic_size', 10)}",
+            f"{_seed_prefix(cfg, seed)}{make_slug(spec.embedding_model)}",
+            cfg.sample_size,
+        )
+        if path.exists():
+            return load_array(path).astype(int)
+        labels, _ = _bertopic_fit(cfg, spec, reviews, embeddings, seed)
+        save_array(path, labels.astype(np.int32))
+        return labels
+
+    reduced = _reduce_cached(cfg, spec, embeddings, seed)
+    labels, _, _ = _cluster_cached(cfg, spec, reduced, seed)
+    return labels
+
+
 # ── Variant internals ─────────────────────────────────────────────────────────
 
 def _seed_prefix(cfg: PipelineConfig, seed: int, base: str = "") -> str:
