@@ -142,8 +142,15 @@ def build_benchmark_sample(
     """
     raw_dir = project_root / "data" / "raw"
     if output_path is None:
+        from ..core.cache import make_slug
+
         suffix = f"{sample_size // 1000}k" if sample_size % 1000 == 0 else str(sample_size)
-        output_path = project_root / "data" / "cache" / f"sample_hotels_{suffix}.jsonl"
+        # "Hotels" -> sample_hotels_5k.jsonl (the established benchmark name);
+        # other categories get their own namespace instead of clobbering it.
+        output_path = (
+            project_root / "data" / "cache"
+            / f"sample_{make_slug(category)}_{suffix}.jsonl"
+        )
     if output_path.exists():
         logger.info("benchmark sample already exists: %s", output_path)
         return output_path
