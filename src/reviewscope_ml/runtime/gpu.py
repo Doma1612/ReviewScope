@@ -36,6 +36,7 @@ class GpuStatus:
     memory_total_mb: int
     memory_used_mb: int
     utilization_pct: int
+    uuid: str = ""
 
     @property
     def memory_free_mb(self) -> int:
@@ -61,7 +62,7 @@ def query_gpus(timeout_s: float = 10.0) -> list[GpuStatus]:
         out = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=index,name,memory.total,memory.used,utilization.gpu",
+                "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,uuid",
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
@@ -74,7 +75,7 @@ def query_gpus(timeout_s: float = 10.0) -> list[GpuStatus]:
 
     gpus = []
     for line in out.strip().splitlines():
-        idx, name, total, used, util = [p.strip() for p in line.split(",")]
+        idx, name, total, used, util, uuid = [p.strip() for p in line.split(",")]
         gpus.append(
             GpuStatus(
                 index=int(idx),
@@ -82,6 +83,7 @@ def query_gpus(timeout_s: float = 10.0) -> list[GpuStatus]:
                 memory_total_mb=int(total),
                 memory_used_mb=int(used),
                 utilization_pct=int(util),
+                uuid=uuid,
             )
         )
     return gpus
@@ -204,7 +206,8 @@ def claim_gpu(
             g.utilization_pct, "  [busy]" if g.is_busy else "",
         )
 
-    chosen = pick_idle_gpus(gpus, min_free_mb=min_free_mb, max_gpus=max_gpus)
+    chosen_idx = pick_idle_gpus(gpus, min_free_mb=min_free_mb, max_gpus=max_gpus)
+    chosen = chosen_idx
     if not chosen:
         msg = (
             "all GPUs busy or below the free-memory floor "
@@ -216,7 +219,17 @@ def claim_gpu(
         logger.warning("GPU claim: %s", claim.reason)
         return claim
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in chosen)
+    # Pin by UUID, not index: nvidia-smi indices are PCI-bus order while CUDA
+    # runtimes may enumerate "fastest first" — observed live: a process told
+    # CUDA_VISIBLE_DEVICES=3 loaded onto physical GPU 2. UUIDs are immune to
+    # any ordering and are accepted by CUDA_VISIBLE_DEVICES everywhere.
+    by_index = {g.index: g for g in gpus}
+    uuids = [by_index[i].uuid for i in chosen if by_index[i].uuid]
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["CUDA_VISIBLE_DEVICES"] = (
+        ",".join(uuids) if len(uuids) == len(chosen)
+        else ",".join(str(i) for i in chosen)
+    )
     claim = GpuClaim(chosen, "idle devices")
     logger.info(
         "claimed GPU(s) %s at %s (CUDA_VISIBLE_DEVICES=%s)",

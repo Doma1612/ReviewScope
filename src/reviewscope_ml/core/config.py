@@ -89,12 +89,17 @@ class PipelineConfig:
         if self.device == "cuda":
             # Make every other GPU invisible to this process: we physically
             # cannot touch our neighbours' devices; ours become "cuda:0..k-1".
+            # PCI order keeps index-based pins aligned with nvidia-smi (CUDA's
+            # default "fastest first" enumeration may differ). setdefault:
+            # when runtime.claim_gpu already pinned by UUID (the robust way),
+            # that pin must win over our index fallback.
+            os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
             if self.gpu_ids:
-                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-                    str(i) for i in self.gpu_ids
+                os.environ.setdefault(
+                    "CUDA_VISIBLE_DEVICES", ",".join(str(i) for i in self.gpu_ids)
                 )
             elif self.gpu_id is not None:
-                os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
+                os.environ.setdefault("CUDA_VISIBLE_DEVICES", str(self.gpu_id))
 
         # Variable-length review batches fragment the CUDA allocator badly
         # (observed: 5 GB reserved-but-unallocated next to a failing 2 GB
