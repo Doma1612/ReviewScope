@@ -129,3 +129,8 @@ runs from caches (used to backfill sentiment).
       any presentation
 - [ ] Per-scale validation of the mcs auto-scaling (currently an anchored
       heuristic, see guide §6)
+
+Beyond these operational items, the gaps between "working pipeline" and
+"really good results" — ground truth, noise rescue, language/dup hygiene,
+domain adaptation, consensus stability — are analysed and prioritised in
+**`quality-roadmap.md`**.
