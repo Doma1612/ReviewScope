@@ -100,9 +100,17 @@ class SentenceTransformerEmbedder:
 
             model = INSTRUCTOR(self.model_name, device=device)
         else:
+            import torch
             from sentence_transformers import SentenceTransformer
 
-            model = SentenceTransformer(self.model_name, device=device)
+            # Force fp32: newer checkpoints ship fp16/bf16 weights (Qwen3 is
+            # bf16, e5-large-instruct fp16) and Pascal GPUs have no bf16 and
+            # crippled fp16 — mixed-dtype matmuls crash ("Half and Float").
+            model = SentenceTransformer(
+                self.model_name,
+                device=device,
+                model_kwargs={"torch_dtype": torch.float32},
+            )
             if self.max_seq is not None:
                 model.max_seq_length = min(model.max_seq_length, self.max_seq)
         self._replicas[device] = model
