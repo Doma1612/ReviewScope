@@ -22,6 +22,7 @@ Do not commit `.env`. Use `.env.example` as the safe template.
 
 From the repository root:
 
+
 ```bash
 docker compose up --build frontend
 ```
