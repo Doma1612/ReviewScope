@@ -16,7 +16,7 @@ from __future__ import annotations
 import resource
 import time
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, Optional
 
 
 def _rss_mb() -> float:
@@ -34,13 +34,23 @@ def _cuda_available() -> bool:
 
 
 class StageMonitor:
-    """Collects one record per stage; attach ``.records`` to the run manifest."""
+    """Collects one record per stage; attach ``.records`` to the run manifest.
 
-    def __init__(self) -> None:
+    ``on_stage`` (optional) is called with the stage name the moment it starts.
+    The application's Celery worker passes a callback here to translate stage
+    transitions into ``pipeline_jobs`` progress rows (see
+    ``reviewscope_ml.app.service``); the experiment notebooks leave it None and
+    are unaffected.
+    """
+
+    def __init__(self, on_stage: Optional[Callable[[str], None]] = None) -> None:
         self.records: dict[str, dict[str, Any]] = {}
+        self.on_stage = on_stage
 
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
+        if self.on_stage is not None:
+            self.on_stage(name)
         cuda = _cuda_available()
         if cuda:
             import torch
