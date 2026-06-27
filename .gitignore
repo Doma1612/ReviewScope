@@ -39,5 +39,15 @@ build/
 .env.local
 *.pem
 
+# Application runtime files
+data/uploads/
+
+# Frontend
+node_modules/
+frontend/dist/
+src/frontend/node_modules/
+src/frontend/dist/
+src/frontend/tsconfig.app.tsbuildinfo
+
 # Pipeline run artifacts — regenerable, keep out of git (feedback JSONL stays tracked)
 data/runs/

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="ReviewScope app icon">
+  <defs>
+    <linearGradient id="scopeGradient" x1="22" y1="20" x2="106" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8"></stop>
+      <stop offset="100%" stop-color="#0EA5E9"></stop>
+    </linearGradient>
+  </defs>
+
+  <!-- optional dark navy app-icon background -->
+  <rect width="128" height="128" rx="28" fill="#102A43"></rect>
+
+  <!-- scope ring -->
+  <circle cx="64" cy="64" r="42" fill="none" stroke="url(#scopeGradient)" stroke-width="8" stroke-linecap="round"></circle>
+
+  <!-- scope ticks -->
+  <line x1="64" y1="15" x2="64" y2="30" stroke="#38BDF8" stroke-width="8" stroke-linecap="round"></line>
+  <line x1="64" y1="98" x2="64" y2="113" stroke="#38BDF8" stroke-width="8" stroke-linecap="round"></line>
+  <line x1="15" y1="64" x2="30" y2="64" stroke="#38BDF8" stroke-width="8" stroke-linecap="round"></line>
+  <line x1="98" y1="64" x2="113" y2="64" stroke="#38BDF8" stroke-width="8" stroke-linecap="round"></line>
+
+  <!-- organized topic clusters -->
+  <g fill="#7DD3FC">
+    <circle cx="50" cy="49" r="5.8"></circle>
+    <circle cx="43" cy="62" r="5.8"></circle>
+    <circle cx="57" cy="62" r="5.8"></circle>
+  </g>
+
+  <g fill="#2DD4BF">
+    <circle cx="78" cy="49" r="5.8"></circle>
+    <circle cx="71" cy="62" r="5.8"></circle>
+    <circle cx="85" cy="62" r="5.8"></circle>
+  </g>
+
+  <g fill="#86EFAC">
+    <circle cx="64" cy="72" r="5.8"></circle>
+    <circle cx="57" cy="85" r="5.8"></circle>
+    <circle cx="71" cy="85" r="5.8"></circle>
+  </g>
+</svg>

@@ -1,0 +1,13 @@
+alembic>=1.13
+asyncpg>=0.29
+celery>=5.4
+email-validator>=2.1
+fastapi>=0.111
+passlib[bcrypt]>=1.7
+psycopg[binary]>=3.2
+pydantic-settings>=2.3
+python-jose[cryptography]>=3.3
+python-multipart>=0.0.9
+redis>=5.0
+sqlalchemy>=2.0
+uvicorn[standard]>=0.30
