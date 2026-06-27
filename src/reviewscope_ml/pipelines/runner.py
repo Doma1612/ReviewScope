@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -55,6 +55,7 @@ def run_pipeline(
     force: bool = False,
     compute_coherence: bool = True,
     label_clusters: bool = True,
+    on_stage: Optional[Callable[[str], None]] = None,
 ) -> RunArtifacts:
     """
     Run one pipeline variant end to end and persist its artifacts.
@@ -62,6 +63,9 @@ def run_pipeline(
     ``seed`` overrides ``cfg.seed`` (used by the multi-seed stability check);
     seeded intermediates get a distinct cache key so notebook caches (seed 42)
     are never clobbered.
+
+    ``on_stage`` (optional) is invoked with each internal stage name as it
+    starts — the application layer forwards this to its pipeline-status sink.
     """
     seed = cfg.seed if seed is None else seed
     if run_name is None:
@@ -103,7 +107,7 @@ def run_pipeline(
     else:
         units = reviews
 
-    monitor = StageMonitor()
+    monitor = StageMonitor(on_stage=on_stage)
 
     # ── Embed (cached; model released immediately after) ──────────────────
     with monitor.stage("embed"):

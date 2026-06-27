@@ -20,6 +20,7 @@ pytest                      # pure-logic tests, no GPU, no model downloads
 | `represent/` | feeds 7 + word clouds | c-TF-IDF & TF-IDF terms, word frequencies |
 | `label/` | 7 Label | Ollama label+summary, prompt-hash recorded, term fallback when LLM is down |
 | `pipelines/` | 8 Finalize | five end-to-end variants (incl. sentence-level mentions), one artifact schema (assignments, coords, clusters, manifest, doc membership) |
+| `app/` | 1–8 (backend seam) | upload→ReviewSet ingest, frozen default spec, per-project config, persistence DTOs + ports, one `run_from_upload` entry point. See `docs/integration-guide.md` |
 | `eval/` | — (WP5 harness) | three-tier metrics, noise fairness, multi-seed ARI, inspection + intruder test, comparison report |
 | `hitl/` | — (review loop) | Streamlit review app, versioned JSONL feedback, apply-on-rerun |
 | `runtime/` | — (ops) | shared-GPU claim/release etiquette, per-stage wall/RSS/VRAM monitor |
