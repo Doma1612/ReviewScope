@@ -69,13 +69,22 @@ class ClusterRead(BaseModel):
     id: uuid.UUID
     label: str
     summary: str
+    label_source: str = "terms_fallback"
     top_terms: list[dict[str, Any]]
     word_frequencies: dict[str, Any]
     size: int
     sentiment_avg: float | None = None
+    mean_stars: float | None = None
     sample_docs: list[dict[str, Any]] = []
 
     model_config = {"from_attributes": True}
+
+
+class ModelsRead(BaseModel):
+    embedding_model: str
+    label_model: str
+    variant: str
+    simulated: bool
 
 
 class DocumentRead(BaseModel):

@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24
     upload_dir: Path = Path("/workspace/data/uploads")
     frontend_origin: str = "http://localhost:5173"
+    # ML integration. simulate_ml keeps the fabricated pipeline (no heavy deps,
+    # used by tests and lightweight runs); the dockerized worker sets it false to
+    # call the real reviewscope_ml seam. ml_device is passed straight to the seam.
+    simulate_ml: bool = Field(default=True, alias="SIMULATE_ML")
+    ml_device: str = Field(default="cpu", alias="ML_DEVICE")
 
     model_config = SettingsConfigDict(
         env_file=".env",

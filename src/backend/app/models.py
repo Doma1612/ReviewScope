@@ -78,10 +78,14 @@ class Cluster(Base):
     project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     label: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
+    # Label provenance: "ollama:<model>" | "terms_fallback" | "hitl_override".
+    # Lets the UI distinguish LLM labels from term-fallbacks when Ollama is down.
+    label_source: Mapped[str] = mapped_column(Text, default="terms_fallback", server_default="terms_fallback", nullable=False)
     top_terms: Mapped[list[dict]] = mapped_column(JSONB, default=list, nullable=False)
     word_frequencies: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sentiment_avg: Mapped[float | None] = mapped_column(Float)
+    mean_stars: Mapped[float | None] = mapped_column(Float)
 
 
 class Document(Base):

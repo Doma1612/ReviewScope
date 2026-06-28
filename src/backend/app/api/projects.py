@@ -22,6 +22,7 @@ from app.schemas import (
     ProjectRead,
     ProjectUpdate,
 )
+from app.ml_pipeline import run_ml_pipeline
 from app.tasks import PIPELINE_STEPS, run_simulated_pipeline
 
 
@@ -60,7 +61,8 @@ async def create_project(
         db.add(PipelineJob(project_id=project.id, step=step))
     await db.commit()
     await db.refresh(project)
-    run_simulated_pipeline.delay(str(project.id))
+    task = run_simulated_pipeline if settings.simulate_ml else run_ml_pipeline
+    task.delay(str(project.id))
     return await _project_read(db, project, ProjectRole.owner)
 
 
