@@ -27,18 +27,23 @@ services:
 
   api:
     build:
-      context: ./src/backend
+      context: .
+      dockerfile: src/backend/Dockerfile
     env_file: .env
     environment:
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       REDIS_URL: redis://redis:6379/0
+      # Run the real reviewscope_ml pipeline (set true to fall back to the
+      # fabricated pipeline). The api only reads this to decide which task to
+      # enqueue and to answer GET /api/models.
+      SIMULATE_ML: "false"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
     volumes:
       - ./src/backend:/app
-      - ./data/uploads:/workspace/data/uploads
+      - ./data:/workspace/data
     depends_on:
       db:
         condition: service_healthy
@@ -47,21 +52,44 @@ services:
 
   worker:
     build:
-      context: ./src/backend
+      context: .
+      dockerfile: src/backend/Dockerfile
     env_file: .env
     environment:
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       REDIS_URL: redis://redis:6379/0
+      SIMULATE_ML: "false"
+      ML_DEVICE: cpu
+      # The ML pipeline derives its cache/run dir from REVIEWSCOPE_ROOT; point it
+      # at the mounted data volume so embeddings/clusters caches persist.
+      REVIEWSCOPE_ROOT: /workspace
     command: celery -A app.worker.celery_app worker --loglevel=info
     volumes:
       - ./src/backend:/app
-      - ./data/uploads:/workspace/data/uploads
+      - ./data:/workspace/data
+    # Share the ollama container's network namespace so the ML labeler's
+    # hard-coded http://localhost:11434 reaches Ollama (reviewscope_ml is frozen
+    # and exposes no base_url override yet — see docs/ml-integration-changelog.md).
+    # db/redis service names still resolve via ollama's default-network membership.
+    network_mode: "service:ollama"
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      ollama:
+        condition: service_started
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Pull the spec's label model once after first start:
+    #   docker compose exec ollama ollama pull llama3.2
+    # Until then, labeling fails soft to term-fallback (label_source records it).
 
   frontend:
     build:
@@ -78,3 +106,4 @@ services:
 
 volumes:
   postgres_data:
+  ollama_data:
