@@ -80,6 +80,13 @@ class ClusterRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ModelsRead(BaseModel):
+    embedding_model: str
+    label_model: str
+    variant: str
+    simulated: bool
+
+
 class DocumentRead(BaseModel):
     id: uuid.UUID
     primary_key_value: str
