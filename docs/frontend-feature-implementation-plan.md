@@ -23,10 +23,10 @@ Single source of truth for status. Update the box here **and** the WP's own
 - ✅ **B1** — cluster_edits audit table + model + migration
 - ✅ **B2** — recompute service for cluster aggregates
 - ✅ **B3** — document reassignment endpoints
-- ☐ **B4** — cluster CRUD + merge + from-selection + rename/junk
-- ☐ **B5** — GET/POST project schema endpoint
-- ☐ **B6** — re-run survival (replay edits) + label_source protection
-- ☐ **B7** — rich hover payload on embeddings
+- ✅ **B4** — cluster CRUD + merge + from-selection + rename/junk
+- ✅ **B5** — GET/POST project schema endpoint
+- ✅ **B6** — re-run survival (replay edits) + label_source protection
+- ✅ **B7** — rich hover payload on embeddings
 - ☐ **F0** — API client + types (`api.ts`)
 - ☐ **F1** — scatter real hover
 - ☐ **F2** — scatter 2D/3D toggle + click→highlight
@@ -236,7 +236,19 @@ cluster `size` update; a viewer gets 403; an audit row is written.
 ---
 
 ## B4 — Cluster CRUD + merge + from-selection + rename/approve/junk
-**Status:** ☐ Not started · **Prereqs:** B1, B2
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B1, B2
+
+Implemented in `api/projects.py` (schemas in `schemas.py`), tests in
+`tests/test_cluster_crud.py` (16 cases, all green). Notes on what deviated:
+- `merge` writes **one `ClusterEdit` per source** (`cluster_id=source`,
+  `target_cluster_id=target`) — more faithful to the ml feedback semantics and
+  easier for B6 replay than a single payload row.
+- `PATCH` returns `ClusterRead | None`: for `mark_junk` the cluster is deleted so
+  it returns `None` (200, null body); rename/approve return the updated
+  `ClusterRead`. A `PATCH` with no field set is a 400.
+- `mark_junk` is shared with `DELETE` via a private `_junk_cluster` helper.
+- `create`/`from-selection` generate the cluster id eagerly (`id=uuid.uuid4()`)
+  so docs can be reassigned without a pre-flush round-trip.
 
 **Goal:** create/merge/relabel/delete clusters from the app, mirroring the HITL
 actions in `apply_feedback.py`.
@@ -273,7 +285,15 @@ gets 403 everywhere; each call writes an audit row.
 ---
 
 ## B5 — `GET/POST /api/projects/{id}/schema`
-**Status:** ☐ Not started · **Prereqs:** none
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done note:** `GET/POST /{project_id}/schema` in `api/projects.py` (handlers
+`get_schema`/`set_schema`). Added `SchemaColumn` (with the `text|integer|float|
+date|boolean` type validator), `ProjectSchemaWrite` (model_validator enforcing
+exactly one PK), and `ProjectSchemaRead` (tolerant `list[dict]`, reflects stored
+columns verbatim) to `schemas.py`. The PK/type rules live on the Pydantic request
+model, so FastAPI surfaces violations as 422 automatically. Tests in
+`tests/test_project_schema.py`; full backend suite green (46 passed).
 
 **Goal:** the column schema is only submitted inside the multipart upload today and
 never re-fetched/edited (gap doc §1 backend gaps). Expose it.
@@ -293,7 +313,32 @@ never re-fetched/edited (gap doc §1 backend gaps). Expose it.
 ---
 
 ## B6 — Re-run survival (replay edits) + label_source protection
-**Status:** ☐ Not started · **Prereqs:** B1, B2, B3, B4
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B1, B2, B3, B4
+
+**Deviations from plan:**
+- `replay_edits(session, project_id, snapshot)` takes a third arg: a
+  `MembershipSnapshot` captured by `snapshot_membership(session, project_id)`
+  **before** `persist_run_result` wipes the old rows. It's required because the
+  edit log stores *old* document/cluster UUIDs that the re-run regenerates — the
+  snapshot bridges old doc UUID → `primary_key_value` → new doc, and resolves an
+  old cluster UUID to the new cluster holding the **plurality** of its old members
+  (against the fresh run's base assignment). Human-created clusters are recreated
+  and tracked in a `remap` so reassignments/merges can target them.
+- Replay order: **creates** → merges → junk → splits → label actions → doc
+  reassignments → confirm. Creates run first (app-only actions with no notebook
+  analogue) because later merges/reassignments may target a recreated cluster.
+- `split_cluster` and `confirm_run` are logged and **skipped** — neither has an
+  app-side artifact yet (no micro-labels / re-cluster manifest, no
+  `human_confirmed` field). Revisit when those land.
+- Recompute (B2) is async-only; added a sync `_recompute_clusters_sync` in
+  `services/replay.py` for the Celery worker, reusing the pure helpers from
+  `services/recompute.py`.
+- label_source protection: replay runs *after* persist, so a re-applied human
+  rename (`hitl_override`) always wins over the run's machine label. No separate
+  relabel pass exists today; any future one must skip `hitl_override` clusters.
+- Tests: `tests/test_replay.py` (no DB / no ML stack, fake sync session) covers
+  the acceptance scenario plus create-from-selection / merge / junk / approve /
+  unresolvable-skip and `snapshot_membership`.
 
 **Goal:** re-processing a project (`persist_run_result` wipes & rewrites
 clusters/documents in `ml_mapping.py`) must not destroy manual edits. This is the
@@ -322,7 +367,13 @@ Reference: `src/reviewscope_ml/hitl/apply_feedback.py`.
 ---
 
 ## B7 — Rich hover payload on embeddings (backend half of gap §2)
-**Status:** ☐ Not started · **Prereqs:** none
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+Implemented as planned: `EmbeddingPoint` gained `snippet`/`primary_key_value`/
+`sentiment_score`/`cluster_label` (all optional); `GET /embeddings` now LEFT JOINs
+`Cluster` (so noise points get `cluster_label = null`), caps snippet to 120 chars
+server-side, and accepts optional `?limit=`. No "stars" field was added — there is
+no per-document stars column on `Document` (mean_stars lives only on `Cluster`), so
+that part of the goal was dropped. Covered by new `tests/test_embeddings.py`.
 
 **Goal:** the scatter only gets `document_id` today. Provide snippet + sentiment +
 label + PK + stars per point so the frontend hover (F1) can be rich, **built only

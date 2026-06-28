@@ -18,6 +18,7 @@ from app.core.config import get_settings
 from app.db.session import SyncSessionLocal
 from app.ml_mapping import STEP_ORDER, DbProgressSink, build_upload_schema, persist_run_result
 from app.models import PipelineJob, PipelineStepStatus, Project, ProjectSchema, ProjectStatus
+from app.services.replay import replay_edits, snapshot_membership
 from app.worker import celery_app
 
 
@@ -57,7 +58,12 @@ def run_ml_pipeline(project_id: str) -> None:
             return
 
         with SyncSessionLocal() as session:
+            # Snapshot the human-curated membership *before* persist wipes it, then
+            # replay the edit log over the fresh rows so manual work survives the
+            # re-run (B6). Replay runs after persist so re-applied human labels win.
+            snapshot = snapshot_membership(session, pid)
             persist_run_result(session, result)
+            replay_edits(session, pid, snapshot)
             session.execute(update(Project).where(Project.id == pid).values(status=ProjectStatus.ready, last_error=None))
             session.commit()
     except Exception as exc:  # noqa: BLE001 — surface any failure as a failed run

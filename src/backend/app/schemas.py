@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator, model_validator
 
 from app.models import PipelineStepStatus, ProjectRole, ProjectStatus
 
@@ -41,6 +41,41 @@ class ProjectUpdate(BaseModel):
     name: str
 
 
+# Column types the upload step and the editable schema both accept. Kept here
+# (not in ml_mapping) so validation stays free of the heavy ML import.
+ALLOWED_COLUMN_TYPES = ("text", "integer", "float", "date", "boolean")
+
+
+class SchemaColumn(BaseModel):
+    name: str
+    type: str
+    is_primary_key: bool = False
+
+    @field_validator("type")
+    @classmethod
+    def _known_type(cls, value: str) -> str:
+        if value not in ALLOWED_COLUMN_TYPES:
+            raise ValueError(f"type must be one of {', '.join(ALLOWED_COLUMN_TYPES)}")
+        return value
+
+
+class ProjectSchemaRead(BaseModel):
+    # Reflects the stored columns verbatim (which may predate this schema's
+    # validation), so the read side stays tolerant rather than re-validating.
+    columns: list[dict[str, Any]]
+
+
+class ProjectSchemaWrite(BaseModel):
+    columns: list[SchemaColumn]
+
+    @model_validator(mode="after")
+    def _exactly_one_primary_key(self) -> "ProjectSchemaWrite":
+        pk_count = sum(1 for c in self.columns if c.is_primary_key)
+        if pk_count != 1:
+            raise ValueError("exactly one column must have is_primary_key=true")
+        return self
+
+
 class PipelineJobRead(BaseModel):
     step: str
     status: PipelineStepStatus
@@ -63,6 +98,10 @@ class EmbeddingPoint(BaseModel):
     x: float
     y: float
     z: float | None
+    snippet: str | None = None
+    primary_key_value: str | None = None
+    sentiment_score: float | None = None
+    cluster_label: str | None = None
 
 
 class ClusterRead(BaseModel):
@@ -125,6 +164,26 @@ class BulkReassign(BaseModel):
 
 class BulkReassignResult(BaseModel):
     moved: int
+
+
+class ClusterCreate(BaseModel):
+    label: str
+
+
+class ClusterMerge(BaseModel):
+    source_ids: list[uuid.UUID]
+    target_id: uuid.UUID
+
+
+class ClusterFromSelection(BaseModel):
+    document_ids: list[uuid.UUID]
+    label: str
+
+
+class ClusterUpdate(BaseModel):
+    label: str | None = None
+    approve: bool | None = None
+    mark_junk: bool | None = None
 
 
 class MemberCreate(BaseModel):

@@ -14,8 +14,12 @@ from app.models import Cluster, ClusterEdit, Document, Embedding, PipelineJob, P
 from app.schemas import (
     BulkReassign,
     BulkReassignResult,
+    ClusterCreate,
     ClusterEditRead,
+    ClusterFromSelection,
+    ClusterMerge,
     ClusterRead,
+    ClusterUpdate,
     DocumentReassign,
     DocumentRead,
     EmbeddingPoint,
@@ -24,6 +28,8 @@ from app.schemas import (
     MemberUpdate,
     PipelineStatusRead,
     ProjectRead,
+    ProjectSchemaRead,
+    ProjectSchemaWrite,
     ProjectUpdate,
 )
 from app.ml_pipeline import run_ml_pipeline
@@ -121,6 +127,28 @@ async def delete_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_d
     await db.commit()
 
 
+@router.get("/{project_id}/schema", response_model=ProjectSchemaRead)
+async def get_schema(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ProjectSchemaRead:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
+    schema = await db.get(ProjectSchema, project_id)
+    if not schema:
+        raise HTTPException(status_code=404, detail="Project schema not found")
+    return ProjectSchemaRead(columns=list(schema.columns))
+
+
+@router.post("/{project_id}/schema", response_model=ProjectSchemaRead)
+async def set_schema(project_id: uuid.UUID, payload: ProjectSchemaWrite, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ProjectSchemaRead:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    columns = [column.model_dump() for column in payload.columns]
+    schema = await db.get(ProjectSchema, project_id)
+    if schema:
+        schema.columns = columns
+    else:
+        db.add(ProjectSchema(project_id=project_id, columns=columns))
+    await db.commit()
+    return ProjectSchemaRead(columns=columns)
+
+
 @router.get("/{project_id}/pipeline/status", response_model=PipelineStatusRead)
 async def pipeline_status(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> PipelineStatusRead:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
@@ -130,14 +158,41 @@ async def pipeline_status(project_id: uuid.UUID, db: AsyncSession = Depends(get_
 
 
 @router.get("/{project_id}/embeddings", response_model=list[EmbeddingPoint])
-async def embeddings(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> list[EmbeddingPoint]:
+async def embeddings(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user), limit: int | None = None) -> list[EmbeddingPoint]:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
-    result = await db.execute(
-        select(Document.id, Document.cluster_id, Embedding.umap_x, Embedding.umap_y, Embedding.umap_z)
+    query = (
+        select(
+            Document.id,
+            Document.cluster_id,
+            Embedding.umap_x,
+            Embedding.umap_y,
+            Embedding.umap_z,
+            Document.text,
+            Document.primary_key_value,
+            Document.sentiment_score,
+            Cluster.label,
+        )
         .join(Embedding, Embedding.document_id == Document.id)
+        .outerjoin(Cluster, Cluster.id == Document.cluster_id)
         .where(Document.project_id == project_id)
     )
-    return [EmbeddingPoint(document_id=doc_id, cluster_id=cluster_id, x=x, y=y, z=z) for doc_id, cluster_id, x, y, z in result.all()]
+    if limit is not None:
+        query = query.limit(limit)
+    result = await db.execute(query)
+    return [
+        EmbeddingPoint(
+            document_id=doc_id,
+            cluster_id=cluster_id,
+            x=x,
+            y=y,
+            z=z,
+            snippet=text[:120] if text is not None else None,
+            primary_key_value=primary_key_value,
+            sentiment_score=sentiment_score,
+            cluster_label=cluster_label,
+        )
+        for doc_id, cluster_id, x, y, z, text, primary_key_value, sentiment_score, cluster_label in result.all()
+    ]
 
 
 @router.get("/{project_id}/clusters", response_model=list[ClusterRead])
@@ -165,6 +220,129 @@ async def cluster_documents(project_id: uuid.UUID, cluster_id: uuid.UUID, db: As
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
     result = await db.execute(select(Document).where(Document.project_id == project_id, Document.cluster_id == cluster_id).limit(limit).offset(offset))
     return list(result.scalars().all())
+
+
+@router.post("/{project_id}/clusters", response_model=ClusterRead, status_code=status.HTTP_201_CREATED)
+async def create_cluster(project_id: uuid.UUID, payload: ClusterCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ClusterRead:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    cluster = Cluster(
+        id=uuid.uuid4(),
+        project_id=project_id,
+        label=payload.label,
+        summary="",
+        label_source="hitl_override",
+        top_terms=[],
+        word_frequencies={},
+        size=0,
+    )
+    db.add(cluster)
+    record_edit(db, project_id=project_id, actor_id=current_user.id, action="create_cluster", cluster_id=cluster.id, new_label=payload.label)
+    await db.commit()
+    await db.refresh(cluster)
+    return ClusterRead.model_validate(cluster).model_copy(update={"sample_docs": []})
+
+
+@router.post("/{project_id}/clusters/merge", response_model=ClusterRead)
+async def merge_clusters(project_id: uuid.UUID, payload: ClusterMerge, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ClusterRead:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    if payload.target_id in payload.source_ids:
+        raise HTTPException(status_code=400, detail="target_id cannot be among source_ids")
+    target = await db.get(Cluster, payload.target_id)
+    if not target or target.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Target cluster not found")
+    sources = []
+    for source_id in payload.source_ids:
+        source = await db.get(Cluster, source_id)
+        if not source or source.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Source cluster not found")
+        sources.append(source)
+    result = await db.execute(
+        select(Document).where(Document.project_id == project_id, Document.cluster_id.in_(payload.source_ids))
+    )
+    for doc in result.scalars().all():
+        doc.cluster_id = payload.target_id
+    for source in sources:
+        record_edit(db, project_id=project_id, actor_id=current_user.id, action="merge_clusters", cluster_id=source.id, target_cluster_id=payload.target_id)
+        await db.delete(source)
+    await recompute_clusters(db, project_id, [payload.target_id])
+    await db.commit()
+    await db.refresh(target)
+    return ClusterRead.model_validate(target).model_copy(update={"sample_docs": await _sample_docs(db, project_id, target.id, 5)})
+
+
+@router.post("/{project_id}/clusters/from-selection", response_model=ClusterRead, status_code=status.HTTP_201_CREATED)
+async def cluster_from_selection(project_id: uuid.UUID, payload: ClusterFromSelection, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ClusterRead:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    cluster = Cluster(
+        id=uuid.uuid4(),
+        project_id=project_id,
+        label=payload.label,
+        summary="",
+        label_source="hitl_override",
+        top_terms=[],
+        word_frequencies={},
+        size=0,
+    )
+    db.add(cluster)
+    result = await db.execute(
+        select(Document).where(Document.project_id == project_id, Document.id.in_(payload.document_ids))
+    )
+    docs = list(result.scalars().all())
+    affected: set[uuid.UUID] = {cluster.id}
+    for doc in docs:
+        if doc.cluster_id is not None:
+            affected.add(doc.cluster_id)
+        doc.cluster_id = cluster.id
+    record_edit(
+        db,
+        project_id=project_id,
+        actor_id=current_user.id,
+        action="create_from_selection",
+        cluster_id=cluster.id,
+        new_label=payload.label,
+        payload={"document_ids": [str(doc.id) for doc in docs]},
+    )
+    await recompute_clusters(db, project_id, list(affected))
+    await db.commit()
+    await db.refresh(cluster)
+    return ClusterRead.model_validate(cluster).model_copy(update={"sample_docs": await _sample_docs(db, project_id, cluster.id, 5)})
+
+
+@router.patch("/{project_id}/clusters/{cluster_id}", response_model=ClusterRead | None)
+async def update_cluster(project_id: uuid.UUID, cluster_id: uuid.UUID, payload: ClusterUpdate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ClusterRead | None:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    cluster = await db.get(Cluster, cluster_id)
+    if not cluster or cluster.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    if payload.mark_junk:
+        await _junk_cluster(db, project_id, cluster, current_user.id)
+        await db.commit()
+        return None
+    changed = False
+    if payload.label is not None:
+        cluster.label = payload.label
+        cluster.label_source = "hitl_override"
+        record_edit(db, project_id=project_id, actor_id=current_user.id, action="rename_label", cluster_id=cluster_id, new_label=payload.label)
+        changed = True
+    if payload.approve:
+        cluster.label_source = "hitl_approved"
+        record_edit(db, project_id=project_id, actor_id=current_user.id, action="approve_label", cluster_id=cluster_id)
+        changed = True
+    if not changed:
+        raise HTTPException(status_code=400, detail="Provide one of label, approve, or mark_junk")
+    await db.commit()
+    await db.refresh(cluster)
+    return ClusterRead.model_validate(cluster).model_copy(update={"sample_docs": await _sample_docs(db, project_id, cluster_id, 5)})
+
+
+@router.delete("/{project_id}/clusters/{cluster_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_cluster(project_id: uuid.UUID, cluster_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> None:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    cluster = await db.get(Cluster, cluster_id)
+    if not cluster or cluster.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    await _junk_cluster(db, project_id, cluster, current_user.id)
+    await db.commit()
 
 
 @router.get("/{project_id}/documents", response_model=list[DocumentRead])
@@ -296,6 +474,28 @@ async def list_edits(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), 
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
     result = await db.execute(select(ClusterEdit).where(ClusterEdit.project_id == project_id).order_by(ClusterEdit.created_at.desc()))
     return list(result.scalars().all())
+
+
+async def _junk_cluster(db: AsyncSession, project_id: uuid.UUID, cluster: Cluster, actor_id: uuid.UUID) -> None:
+    """Mark a cluster as junk: its documents become noise and the cluster is removed.
+
+    Shared by ``DELETE /clusters/{id}`` and ``PATCH`` with ``mark_junk``. Stages the
+    audit row and deletes the cluster; the caller owns the commit."""
+    result = await db.execute(
+        select(Document).where(Document.project_id == project_id, Document.cluster_id == cluster.id)
+    )
+    docs = list(result.scalars().all())
+    for doc in docs:
+        doc.cluster_id = None
+    record_edit(
+        db,
+        project_id=project_id,
+        actor_id=actor_id,
+        action="mark_junk",
+        cluster_id=cluster.id,
+        payload={"document_ids": [str(doc.id) for doc in docs]},
+    )
+    await db.delete(cluster)
 
 
 async def _get_project_or_404(db: AsyncSession, project_id: uuid.UUID) -> Project:
