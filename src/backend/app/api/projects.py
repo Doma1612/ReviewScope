@@ -12,8 +12,11 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import Cluster, ClusterEdit, Document, Embedding, PipelineJob, Project, ProjectMember, ProjectRole, ProjectSchema, ProjectStatus, User
 from app.schemas import (
+    BulkReassign,
+    BulkReassignResult,
     ClusterEditRead,
     ClusterRead,
+    DocumentReassign,
     DocumentRead,
     EmbeddingPoint,
     MemberCreate,
@@ -24,6 +27,8 @@ from app.schemas import (
     ProjectUpdate,
 )
 from app.ml_pipeline import run_ml_pipeline
+from app.services.edits import record_edit
+from app.services.recompute import recompute_clusters
 from app.tasks import PIPELINE_STEPS, run_simulated_pipeline
 
 
@@ -179,6 +184,64 @@ async def document(project_id: uuid.UUID, document_id: uuid.UUID, db: AsyncSessi
     if not doc or doc.project_id != project_id:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
+
+
+@router.patch("/{project_id}/documents/{document_id}", response_model=DocumentRead)
+async def reassign_document(project_id: uuid.UUID, document_id: uuid.UUID, payload: DocumentReassign, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> Document:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    doc = await db.get(Document, document_id)
+    if not doc or doc.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+    target_cluster_id = payload.cluster_id
+    if target_cluster_id is not None:
+        cluster = await db.get(Cluster, target_cluster_id)
+        if not cluster or cluster.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Cluster not found")
+    old_cluster_id = doc.cluster_id
+    doc.cluster_id = target_cluster_id
+    record_edit(
+        db,
+        project_id=project_id,
+        actor_id=current_user.id,
+        action="reassign_doc",
+        document_id=document_id,
+        cluster_id=old_cluster_id,
+        target_cluster_id=target_cluster_id,
+    )
+    affected = [cid for cid in {old_cluster_id, target_cluster_id} if cid is not None]
+    await recompute_clusters(db, project_id, affected)
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
+@router.post("/{project_id}/documents/reassign", response_model=BulkReassignResult)
+async def bulk_reassign_documents(project_id: uuid.UUID, payload: BulkReassign, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> BulkReassignResult:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    target_cluster_id = payload.cluster_id
+    if target_cluster_id is not None:
+        cluster = await db.get(Cluster, target_cluster_id)
+        if not cluster or cluster.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Cluster not found")
+    result = await db.execute(
+        select(Document).where(Document.project_id == project_id, Document.id.in_(payload.document_ids))
+    )
+    docs = list(result.scalars().all())
+    affected: set[uuid.UUID | None] = {target_cluster_id}
+    for doc in docs:
+        affected.add(doc.cluster_id)
+        doc.cluster_id = target_cluster_id
+    record_edit(
+        db,
+        project_id=project_id,
+        actor_id=current_user.id,
+        action="bulk_reassign",
+        target_cluster_id=target_cluster_id,
+        payload={"document_ids": [str(doc.id) for doc in docs]},
+    )
+    await recompute_clusters(db, project_id, [cid for cid in affected if cid is not None])
+    await db.commit()
+    return BulkReassignResult(moved=len(docs))
 
 
 @router.get("/{project_id}/members", response_model=list[MemberRead])

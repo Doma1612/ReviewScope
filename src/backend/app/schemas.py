@@ -114,6 +114,19 @@ class ClusterEditRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class DocumentReassign(BaseModel):
+    cluster_id: uuid.UUID | None = None  # None = move to noise
+
+
+class BulkReassign(BaseModel):
+    document_ids: list[uuid.UUID]
+    cluster_id: uuid.UUID | None = None  # None = move to noise
+
+
+class BulkReassignResult(BaseModel):
+    moved: int
+
+
 class MemberCreate(BaseModel):
     email: EmailStr
     role: ProjectRole = ProjectRole.viewer
