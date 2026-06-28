@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api, Cluster, EmbeddingPoint, Project } from "../api";
+import { hoverTitle } from "../hover";
+import { samplePoints } from "../plot";
 
 const PALETTE = ["#38bdf8", "#a78bfa", "#34d399", "#f59e0b", "#fb7185", "#22d3ee", "#f472b6", "#bef264"];
 
@@ -114,14 +116,18 @@ function Metric({ label, value }: { label: string; value: number }) {
 }
 
 function PointCloud({ points, clusters, highlightedClusterId }: { points: EmbeddingPoint[]; clusters: Cluster[]; highlightedClusterId: string | null }) {
+  // Cap the rendered DOM nodes (F6) — bounds come from the full set so the layout
+  // stays stable, but we only paint a sampled subset for huge projects.
   const bounds = getBounds(points);
+  const displayPoints = samplePoints(points);
+  const capped = displayPoints.length < points.length;
   const clusterIndex = new Map(clusters.map((cluster, index) => [cluster.id, index]));
 
   return (
     <div className="deck-map">
       <div className="deck-gridlines" />
       <div className="deck-vignette" />
-      {points.map((point) => {
+      {displayPoints.map((point) => {
         const index = point.cluster_id ? clusterIndex.get(point.cluster_id) ?? 0 : 0;
         const color = PALETTE[index % PALETTE.length];
         const muted = highlightedClusterId && point.cluster_id !== highlightedClusterId;
@@ -134,12 +140,12 @@ function PointCloud({ points, clusters, highlightedClusterId }: { points: Embedd
               left: `${scale(point.x, bounds.minX, bounds.maxX)}%`,
               top: `${100 - scale(point.y, bounds.minY, bounds.maxY)}%`,
             } as React.CSSProperties}
-            title={point.document_id}
+            title={hoverTitle(point)}
           />
         );
       })}
       <div className="deck-map-caption">
-        <span>{points.length.toLocaleString()} projected documents</span>
+        <span>{capped ? `Showing ${displayPoints.length.toLocaleString()} of ${points.length.toLocaleString()}` : `${points.length.toLocaleString()} projected documents`}</span>
         <span>UMAP x/y · simulated layer data</span>
       </div>
     </div>

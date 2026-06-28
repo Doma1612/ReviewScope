@@ -258,6 +258,7 @@ async def test_patch_rename_sets_override(_stub_helpers):
     assert result.label == "new" and result.label_source == "hitl_override"
     edit = _edits(db)[0]
     assert edit.action == "rename_label" and edit.cluster_id == cid and edit.new_label == "new"
+    assert edit.payload == {"before": "old"}  # old label captured for F7 undo
     assert cluster not in db.deleted and db.committed
 
 

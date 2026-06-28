@@ -320,9 +320,10 @@ async def update_cluster(project_id: uuid.UUID, cluster_id: uuid.UUID, payload: 
         return None
     changed = False
     if payload.label is not None:
+        before_label = cluster.label
         cluster.label = payload.label
         cluster.label_source = "hitl_override"
-        record_edit(db, project_id=project_id, actor_id=current_user.id, action="rename_label", cluster_id=cluster_id, new_label=payload.label)
+        record_edit(db, project_id=project_id, actor_id=current_user.id, action="rename_label", cluster_id=cluster_id, new_label=payload.label, payload={"before": before_label})
         changed = True
     if payload.approve:
         cluster.label_source = "hitl_approved"
@@ -406,6 +407,8 @@ async def bulk_reassign_documents(project_id: uuid.UUID, payload: BulkReassign, 
     )
     docs = list(result.scalars().all())
     affected: set[uuid.UUID | None] = {target_cluster_id}
+    # Capture each doc's old cluster before the move so F7 undo can put them back.
+    before = {str(doc.id): (str(doc.cluster_id) if doc.cluster_id else None) for doc in docs}
     for doc in docs:
         affected.add(doc.cluster_id)
         doc.cluster_id = target_cluster_id
@@ -415,7 +418,7 @@ async def bulk_reassign_documents(project_id: uuid.UUID, payload: BulkReassign, 
         actor_id=current_user.id,
         action="bulk_reassign",
         target_cluster_id=target_cluster_id,
-        payload={"document_ids": [str(doc.id) for doc in docs]},
+        payload={"document_ids": [str(doc.id) for doc in docs], "before": before},
     )
     await recompute_clusters(db, project_id, [cid for cid in affected if cid is not None])
     await db.commit()

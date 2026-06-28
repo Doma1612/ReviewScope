@@ -224,7 +224,10 @@ async def test_bulk_reassign_moves_all_and_unions_affected(capture_recompute):
     assert d1.cluster_id == target and d2.cluster_id == target
     edit = _edits(db)[0]
     assert edit.action == "bulk_reassign" and edit.target_cluster_id == target
-    assert edit.payload == {"document_ids": [str(d1.id), str(d2.id)]}
+    assert edit.payload == {
+        "document_ids": [str(d1.id), str(d2.id)],
+        "before": {str(d1.id): str(a), str(d2.id): str(b)},
+    }
     # Union of old (a, b) + new (target).
     assert capture_recompute == [(pid, {a, b, target})]
 

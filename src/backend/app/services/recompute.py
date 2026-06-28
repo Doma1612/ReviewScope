@@ -14,12 +14,14 @@ the ML stack — see ``tests/test_recompute.py``.
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from statistics import fmean
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.ml_mapping import derive_roles
 from app.models import Cluster, Document, ProjectSchema
 
@@ -64,13 +66,35 @@ def numeric_aggregates(
     }
 
 
+_STOPWORDS = {"the", "and", "for", "with", "that", "this", "from", "are", "was", "were", "you", "your", "but", "not"}
+
+
+def _simple_terms(texts: list[str]) -> tuple[list[dict], dict]:
+    """Lightweight bag-of-words terms — the sim-mode fallback for the c-TF-IDF path.
+
+    Mirrors the simulated pipeline's tokenizer (``tasks._terms``) so an edited
+    cluster's ``top_terms`` / ``word_frequencies`` keep the same shape and feel as
+    the ones the simulated run produced, without importing the heavy ML stack."""
+    counter: Counter = Counter()
+    for text in texts:
+        words = [word.strip(".,!?;:()[]{}\"'").lower() for word in text.split()]
+        counter.update(word for word in words if len(word) > 3 and word not in _STOPWORDS)
+    terms = counter.most_common(20)
+    top_terms = [{"term": term, "score": count} for term, count in terms[:10]]
+    return top_terms, dict(terms)
+
+
 def _terms_and_frequencies(texts: list[str]) -> tuple[list[dict], dict]:
     """Top c-TF-IDF terms + within-cluster word counts for one cluster.
 
     All docs belong to this single cluster, so they are labelled ``0`` and the
-    ``0`` entry is read back out. Heavy ML imports happen here, lazily."""
+    ``0`` entry is read back out. Heavy ML imports happen here, lazily. In
+    simulated mode we skip them entirely and use :func:`_simple_terms`, so the
+    cluster-edit features work in a lightweight env with no sklearn installed."""
     if not texts:
         return [], {}
+    if get_settings().simulate_ml:
+        return _simple_terms(texts)
     import numpy as np
     from reviewscope_ml.represent.terms import ctfidf_terms, word_frequencies
 

@@ -27,16 +27,16 @@ Single source of truth for status. Update the box here **and** the WP's own
 - ✅ **B5** — GET/POST project schema endpoint
 - ✅ **B6** — re-run survival (replay edits) + label_source protection
 - ✅ **B7** — rich hover payload on embeddings
-- ☐ **F0** — API client + types (`api.ts`)
-- ☐ **F1** — scatter real hover
-- ☐ **F2** — scatter 2D/3D toggle + click→highlight
-- ☐ **F3** — cluster word cloud + star rating + distribution chart
-- ☐ **F4** — "show all documents" paginated table
-- ☐ **F5** — editing UX (selection toolbar, card actions, edit-mode)
-- ☐ **F6** — optimistic updates + invalidation + WebGL cap
-- ☐ **F7** — undo / edit-history panel
-- ☐ **F8** — upload step 2 real schema confirm
-- ☐ **F9** — owner email + member role-change + models/health
+- ✅ **F0** — API client + types (`api.ts`)
+- ✅ **F1** — scatter real hover
+- ✅ **F2** — scatter 2D/3D toggle + click→highlight
+- ✅ **F3** — cluster word cloud + star rating + distribution chart
+- ✅ **F4** — "show all documents" paginated table
+- ✅ **F5** — editing UX (selection toolbar, card actions, edit-mode)
+- ✅ **F6** — optimistic updates + invalidation + WebGL cap
+- ✅ **F7** — undo / edit-history panel
+- ✅ **F8** — upload step 2 real schema confirm
+- ✅ **F9** — owner email + member role-change + models/health
 - ☐ **T1** — provenance badge + confirm/sign-off
 - ☐ **T2** — export (CSV/JSON/PNG/report)
 - ☐ **T3** — search / filter / noise triage
@@ -397,7 +397,11 @@ have `cluster_label = null`.
 # Group F — Frontend
 
 ## F0 — API client + types (`api.ts`)
-**Status:** ☐ Not started · **Prereqs:** B3, B4, B5, B7 (to function; can be written speculatively)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B3, B4, B5, B7 (to function; can be written speculatively)
+Implemented all 10 methods + types; `tsc --noEmit` clean. Deviations from the
+plan: also added a `SchemaColumn` type (used by `getSchema`/`saveSchema`).
+`saveSchema` POSTs to `/schema` (there is no PUT). `updateCluster` returns
+`Cluster | void` since the backend returns null/204-style on `mark_junk`.
 
 **Goal:** expose all new endpoints + fix the frontend `Cluster`/`EmbeddingPoint`
 types. (NB: backend `ClusterRead` already has `mean_stars` and `label_source`; the
@@ -425,7 +429,19 @@ layer — no UI yet.)
 ---
 
 ## F1 — Scatter: real hover (gap §2)
-**Status:** ☐ Not started · **Prereqs:** B7, F0
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B7, F0
+
+**Done notes:** Added a shared `src/frontend/src/hover.ts` with `sentimentLabel`,
+`hoverHtml` (Plotly, HTML-escaped, `<b>label</b><br>snippet<br><i>pk</i> · senti`),
+and `hoverTitle` (plain-text for the DOM `title` attr). `ProjectView.tsx` now feeds
+`hoverHtml` into the scatter `text` array + `hovertemplate: "%{text}<extra></extra>"`
+(replacing the bare `document_id`). Deviations: (a) `DeckDashboard`'s `PointCloud` is
+a **CSS/div** scatter, not Plotly, so "apply identically" = a rich `title={hoverTitle(p)}`
+tooltip rather than a hovertemplate. (b) No per-point **star rating** exists (B7 dropped
+it — `mean_stars` lives only on `Cluster`), so the star part of the goal is omitted. (c)
+Cluster label comes straight from `point.cluster_label` (B7), so no clusters lookup is
+needed; noise → "noise". F6's plot cap isn't built yet, so all points are still plotted.
+`tsc --noEmit` clean.
 
 **Goal:** replace the bare-UUID hover with a rich `hovertemplate` in both
 `ProjectView.tsx` and `DeckDashboard.tsx`.
@@ -449,7 +465,15 @@ in both views.
 ---
 
 ## F2 — Scatter: 2D/3D toggle + click→highlight cluster
-**Status:** ☐ Not started · **Prereqs:** none (pairs with F0 for types)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none (pairs with F0 for types)
+**Notes:** Switched the marker colouring from the Viridis `colorscale` to the
+shared `PALETTE` (same as `DeckDashboard`) so per-point dimming works across both
+`scatter3d`/`scattergl` — non-highlighted points get an alpha-suffixed colour
+(`${base}22`) instead of Plotly `opacity` (which is scalar-only on 3d traces).
+2D/3D toggle is an absolutely-positioned `.plot-toolbar` overlay; click reads
+`event.points[0].pointNumber` to index back into `embeddings.data`, and clicking
+the already-highlighted cluster toggles it off. Highlighted card gets `.highlighted`
++ `scrollIntoView`.
 
 **Goal:** `ProjectView.tsx` hardcodes `scatter3d` and the click→cluster
 interaction is unwired (only `DeckDashboard` highlights today).
@@ -468,7 +492,24 @@ highlights its cluster card and dims other points.
 ---
 
 ## F3 — Cluster cards & detail: word cloud + star rating + distribution chart
-**Status:** ☐ Not started · **Prereqs:** F0
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** F0
+
+**Done notes:** Two dependency-free components in `src/frontend/src/ui/`:
+`WordCloud.tsx` (CSS `font-size`/opacity scaling over the top-N `word_frequencies`,
+`compact` variant for cards) and `StarRating.tsx` (five-star gold overlay clipped
+to `mean_stars`, **assumes a 5-point scale** + numeric label; renders `null` when
+no rating). On the `ProjectView` cards the word cloud **replaces** the old
+`.terms` chip row (the card already conveyed top terms; the cloud is the richer
+F3 view) and `mean_stars` shows next to the sentiment line via the compact star
+rating. `ClusterDetail` keeps both the full word cloud and the `.terms` chips
+(terms there carry their scores), shows the full star rating in the header, and
+adds a Plotly **bar** distribution of documents bucketed negative/neutral/positive
+by `sentiment_score` (same ±0.05 thresholds as `hover.sentimentLabel`); the
+section is hidden when no document has a sentiment score. Deviation from the plan:
+the distribution is a **sentiment** bar chart only — a per-document star/rating
+column isn't exposed to the frontend yet (no schema-driven rating field on
+`DocumentItem`; `mean_stars` lives only on `Cluster`), so a star histogram is
+deferred until F4/B5 surface the rating column. `tsc --noEmit` clean.
 
 **Goal:** fill the card/detail depth gaps (§1): word cloud (`word_frequencies`
 already provided), star rating (`mean_stars`), and a sentiment/star distribution
@@ -490,7 +531,22 @@ present; detail shows a distribution chart.
 ---
 
 ## F4 — "Show all documents" paginated table (all schema columns)
-**Status:** ☐ Not started · **Prereqs:** B5
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B5
+
+**Done notes:** New `src/frontend/src/ui/DocumentsTable.tsx` — columns from
+`api.getSchema` (B5), each cell renders `raw_data[col.name]` (objects → JSON), PK
+column flagged with 🔑. Server-side pagination via `GET /documents`' `limit`/
+`offset` (PAGE_SIZE 50) with Previous/Next + a "Showing a–b" range; "Next"
+disables when a page returns < PAGE_SIZE rows. Uses react-query `keepPreviousData`
+so paging doesn't flash. Deviations: (a) `api.documents` signature changed to
+`documents(projectId, { clusterId?, limit?, offset? })` (was `(projectId,
+clusterId?)`) — no other callers existed. (b) Graceful fallback when **no** schema
+is saved (GET /schema 404, `retry:false`): columns are derived from the first
+row's `raw_data` keys so the table still renders. ProjectView gained a "Show all
+documents" toggle (full-width card, project-wide); ClusterDetail's bottom
+load-all Documents list was replaced by `<DocumentsTable clusterId=…>` (its F3
+sentiment-distribution query is untouched). CSS under `.documents-table*` in
+`styles.css`. `tsc --noEmit` clean.
 
 **Goal:** the spec's full document table with **all schema columns** doesn't exist
 anywhere (§1). Build it, paginated, reusing `GET /documents` (already supports
@@ -510,7 +566,35 @@ both project-wide and per-cluster.
 ---
 
 ## F5 — Editing UX: selection toolbar, card actions, edit-mode toggle
-**Status:** ☐ Not started · **Prereqs:** F0, B3, B4
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** F0, B3, B4
+
+**Done notes:** Owner-only "Edit clusters" toggle on `ProjectView` (gated on
+`project.role === "owner"` + `status === "ready"`) and "Edit documents" on
+`ClusterDetail`; viewers never see edit controls. In edit mode:
+- **Scatter lasso:** Plotly `dragmode: "lasso"` + `onSelected`/`onDeselect` (2D
+  `scattergl` only — a "Switch to 2D to lasso-select" hint shows in 3D). Selected
+  point `document_id`s feed a floating `.scatter-selection` toolbar → bulk
+  **Reassign to…** (`bulkReassign`, with a "Noise" sentinel = `cluster_id null`)
+  and **New cluster** from an inline label input (`createClusterFromSelection`).
+- **Per-cluster card actions** (`ClusterCard`): inline **Rename** (`updateCluster
+  {label}`), **Merge into…** select (`mergeClusters [self] → target`), **Mark
+  junk** (`deleteCluster`, `window.confirm` first), plus a checkbox for
+  **multi-select → Merge N→1** (`.merge-toolbar`, target chosen among the
+  selected; sources = the rest).
+- **ClusterDetail / DocumentsTable:** `DocumentsTable` gained `editable`/`clusters`
+  props — per-row "Move to…" select (single `reassignDocument`) and row checkboxes
+  → bulk-reassign toolbar (`bulkReassign`). The same editable table is also wired
+  into `ProjectView`'s project-wide "All documents" panel when editing.
+
+All mutations are react-query `useMutation` + broad `invalidateQueries`
+(`clusters`/`embeddings`/`documents`/`cluster`/`cluster-docs`/`edits`) — optimistic
+updates + the WebGL cap are deferred to **F6** as planned.
+
+**Deviations:** (a) **Split is omitted** — there is no split endpoint (B4 didn't
+add one; `split_cluster` is logged-and-skipped in B6 replay), and split isn't in
+F5's acceptance. Wire it when a backend split path exists. (b) Label entry for
+"New cluster" uses an inline text input (not a modal); junk uses `window.confirm`.
+(c) `tsc --noEmit` clean.
 
 **Goal:** the core "edit clusters from the app" UX (gap §4b/§4c), owner-only.
 
@@ -535,7 +619,35 @@ controls.
 ---
 
 ## F6 — Cross-cutting: optimistic updates, invalidation, WebGL cap
-**Status:** ☐ Not started · **Prereqs:** F5
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** F5
+
+**Done notes:** Two new dependency-free modules in `src/frontend/src/`:
+- `optimistic.ts` — shared cache helpers. `beginOptimistic` cancels + snapshots the
+  six project-scoped query prefixes (`clusters`/`embeddings`/`documents`/`cluster`/
+  `cluster-docs`/`edits`), `rollback` restores from the snapshot, `invalidateAll`
+  reconciles on settle. Per-action mutators (`applyReassign`, `applyRename`,
+  `applyMerge`, `applyJunk`, `applyCreateFromSelection`) write membership/label/size
+  changes straight into the cache via `setQueriesData` (prefix filters so every
+  paginated `documents` page updates at once). Cluster **size deltas** are derived
+  from the embeddings cache so card counts shift instantly.
+- `plot.ts` — `POINT_CAP = 12000` + `samplePoints` (deterministic stride sample,
+  order-preserving so plot indices still map back to a stable document).
+
+Wiring: every F5 mutation in `ProjectView.tsx` (bulk reassign, create-from-
+selection, rename, merge, junk) and `DocumentsTable.tsx` (single + bulk reassign)
+now uses `onMutate` (snapshot + optimistic apply) → `onError` (rollback) →
+`onSettled` (`invalidateAll`). The old broad `invalidate()` helpers were removed.
+`ProjectView` scatter: when `embeddings.length > POINT_CAP` it samples down, **forces
+2D `scattergl`** (hides the 2D/3D toggle), and shows a "Showing N of M points (2D)"
+note; click/lasso handlers index into the sampled array. `DeckDashboard`'s CSS/DOM
+`PointCloud` is also sampled (bounds still computed from the full set) with a
+"Showing N of M" caption.
+
+**Deviations:** (a) `create-from-selection` is optimistic via a `temp-…` cluster id
+that the `onSettled` invalidation replaces with the server's real row (the id is
+server-assigned). (b) The WebGL cap **locks to 2D** when capped rather than leaving
+3D selectable — `scatter3d` doesn't render smoothly at 12k+ points; this also keeps
+lasso-select available. (c) `tsc --noEmit` clean; repo has no `lint` script.
 
 **Goal:** make edits feel instant and keep large projects performant (§4d).
 
@@ -553,7 +665,26 @@ error; a >12k-point project renders smoothly with a capped/WebGL scatter.
 ---
 
 ## F7 — Undo / edit-history panel
-**Status:** ☐ Not started · **Prereqs:** B1, F0
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B1, F0
+
+**Done notes:** Collapsible `src/frontend/src/ui/EditHistory.tsx` panel on
+`ProjectView` (visible to all roles; lazy — only fetches `GET /edits` + members
+when opened). Lists edits newest-first with a human-readable description, the
+actor email (resolved via the members list — the owner is a `ProjectMember` too),
+and a localized timestamp. Undo (owner-only) is wired for the three reversible
+actions — `reassign_doc`, `bulk_reassign`, `rename_label` — via the existing API
+endpoints, so each undo is itself recorded as a fresh edit, and reuses the F6
+optimistic apply (`applyReassign`/`applyRename`) + rollback/invalidate. Merges,
+junk, creates, approve, split, confirm are shown but non-undoable in v1.
+
+**Deviation / required backend tweak:** undo needs "before" state the audit rows
+didn't carry, so two `record_edit` calls in `api/projects.py` were extended (kept
+backward-compatible): `rename_label` now stores `payload={"before": <old label>}`,
+and `bulk_reassign` stores `payload.before = {doc_id: old_cluster_id|null}` so a
+bulk move can be inverted per original cluster (grouped via `beforeGroups` in
+`ProjectView`). `reassign_doc` already carried the old cluster in `cluster_id`.
+Tests `tests/test_document_reassign.py` + `tests/test_cluster_crud.py` updated for
+the new payloads; backend suite green. `tsc --noEmit` clean.
 
 **Goal:** surface the audit log (`GET /edits`, B1) as a history panel; support undo
 where feasible (e.g. re-apply the inverse reassign).
@@ -571,7 +702,25 @@ and records a new edit.
 ---
 
 ## F8 — Upload Step 2: real schema confirm
-**Status:** ☐ Not started · **Prereqs:** none (B5 optional, for server-side validation)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none (B5 optional, for server-side validation)
+
+**Done notes:** Rewrote `Dashboard.tsx`'s detection + `UploadModal`. New helpers:
+`sampleColumns` (parses up to 50 head rows of CSV/JSONL into per-column value
+samples), `inferType` (boolean → integer → float → date → text, value-driven, not
+positional), `detectPrimaryKey` (prefers a unique non-null + id-like column, then
+any all-unique column, then id-named, then first), `buildColumns`, and
+`validateSchema`. The modal now shows a one-radio-per-row **PK selector** (enforces
+exactly one) and a per-column type `<select>`; submit runs `validateSchema` and
+blocks with inline `.error` messages (no auto-fixing) when there's no non-key text
+column, zero/duplicate PK, or duplicate names. "Text column" matches the backend's
+`derive_roles` rule (a non-PK `type=="text"` column).
+
+**Deviations:** (a) Kept the single-modal layout (the spec's optional two-step split
+was not done — the confirm step is one panel). (b) Step 5 (server-side re-validation
+via B5 `POST /schema`) was skipped at upload time: B5's endpoint is project-scoped
+and no project exists yet during upload; the upload seam still rejects a bad schema
+server-side. (c) CSV parsing stays line-based (quoted newlines unsupported, as
+before). `tsc --noEmit` clean.
 
 **Goal:** fix the broken type selector in `Dashboard.tsx`'s `UploadModal` (§1).
 
@@ -596,7 +745,22 @@ selectable and validated; invalid schemas show inline errors and block submit.
 ---
 
 ## F9 — Smaller spec fills: owner email, members role-change, models/health
-**Status:** ☐ Not started · **Prereqs:** none
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** Frontend-only — both `/api/models` and `/api/health` already
+existed server-side. Added `updateMember`, `models`, `health` (+ `Models`/`Health`
+types) to `api.ts`. (1) `Dashboard.tsx` `ProjectCard` now shows "Shared by
+&lt;owner_email&gt;" on viewer-role cards. (2) `SettingsView.tsx` member rows render
+a role `<select>` (owner-only, non-owner members) wired to `PATCH /members/{uid}`
+via `updateMember`, with inline error surfacing. (3) A new "Models" card in Settings
+shows the embedding/label model + variant from `GET /api/models`.
+
+**Deviation:** the role model is only `owner|viewer` and the backend forbids
+promoting/demoting owners (`update_member` → 400), so the role select's only valid
+non-owner target is `viewer`; picking `owner` surfaces the backend error. The
+control is wired as specified, but a meaningful role change needs a richer role
+vocabulary (future). `GET /api/health` is exposed in `api.ts` but not yet rendered
+(no obvious surface; left for a status indicator later). `tsc --noEmit` clean.
 
 **Goal:** quick wins from §1.
 

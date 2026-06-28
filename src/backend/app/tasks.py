@@ -11,7 +11,9 @@ from pathlib import Path
 from sqlalchemy import delete, select, update
 
 from app.db.session import AsyncSessionLocal
-from app.models import Cluster, Document, Embedding, PipelineJob, PipelineStepStatus, Project, ProjectStatus
+from app.ml_mapping import derive_roles
+from app.models import Cluster, Document, Embedding, PipelineJob, PipelineStepStatus, Project, ProjectSchema, ProjectStatus
+from app.services.recompute import _parse_rating
 from app.worker import celery_app
 
 
@@ -156,8 +158,15 @@ async def _persist_mock_results(db, project_id: uuid.UUID, rows: list[dict], tex
         clusters.append(cluster)
     await db.flush()
 
+    # Mirror the recompute service: pull the rating column from the project schema
+    # so simulated clusters carry a real mean_stars (drives the StarRating UI),
+    # not just synthetic sentiment.
+    schema = await db.get(ProjectSchema, project_id)
+    rating_col = derive_roles(schema.columns)[1] if schema else None
+
     grouped_terms: dict[uuid.UUID, Counter] = defaultdict(Counter)
     grouped_sentiment: dict[uuid.UUID, list[float]] = defaultdict(list)
+    grouped_stars: dict[uuid.UUID, list[float]] = defaultdict(list)
     rng = random.Random(str(project_id))
     for idx, row in enumerate(limited_rows):
         cluster = clusters[idx % cluster_count]
@@ -186,12 +195,17 @@ async def _persist_mock_results(db, project_id: uuid.UUID, rows: list[dict], tex
         )
         grouped_terms[cluster.id].update(_terms(text))
         grouped_sentiment[cluster.id].append(sentiment)
+        rating = _parse_rating(row, rating_col)
+        if rating is not None:
+            grouped_stars[cluster.id].append(rating)
 
     for cluster in clusters:
         terms = grouped_terms[cluster.id].most_common(20)
         sentiments = grouped_sentiment[cluster.id]
+        stars = grouped_stars[cluster.id]
         cluster.size = len(sentiments)
         cluster.sentiment_avg = round(sum(sentiments) / len(sentiments), 3) if sentiments else None
+        cluster.mean_stars = round(sum(stars) / len(stars), 3) if stars else None
         cluster.top_terms = [{"term": term, "score": count} for term, count in terms[:10]]
         cluster.word_frequencies = dict(terms)
 
