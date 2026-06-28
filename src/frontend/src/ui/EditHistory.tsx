@@ -3,7 +3,7 @@ import { useState } from "react";
 
 import { api, Cluster, ClusterEdit } from "../api";
 
-// F7 — surface the cluster-edit audit log (GET /edits, B1) as a collapsible
+// Surface the cluster-edit audit log (GET /edits) as a collapsible
 // history panel, newest-first, with an Undo button on the reversible actions.
 
 // Undo is feasible only where the edit records enough "before" state to invert it:

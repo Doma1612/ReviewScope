@@ -3,17 +3,19 @@ import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api, Project } from "../api";
+import { useSimulated } from "../useSimulated";
 
 export function Dashboard() {
   const queryClient = useQueryClient();
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects, refetchInterval: (query) => query.state.data?.some((p) => p.status === "processing" || p.status === "uploading") ? 3000 : false });
   const [showUpload, setShowUpload] = useState(false);
+  const simulated = useSimulated();
   const upload = useMutation({ mutationFn: api.uploadProject, onSuccess: () => { setShowUpload(false); queryClient.invalidateQueries({ queryKey: ["projects"] }); } });
 
   return (
     <main className="page">
       <section className="page-header">
-        <div><h1>Projects</h1><p>Upload CSV or JSONL files and inspect simulated analysis results.</p></div>
+        <div><h1>Projects</h1><p>Upload CSV or JSONL files and inspect {simulated ? "simulated " : ""}analysis results.</p></div>
         <button className="primary" onClick={() => setShowUpload(true)}>New Project</button>
       </section>
       {projects.isLoading && <p>Loading projects...</p>}
@@ -143,7 +145,7 @@ function UploadModal({ onClose, onSubmit, error }: { onClose: () => void; onSubm
   );
 }
 
-// ── Schema detection (F8) ──────────────────────────────────────────────────────
+// ── Schema detection ────────────────────────────────────────────────────────────
 // Sample the head of the file and infer each column's type + the primary key from
 // real values, rather than defaulting everything to text / the first column.
 const SAMPLE_ROWS = 50;

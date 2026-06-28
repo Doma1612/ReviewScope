@@ -1,6 +1,6 @@
 import { EmbeddingPoint } from "./api";
 
-// Shared scatter-hover builders (F1). Both the Plotly scatter (ProjectView) and
+// Shared scatter-hover builders. Both the Plotly scatter (ProjectView) and
 // the CSS point-cloud (DeckDashboard) show cluster label + snippet + primary key
 // + sentiment instead of a bare document UUID. Mirrors the prototype hover string
 // in src/reviewscope_ml/hitl/app.py.
@@ -9,6 +9,14 @@ export function sentimentLabel(score: number | null | undefined): string | null 
   if (score == null) return null;
   const tone = score > 0.05 ? "positive" : score < -0.05 ? "negative" : "neutral";
   return `${tone} (${score.toFixed(2)})`;
+}
+
+// Honest one-line sentiment summary for a cluster: the rounded mean plus how many
+// of its documents were actually scored, so a mean over a handful of docs isn't
+// read as covering the whole cluster. "sentiment n/a" when nothing was scored.
+export function sentimentSummary(avg: number | null | undefined, count: number, total: number): string {
+  if (avg == null || count === 0) return "sentiment n/a";
+  return `sentiment ${avg.toFixed(2)} · ${count} of ${total} scored`;
 }
 
 function escapeHtml(value: string): string {

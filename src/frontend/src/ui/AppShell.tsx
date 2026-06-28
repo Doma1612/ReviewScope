@@ -25,8 +25,8 @@ export function AppShell() {
       <header className="topbar">
         <Link className="brand" to="/"><img src={banner} alt="Logo" /></Link>
         <div className="userbar">
-          <Link to="/">Classic</Link>
-          <Link to="/deck">Spatial</Link>
+          <Link to="/">Projects</Link>
+          <Link to="/deck">Atlas overview</Link>
           <button className="theme-toggle" onClick={toggleTheme} type="button">
             {theme === "dark" ? "Clear" : "Dark"}
           </button>

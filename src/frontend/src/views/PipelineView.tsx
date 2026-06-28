@@ -26,7 +26,7 @@ const METHOD_STAGES: MethodStage[] = [
     title: "Data Ingestion & Sampling",
     methodology: "The methodology starts from a benchmark corpus of text documents, with data filtered into a comparable working set.",
     output: "Readable rows with primary keys, raw metadata, and candidate text fields.",
-    risk: "Sampling and filtering can bias what the model sees; malformed rows may be skipped in this simulated service.",
+    risk: "Sampling and filtering can bias what the model sees; malformed rows may be skipped.",
     next: "Clean text minimally and remove invalid or duplicate documents.",
   },
   {

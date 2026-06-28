@@ -2,7 +2,7 @@ import type { QueryClient } from "@tanstack/react-query";
 
 import type { Cluster, DocumentItem, EmbeddingPoint } from "./api";
 
-// F6 — optimistic cache helpers. Every cluster/document edit touches the same set
+// Optimistic cache helpers. Every cluster/document edit touches the same set
 // of project-scoped queries; these helpers cancel + snapshot them, mutate the cache
 // in place so the UI reacts before the server responds, and roll back on error.
 // `onSettled` then `invalidateAll` to reconcile with the server's recomputed truth.
@@ -143,7 +143,9 @@ export function applyCreateFromSelection(
     word_frequencies: {},
     size: docIds.size,
     sentiment_avg: null,
+    sentiment_count: 0,
     mean_stars: null,
+    cohesion: null,
     sample_docs: [],
   };
   const delta = new Map<string, number>();

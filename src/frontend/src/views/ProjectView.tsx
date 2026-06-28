@@ -4,7 +4,8 @@ import Plot from "react-plotly.js";
 import { Link, useParams } from "react-router-dom";
 
 import { api, Cluster, ClusterEdit } from "../api";
-import { hoverHtml } from "../hover";
+import { NOISE_COLOR, clusterColor, pointColor } from "../colors";
+import { hoverHtml, sentimentSummary } from "../hover";
 import {
   applyCreateFromSelection,
   applyJunk,
@@ -17,18 +18,21 @@ import {
   Snapshot,
 } from "../optimistic";
 import { POINT_CAP, samplePoints } from "../plot";
+import { showToast } from "../toast";
+import { captureClusters, toastReassign } from "../undo";
+import { CohesionChip } from "../ui/CohesionChip";
 import { DocumentsTable } from "../ui/DocumentsTable";
 import { EditHistory } from "../ui/EditHistory";
+import { LabelSourceBadge } from "../ui/LabelSourceBadge";
+import { MetricsPanel } from "../ui/MetricsPanel";
 import { StarRating } from "../ui/StarRating";
 import { WordCloud } from "../ui/WordCloud";
-
-const PALETTE = ["#38bdf8", "#a78bfa", "#34d399", "#f59e0b", "#fb7185", "#22d3ee", "#f472b6", "#bef264"];
 
 // Sentinel select value for "noise" (cluster_id = null); the API takes null.
 const NOISE = "__noise__";
 const resolveTarget = (value: string): string | null => (value === NOISE ? null : value);
 
-// F7 undo: a bulk_reassign edit stores a per-doc `before` map (doc id → old
+// Undo: a bulk_reassign edit stores a per-doc `before` map (doc id → old
 // cluster id, null = noise). Group those docs by their original cluster so we can
 // move each group back in one bulkReassign call.
 const beforeGroups = (payload: Record<string, unknown>): [string | null, string[]][] => {
@@ -55,7 +59,11 @@ export function ProjectView() {
   const [highlightedClusterId, setHighlightedClusterId] = useState<string | null>(null);
   const cardRefs = useRef<Record<string, HTMLElement | null>>({});
 
-  // F5 editing state (owner only).
+  // Cluster-list controls: sort key + free-text label filter.
+  const [clusterSort, setClusterSort] = useState<"size" | "sentiment" | "cohesion" | "label">("size");
+  const [clusterFilter, setClusterFilter] = useState("");
+
+  // Editing state (owner only).
   const isOwner = project.data?.role === "owner";
   const [editMode, setEditMode] = useState(false);
   const [selectedPointIds, setSelectedPointIds] = useState<string[]>([]); // lasso selection → document ids
@@ -93,13 +101,15 @@ export function ProjectView() {
   const bulkReassignM = useMutation({
     mutationFn: (target: string) => api.bulkReassign(projectId, selectedPointIds, resolveTarget(target)),
     onMutate: async (target: string) => {
+      const ids = [...selectedPointIds];
       const snapshot = await beginOptimistic(queryClient, projectId);
-      applyReassign(queryClient, projectId, new Set(selectedPointIds), resolveTarget(target), clusters.data ?? []);
-      return { snapshot };
+      const prev = captureClusters(queryClient, projectId, ids);
+      applyReassign(queryClient, projectId, new Set(ids), resolveTarget(target), clusters.data ?? []);
+      return { snapshot, prev, count: ids.length };
     },
     onError,
     onSettled,
-    onSuccess: () => { setSelectedPointIds([]); setReassignTarget(""); },
+    onSuccess: (_data, _vars, ctx) => { setSelectedPointIds([]); setReassignTarget(""); if (ctx) toastReassign(queryClient, projectId, ctx.prev, ctx.count); },
   });
   const createFromSelectionM = useMutation({
     mutationFn: (label: string) => api.createClusterFromSelection(projectId, selectedPointIds, label),
@@ -113,14 +123,21 @@ export function ProjectView() {
     onSuccess: () => { setSelectedPointIds([]); setNewClusterLabel(""); },
   });
   const renameM = useMutation({
-    mutationFn: ({ id, label }: { id: string; label: string }) => api.updateCluster(projectId, id, { label }),
-    onMutate: async ({ id, label }: { id: string; label: string }) => {
+    mutationFn: ({ id, label }: { id: string; label: string; prevLabel: string }) => api.updateCluster(projectId, id, { label }),
+    onMutate: async ({ id, label }: { id: string; label: string; prevLabel: string }) => {
       const snapshot = await beginOptimistic(queryClient, projectId);
       applyRename(queryClient, projectId, id, label);
       return { snapshot };
     },
     onError,
     onSettled,
+    onSuccess: (_data, { id, label, prevLabel }) => {
+      showToast({
+        message: `Renamed to "${label}"`,
+        actionLabel: "Undo",
+        onAction: () => { void api.updateCluster(projectId, id, { label: prevLabel }).then(() => invalidateAll(queryClient, projectId)); },
+      });
+    },
   });
   const mergeM = useMutation({
     mutationFn: ({ sources, target }: { sources: string[]; target: string }) => api.mergeClusters(projectId, sources, target),
@@ -144,7 +161,7 @@ export function ProjectView() {
     onSettled,
   });
 
-  // F7: invert a reversible edit. Reuses the existing mutation endpoints (so the
+  // Invert a reversible edit. Reuses the existing mutation endpoints (so the
   // undo itself is recorded as a fresh edit) and the same optimistic cache apply.
   const undoM = useMutation({
     mutationFn: async (edit: ClusterEdit) => {
@@ -188,18 +205,38 @@ export function ProjectView() {
   if (project.isLoading) return <main className="page">Loading project...</main>;
 
   const points = embeddings.data ?? [];
-  // WebGL/render cap (F6): sample huge projects down for display and force 2D
+  // WebGL/render cap: sample huge projects down for display and force 2D
   // scattergl, which renders far more smoothly than scatter3d at this scale.
   const capped = points.length > POINT_CAP;
   const displayPoints = useMemo(() => samplePoints(points), [points]);
   const webglMode = capped ? "2d" : mode;
   const clusterIndex = new Map((clusters.data ?? []).map((cluster, index) => [cluster.id, index]));
   const colors = displayPoints.map((point) => {
-    const base = PALETTE[(point.cluster_id ? clusterIndex.get(point.cluster_id) ?? 0 : 0) % PALETTE.length];
+    const base = pointColor(point.cluster_id, clusterIndex);
     const muted = highlightedClusterId && point.cluster_id !== highlightedClusterId;
     return muted ? `${base}22` : base;
   });
-  const lassoEnabled = editMode && webglMode === "2d";
+  // Lasso-reassign is disabled on the capped overview: the lasso only sees the
+  // sampled points, so reassigning would silently edit a subset of the region while
+  // implying the whole region. Bulk-reassign on the exact document table instead.
+  const lassoEnabled = editMode && webglMode === "2d" && !capped;
+  // Noise = documents left unclustered (cluster_id null). Counted from the full
+  // embeddings set, not the sampled display set, so the figure is honest.
+  const noiseCount = points.filter((point) => point.cluster_id == null).length;
+
+  // Cluster list: apply the label filter + chosen sort. Card colors are keyed by
+  // cluster id (clusterIndex), so reordering the display list never recolors points.
+  const visibleClusters = useMemo(() => {
+    const needle = clusterFilter.trim().toLowerCase();
+    const list = (clusters.data ?? []).filter((cluster) => cluster.label.toLowerCase().includes(needle));
+    const num = (value: number | null) => (value == null ? -Infinity : value);
+    const sorted = [...list];
+    if (clusterSort === "size") sorted.sort((a, b) => b.size - a.size);
+    else if (clusterSort === "sentiment") sorted.sort((a, b) => num(b.sentiment_avg) - num(a.sentiment_avg));
+    else if (clusterSort === "cohesion") sorted.sort((a, b) => num(b.cohesion) - num(a.cohesion));
+    else sorted.sort((a, b) => a.label.localeCompare(b.label));
+    return sorted;
+  }, [clusters.data, clusterFilter, clusterSort]);
 
   const targetOptions = (
     <>
@@ -224,7 +261,8 @@ export function ProjectView() {
       {project.data?.status === "ready" && <>
         <section className="plot-panel">
           <div className="plot-toolbar">
-            {capped && <span className="plot-hint">Showing {displayPoints.length.toLocaleString()} of {points.length.toLocaleString()} points (2D)</span>}
+            {capped && <span className="plot-hint">Overview: showing {displayPoints.length.toLocaleString()} of {points.length.toLocaleString()} points (2D) · small clusters may be under-sampled</span>}
+            {capped && editMode && <span className="plot-hint">Lasso-reassign is off on the sampled overview — use the document table to reassign in bulk.</span>}
             {!capped && editMode && mode === "3d" && <span className="plot-hint">Switch to 2D to lasso-select</span>}
             {!capped && <>
               <button className={`button ${mode === "2d" ? "primary" : "secondary"}`} onClick={() => setMode("2d")} type="button">2D</button>
@@ -262,6 +300,27 @@ export function ProjectView() {
             useResizeHandler
             className="plot"
           />
+          <p className="plot-caveat">UMAP projection — distances and gaps between clusters aren't metric. Use it to spot groups, not to judge how related or far apart they are.</p>
+          <div className="plot-legend" role="group" aria-label="Cluster legend">
+            {visibleClusters.map((cluster) => {
+              const active = highlightedClusterId === cluster.id;
+              return (
+                <button
+                  key={cluster.id}
+                  type="button"
+                  className={`legend-item ${active ? "active" : ""}`}
+                  aria-pressed={active}
+                  onClick={() => setHighlightedClusterId((prev) => (prev === cluster.id ? null : cluster.id))}
+                >
+                  <span className="legend-swatch" style={{ background: clusterColor(clusterIndex.get(cluster.id) ?? 0) }} aria-hidden />
+                  {cluster.label}
+                </button>
+              );
+            })}
+            {noiseCount > 0 && (
+              <span className="legend-item legend-static"><span className="legend-swatch" style={{ background: NOISE_COLOR }} aria-hidden />noise</span>
+            )}
+          </div>
           {editMode && selectedPointIds.length > 0 && (
             <div className="scatter-selection">
               <span>{selectedPointIds.length} selected</span>
@@ -274,6 +333,21 @@ export function ProjectView() {
           )}
         </section>
         <section className="cluster-list">
+          <div className="cluster-list-controls">
+            <input className="cluster-filter" placeholder="Filter clusters…" value={clusterFilter} onChange={(event) => setClusterFilter(event.target.value)} />
+            <label className="cluster-sort">Sort
+              <select value={clusterSort} onChange={(event) => setClusterSort(event.target.value as typeof clusterSort)}>
+                <option value="size">Size</option>
+                <option value="sentiment">Sentiment</option>
+                <option value="cohesion">Cohesion</option>
+                <option value="label">Name</option>
+              </select>
+            </label>
+            <select className="cluster-jump" value="" onChange={(event) => { if (event.target.value) setHighlightedClusterId(event.target.value); }}>
+              <option value="">Jump to…</option>
+              {visibleClusters.map((cluster) => <option key={cluster.id} value={cluster.id}>{cluster.label}</option>)}
+            </select>
+          </div>
           {editMode && selectedClusterIds.size >= 2 && (
             <div className="merge-toolbar">
               <span>{selectedClusterIds.size} clusters</span>
@@ -285,7 +359,7 @@ export function ProjectView() {
               <button className="button secondary" type="button" onClick={() => setSelectedClusterIds(new Set())}>Clear</button>
             </div>
           )}
-          {clusters.data?.map((cluster) => (
+          {visibleClusters.map((cluster) => (
             <ClusterCard
               key={cluster.id}
               cluster={cluster}
@@ -296,16 +370,27 @@ export function ProjectView() {
               otherClusters={(clusters.data ?? []).filter((c) => c.id !== cluster.id)}
               selected={selectedClusterIds.has(cluster.id)}
               onToggleSelect={() => toggleClusterSelect(cluster.id)}
-              onRename={(label) => renameM.mutate({ id: cluster.id, label })}
+              onRename={(label) => renameM.mutate({ id: cluster.id, label, prevLabel: cluster.label })}
               onMergeInto={(targetId) => mergeM.mutate({ sources: [cluster.id], target: targetId })}
-              onJunk={() => { if (window.confirm(`Mark "${cluster.label}" as junk? Its documents become noise.`)) junkM.mutate(cluster.id); }}
+              onJunk={() => { if (window.confirm(`Mark "${cluster.label}" as junk? Its documents become noise. This cannot be undone.`)) junkM.mutate(cluster.id); }}
             />
           ))}
+          {noiseCount > 0 && (
+            <article className="card noise-card">
+              <div className="cluster-card-head">
+                <span className="noise-swatch" style={{ background: NOISE_COLOR }} aria-hidden />
+                <h2>Noise</h2>
+              </div>
+              <p className="cluster-card-meta">{noiseCount.toLocaleString()} unclustered docs</p>
+              <p>Documents left unassigned by clustering. Reassign them in edit mode or from the document table.</p>
+            </article>
+          )}
         </section>
         <section className="card full">
           <div className="card-row"><h2>All documents</h2><button className="button secondary" type="button" onClick={() => setShowDocuments((prev) => !prev)}>{showDocuments ? "Hide" : "Show all documents"}</button></div>
           {showDocuments && <DocumentsTable projectId={projectId} editable={Boolean(editMode && isOwner)} clusters={clusters.data ?? []} />}
         </section>
+        <MetricsPanel projectId={projectId} />
         <EditHistory
           projectId={projectId}
           clusters={clusters.data ?? []}
@@ -333,6 +418,11 @@ function ClusterCard({ cluster, projectId, highlighted, cardRef, editMode, other
 }) {
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(cluster.label);
+  // Keep cards a uniform height: collapsed shows one clamped sample + a short word
+  // cloud; "Show more" reveals the rest (R15).
+  const [expanded, setExpanded] = useState(false);
+  const sampleDocs = expanded ? cluster.sample_docs : cluster.sample_docs.slice(0, 1);
+  const hasMore = cluster.sample_docs.length > 1 || Object.keys(cluster.word_frequencies ?? {}).length > 10;
 
   return (
     <article className={`card ${highlighted ? "highlighted" : ""}`} ref={cardRef}>
@@ -347,11 +437,13 @@ function ClusterCard({ cluster, projectId, highlighted, cardRef, editMode, other
         ) : (
           <h2>{cluster.label}</h2>
         )}
+        {!renaming && <LabelSourceBadge labelSource={cluster.label_source} />}
       </div>
       <p>{cluster.summary}</p>
-      <p className="cluster-card-meta">{cluster.size} docs · sentiment {cluster.sentiment_avg ?? "n/a"}{cluster.mean_stars != null && <StarRating value={cluster.mean_stars} compact />}</p>
-      <WordCloud frequencies={cluster.word_frequencies} max={18} compact />
-      {cluster.sample_docs.map((doc) => <blockquote key={doc.id}>{doc.text}</blockquote>)}
+      <p className="cluster-card-meta">{cluster.size} docs · {sentimentSummary(cluster.sentiment_avg, cluster.sentiment_count, cluster.size)}{cluster.mean_stars != null && <StarRating value={cluster.mean_stars} compact />}<CohesionChip value={cluster.cohesion} compact /></p>
+      <WordCloud frequencies={cluster.word_frequencies} max={expanded ? 24 : 10} compact />
+      {sampleDocs.map((doc) => <blockquote className={expanded ? "" : "clamped"} key={doc.id}>{doc.text}</blockquote>)}
+      {hasMore && <button className="card-show-more" type="button" onClick={() => setExpanded((prev) => !prev)}>{expanded ? "Show less" : "Show more"}</button>}
       {editMode ? (
         <div className="actions">
           {!renaming && <button className="button secondary" type="button" onClick={() => { setDraft(cluster.label); setRenaming(true); }}>Rename</button>}

@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 
-// Lightweight, dependency-free word cloud (F3). Term size scales with its
+// Lightweight, dependency-free word cloud. Term size scales with its
 // frequency from `cluster.word_frequencies` ({word: count}). Used compact on the
 // cluster cards (ProjectView) and full-width on ClusterDetail.
 export function WordCloud({ frequencies, max = 32, compact = false }: { frequencies: Record<string, number> | undefined; max?: number; compact?: boolean }) {

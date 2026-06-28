@@ -1,4 +1,4 @@
-// Star rating for `cluster.mean_stars` (F3). Renders five stars with a gold
+// Star rating for `cluster.mean_stars`. Renders five stars with a gold
 // overlay clipped to the average (assumed 5-point review scale) plus the numeric
 // value. Returns null when there is no rating, so callers can render it bare.
 export function StarRating({ value, compact = false }: { value: number | null | undefined; compact?: boolean }) {

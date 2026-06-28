@@ -36,14 +36,18 @@ export type Cluster = {
   word_frequencies: Record<string, number>;
   size: number;
   sentiment_avg: number | null;
+  sentiment_count: number;
   mean_stars: number | null;
+  cohesion: number | null;
   sample_docs: { id: string; text: string }[];
 };
 export type DocumentItem = { id: string; primary_key_value: string; text: string; raw_data: Record<string, unknown>; cluster_id: string | null; sentiment_score: number | null };
 export type Member = { user_id: string; email: string; role: "owner" | "viewer" };
 export type Models = { embedding_model: string; label_model: string; variant: string; simulated: boolean };
 export type Health = { status: string };
+export type ProjectMetrics = { metrics: Record<string, unknown> | null; computed_at: string | null; stale: boolean };
 export type SchemaColumn = { name: string; type: string; is_primary_key: boolean };
+export type DocumentFilter = { column: string; op: "eq" | "gte" | "lte"; value: string; type: string };
 export type ClusterEdit = {
   id: string;
   project_id: string;
@@ -88,13 +92,21 @@ export const api = {
   embeddings: (projectId: string) => request<EmbeddingPoint[]>(`/api/projects/${projectId}/embeddings`),
   clusters: (projectId: string) => request<Cluster[]>(`/api/projects/${projectId}/clusters`),
   cluster: (projectId: string, clusterId: string) => request<Cluster>(`/api/projects/${projectId}/clusters/${clusterId}`),
-  documents: (projectId: string, params: { clusterId?: string; limit?: number; offset?: number } = {}) => {
+  documents: (projectId: string, params: { clusterId?: string; limit?: number; offset?: number; filters?: DocumentFilter[] } = {}) => {
     const query = new URLSearchParams();
     if (params.clusterId) query.set("cluster_id", params.clusterId);
     if (params.limit != null) query.set("limit", String(params.limit));
     if (params.offset != null) query.set("offset", String(params.offset));
+    if (params.filters?.length) query.set("filters", JSON.stringify(params.filters));
     const qs = query.toString();
     return request<DocumentItem[]>(`/api/projects/${projectId}/documents${qs ? `?${qs}` : ""}`);
+  },
+  documentsCount: (projectId: string, params: { clusterId?: string; filters?: DocumentFilter[] } = {}) => {
+    const query = new URLSearchParams();
+    if (params.clusterId) query.set("cluster_id", params.clusterId);
+    if (params.filters?.length) query.set("filters", JSON.stringify(params.filters));
+    const qs = query.toString();
+    return request<{ total: number }>(`/api/projects/${projectId}/documents/count${qs ? `?${qs}` : ""}`);
   },
   clusterDocuments: (projectId: string, clusterId: string) => request<DocumentItem[]>(`/api/projects/${projectId}/clusters/${clusterId}/documents`),
   reassignDocument: (projectId: string, documentId: string, clusterId: string | null) =>
@@ -115,6 +127,7 @@ export const api = {
   saveSchema: (projectId: string, columns: SchemaColumn[]) =>
     request<{ columns: SchemaColumn[] }>(`/api/projects/${projectId}/schema`, { method: "POST", body: JSON.stringify({ columns }) }),
   edits: (projectId: string) => request<ClusterEdit[]>(`/api/projects/${projectId}/edits`),
+  projectMetrics: (projectId: string) => request<ProjectMetrics>(`/api/projects/${projectId}/metrics`),
   members: (projectId: string) => request<Member[]>(`/api/projects/${projectId}/members`),
   addMember: (projectId: string, email: string) => request<Member>(`/api/projects/${projectId}/members`, { method: "POST", body: JSON.stringify({ email, role: "viewer" }) }),
   updateMember: (projectId: string, userId: string, role: Member["role"]) => request<Member>(`/api/projects/${projectId}/members/${userId}`, { method: "PATCH", body: JSON.stringify({ role }) }),
