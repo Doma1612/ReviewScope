@@ -42,6 +42,26 @@ Single source of truth for status. Update the box here **and** the WP's own
 - ☐ **T3** — search / filter / noise triage
 - ☐ **T4** — re-run / re-cluster controls + append data
 
+**Group R — review fixes (UX honesty pass).** P0 = actively misleading; P1 =
+high-leverage UX; P2 = polish.
+- ✅ **R1** (P0) — reserved grey for noise + count + card
+- ✅ **R2** (P0) — cluster-stratified point sampling + overview caveat
+- ✅ **R3** (P0) — scope/disable lasso-reassign when capped
+- ✅ **R4** (P0) — per-cluster cohesion metric + confidence chip
+- ✅ **R5** (P0) — label_source provenance badge
+- ✅ **R6** (P0) — gate/remove "simulated" UI copy behind `models.simulated`
+- ✅ **R7** (P1) — sentiment honesty (round + "sentiment on n of N")
+- ✅ **R8** (P1) — facet filters from the typed schema
+- ✅ **R9** (P1) — cluster list sort + text filter + jump-to
+- ✅ **R10** (P1) — junk "cannot be undone" + inline undo toast
+- ✅ **R11** (P1) — UMAP caveat on both maps
+- ✅ **R12** (P1) — document-row → cluster link + total "of N" pager
+- ✅ **R13** (P2) — resolve Atlas vs Projects two-home ambiguity
+- ✅ **R14** (P2) — cluster legend + colorblind-safe palette + focus states
+- ✅ **R15** (P2) — clamp sample_docs + word-cloud with "show more"
+- ✅ **R16** (P2) — fix phantom empty "Next" page
+- ✅ **R17** (P1) — project-level clustering-quality panel (capture `RunResult.metrics`)
+
 ---
 
 ## Shared Preamble (prepend to every WP)
@@ -813,6 +833,334 @@ table).
 In-app controls (# clusters, embedding model, min cluster size) tied to
 `GET /api/models`, triggering a re-run (which now survives edits via B6).
 "Append data to existing project" is the spec's own future extension.
+
+---
+
+# Group R — Review fixes (UX-honesty pass)
+
+A prioritized list from a design/UX review of the shipped F-series. **P0** items
+are actively misleading — they can lead a user to a wrong conclusion about their
+data — so they come first. **P1** is high-leverage UX, **P2** is polish.
+
+## R1 — Reserved grey for noise + count + card (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** New shared `src/frontend/src/colors.ts` is the single source of
+truth: `PALETTE` (Okabe–Ito colorblind-safe set — also covers R14's palette half),
+`NOISE_COLOR` reserved grey, `clusterColor(i)`, and `pointColor(clusterId,
+clusterIndex)` (noise/orphan → grey). Both scatters now color via `pointColor`
+(`ProjectView`/`DeckDashboard`) so noise no longer borrows `PALETTE[0]`. Noise
+**count** is computed from the full embeddings set (not the sampled display set) and
+shown as a dashed **noise card** in `ProjectView`'s cluster list and a noise
+**layer** in `DeckDashboard`. CSS: `.noise-card`/`.noise-swatch`/
+`.deck-layer-noise`. `tsc --noEmit` clean.
+
+Today `cluster_id = null` (noise) is colored `PALETTE[0]` in both scatters
+(`ProjectView.tsx:198`, `DeckDashboard.tsx:131`), so noise is indistinguishable
+from the first real cluster. Give noise a dedicated reserved grey, exclude it from
+the cluster color cycle, and surface a noise **count** + a noise **card/row** so
+users can see (and triage) how much was left unclustered.
+
+## R2 — Cluster-stratified point sampling + overview caveat (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** `samplePoints` (`plot.ts`) now groups by `cluster_id` (noise = `""`
+stratum) and stride-samples *within each cluster* to its proportional share but
+never below `STRATUM_FLOOR = 4` (capped at the cluster's real size), so a small
+cluster can't be sampled to zero. Still deterministic + order-stable per stratum, so
+the display index still maps to a stable document for click/lasso. Total may slightly
+exceed `POINT_CAP` (≈floor × #small clusters) — acceptable for an overview. Capped
+captions on both maps now read "Overview … small clusters may be under-sampled".
+
+`samplePoints` (`plot.ts:11`) takes a uniform stride, so a small cluster can be
+sampled to zero points and silently vanish from the map. Make the sample
+**cluster-stratified** (guarantee ≥1 point — ideally a small floor — per cluster)
+and label the capped map "overview — small clusters may be under-sampled."
+
+## R3 — Scope/disable lasso-reassign when capped (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** R2
+
+**Done notes:** `lassoEnabled` now also requires `!capped`, so the lasso is off on
+the sampled overview (no `dragmode: lasso` → no partial-region selection). An
+edit-mode hint tells the user to use the exact document table for bulk reassignment
+when capped. Chose **disable** over scope because the document table reassigns over
+real filtered sets, not a sample — no misleading partial edits.
+
+When the scatter is capped (F6) the lasso only sees sampled points, so a
+region-reassign edits **only the sample** while implying it edited the whole
+region. Disable lasso-reassign when capped, or explicitly scope it ("reassigns the
+N selected sampled points, not the full region") so the action matches its effect.
+
+## R4 — Per-cluster cohesion metric + confidence chip (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** Cohesion = mean cosine similarity of member embeddings to the
+cluster centroid (0–1, higher = tighter). Pure, dependency-free helper
+`cohesion_score` in new `app/services/metrics.py` (zero-norm / malformed vectors
+dropped; `None` for <2 usable vectors) — a cheap stand-in for silhouette since the
+backend venv has no numpy/sklearn. New nullable `Cluster.cohesion` column +
+migration `0004_cluster_cohesion` (verified live on the dev DB: up/down/up clean,
+column present). Seeded at the initial run in `ml_mapping.result_to_orm` (builds
+per-cluster vector lists from the run's docs+embeddings) and re-derived on every
+edit in `recompute.recompute_cluster` and `replay._recompute_clusters_sync` (both
+now `outerjoin` `Embedding.vector`). Exposed on `ClusterRead`. Frontend:
+`cohesion` on the `Cluster` type + a reusable `ui/CohesionChip.tsx` (High/Medium/Low
+buckets at 0.5/0.25 + raw value + explanatory tooltip) on the cluster card and
+detail header. Tests: `tests/test_metrics.py` (5 cases). Full backend suite: 60
+passed; `tsc --noEmit` clean.
+
+There is no signal for how tight/trustworthy a cluster is. Compute a cohesion
+metric server-side (mean intra-cluster cosine distance to centroid, or silhouette)
+in the recompute path (`models.py:74` Cluster), persist it, expose on `ClusterRead`,
+and render a confidence chip on the card/detail.
+
+## R5 — label_source provenance badge (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** New `ui/LabelSourceBadge.tsx` maps `label_source` to a tier: AI
+(`ollama:*`, blue), Human (`hitl_override` "Edited" / `hitl_approved` "Approved",
+green), Keywords (`terms_fallback`, grey) — each with an explanatory `title`. Shown
+on the cluster card head (`ProjectView`, hidden while renaming) and the
+`ClusterDetail` title. CSS `.label-source-badge.{ai,human,fallback}`. `tsc` clean.
+(T1 still owns the confirm/sign-off flow; this is just the badge.)
+
+`label_source` is already on `ClusterRead` (data at `models.py:83`) but unused in
+the UI. Render it as a badge so an AI label (`ollama:*`) ≠ a keyword fallback
+(`terms_fallback`) ≠ a human edit (`hitl_override`/`hitl_approved`). (Overlaps T1;
+do the badge here, leave confirm/sign-off to T1.)
+
+## R6 — Gate/remove "simulated" UI copy (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** New `src/frontend/src/useSimulated.ts` hook reads `GET /api/models`
+(no auth; cached under `["models"]`, defaults `false` until loaded so real
+deployments never flash the simulated note) and returns `models.simulated`. Dynamic
+view copy is now gated behind it: `Dashboard` subtitle, `DeckDashboard`'s map-empty
+note + the `PointCloud` caption ("UMAP x/y · simulated layer data" only when
+simulated, passed as a `simulated` prop). Static constant copy was reworded to drop
+"simulated" instead of gating: `AuthPage` tagline and `PipelineView`'s ingest risk
+string. `SettingsView` already gated its "(simulated)" variant suffix behind
+`models.simulated` — left as is. Audit: no ungated "simulat" copy remains. `tsc`
+clean.
+
+"Simulated" copy is sprinkled across the UI (`Dashboard.tsx:16`, `AuthPage.tsx:33`,
+`DeckDashboard.tsx:83,149`, `PipelineView.tsx:29`, `SettingsView.tsx:33`) even when
+the backend is running real models. Gate every "simulated" string behind
+`models.simulated` (from `GET /api/models`) so it only shows when actually
+simulating.
+
+## R7 — Sentiment honesty: round + coverage (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** Added a non-stored `sentiment_count` to `ClusterRead` (count of the
+cluster's docs with a non-null `sentiment_score`). The `/clusters` list computes it
+with one grouped `func.count()` query (dict keyed by cluster id); `/clusters/{id}`
+uses a `_sentiment_count` helper. Frontend: `sentiment_count` on the `Cluster` type
+(+ optimistic temp cluster) and a shared `hover.sentimentSummary(avg, count, total)`
+→ `"sentiment 0.42 · 8 of 12 scored"` (rounded to 2dp), or `"sentiment n/a"` when
+nothing is scored. Wired into the `ProjectView` card, `ClusterDetail` header, and
+`DeckDashboard` cluster layer. No migration (derived at read time). `tsc` clean; 60
+backend tests pass.
+
+`sentiment_avg` renders raw (`ProjectView.tsx:352`). Round it and show coverage —
+"sentiment on n of N" — so a mean computed over a handful of scored docs isn't read
+as the whole cluster. Needs a per-cluster scored-doc count.
+
+## R8 — Facet filters from the typed schema (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B5, F4
+
+**Done notes:** Server-side so filtering spans the whole dataset (not just the
+current page). Backend: `/documents` + `/documents/count` take an optional `filters`
+JSON param parsed by `_document_filter_conditions` — `eq` (exact text, for
+booleans/values), `gte`/`lte` numeric via a **regex-guarded CASE cast** (a
+non-numeric cell yields NULL, never an error), and `gte`/`lte` date as ISO-lexical
+text compare. Unknown ops / bad JSON are ignored. Tests in
+`tests/test_document_filters.py` (4). Frontend: `DocumentsTable` derives a facet bar
+from the typed schema columns — numeric min/max, date from/to, boolean any/true/false
+— builds the typed `DocumentFilter[]` (`api.ts`), feeds both the rows and count
+queries, snaps to page 0 on change, and keeps the bar visible on an empty result
+with a "No documents match these filters" message + Clear. Cluster-list-level
+faceting is left to R9's text/sort controls; the typed facets live on the table
+(project-wide and per-cluster). `tsc` clean; backend 64 pass.
+
+Use the typed schema (`api.getSchema`) to add facet filters to the documents table
+(and cluster list): rating range, date range, boolean toggles
+(`Dashboard.tsx:194`-area schema types).
+
+## R9 — Cluster list sort + filter + jump-to (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none (R4 for cohesion sort)
+
+**Done notes:** `ProjectView` cluster list gained a `.cluster-list-controls`
+toolbar: a label text filter, a sort select (Size / Sentiment / Cohesion / Name —
+nulls sort last for sentiment/cohesion), and a "Jump to…" select that sets
+`highlightedClusterId` (reusing the existing scroll-into-view effect). Derived via a
+memoized `visibleClusters`; card colors stay keyed by cluster id so reordering never
+recolors points, and merge-target `otherClusters` still uses the full list.
+
+`ProjectView.tsx:288` renders clusters in a fixed order. Add sort (size /
+sentiment / cohesion), a text filter, and jump-to-card.
+
+## R10 — Junk "cannot be undone" + inline undo toast (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** F7
+
+**Done notes:** Junk confirm now ends with "This cannot be undone." New app-wide
+toast store `src/frontend/src/toast.tsx` (module-level + `useSyncExternalStore`, no
+provider) with `showToast({message, actionLabel, onAction})` + a `<Toaster />`
+mounted at the app root (`main.tsx`), auto-dismiss 7s. Shared `src/frontend/src/
+undo.ts` captures each moved doc's prior cluster (`captureClusters` — `clusterId`
+for a scoped table, else the embeddings cache) and `toastReassign` shows "Moved N
+documents · Undo" that bulk-moves them back per original cluster. Wired into single
++ bulk reassign in `DocumentsTable` and the lasso bulk reassign in `ProjectView`;
+rename shows "Renamed to … · Undo" (restores the previous label). Non-reversible
+edits (merge / junk / create-from-selection) intentionally get no undo. `tsc` clean.
+
+The junk confirm (`ProjectView.tsx:301`) doesn't warn it's irreversible (merge/junk
+aren't undoable in F7). Add "This cannot be undone" to the confirm, and an inline
+**undo** toast after each reversible edit.
+
+## R11 — UMAP caveat on both maps (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** `ProjectView` shows a `.plot-caveat` line under the scatter ("UMAP
+projection — distances and gaps between clusters aren't metric…"); `DeckDashboard`'s
+map caption now reads "UMAP x/y · distances aren't metric".
+
+Add a caveat near both maps (`DeckDashboard.tsx:39`, `ProjectView.tsx:234`) that
+UMAP distances/gaps are not metric — cluster *separation* on the map is not a
+reliable measure of semantic distance.
+
+## R12 — Document-row → cluster link + total "of N" pager (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** R16
+
+**Done notes:** Done together with R16 (shared `DocumentsTable` + the new count
+endpoint). Project-wide view (`!clusterId`) gains a **Cluster** column linking each
+row to `/projects/{id}/clusters/{cluster_id}` (noise rows show an italic "noise");
+hidden in the cluster-scoped view where it'd be redundant. Pager shows "Showing a–b
+of N" from the real total.
+
+In `DocumentsTable.tsx`: link each row to its cluster, and show the total document
+count ("of N") in the pager (`DocumentsTable.tsx:135`) instead of just the current
+range.
+
+## R13 — Resolve Atlas vs Projects two-home ambiguity (P2)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** Chose the low-risk "pick a primary" path over the WebGL rewrite.
+Nav labels disambiguated: "Classic"→**Projects** (primary home), "Spatial"→**Atlas
+overview** (secondary). `DeckDashboard` reframed as a "Read-only overview" whose
+hero + panel link send users to Projects "for the full workspace — editing,
+documents, and the detailed Plotly view", so the Atlas no longer reads as a
+competing home. **Alternative not taken:** porting the Atlas's DOM point cloud to
+WebGL/Plotly to make it a co-equal renderer — larger effort, left as a follow-up if
+the Atlas should become a primary surface.
+
+Two competing homes (Deck "Atlas" vs Projects) with the Atlas as the weaker
+DOM-based renderer (`DeckDashboard.tsx:130`). Either resolve the ambiguity (pick a
+primary) or move the Atlas onto WebGL/Plotly.
+
+## R14 — Cluster legend + colorblind palette + focus states (P2)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** R1
+
+**Done notes:** Colorblind-safe palette already landed in R1 (Okabe–Ito in
+`colors.ts`). Added a `.plot-legend` under the `ProjectView` scatter: one
+keyboard-focusable `<button>` per cluster (swatch via `clusterColor(clusterIndex)` +
+label, `aria-pressed`) that toggles `highlightedClusterId`, plus a static noise
+swatch. `:focus-visible` outline on each item. Note: Plotly canvas points aren't
+individually DOM-focusable, so the legend is the keyboard-accessible path to
+highlight a cluster (color → cluster mapping + focus states in one control).
+
+Add a legend (color → cluster), switch to a colorblind-safe palette
+(`ProjectView.tsx:25`), and add focus/keyboard states on points.
+
+## R15 — Clamp sample_docs + word-cloud with "show more" (P2)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** `ClusterCard` gained an `expanded` toggle: collapsed shows one
+sample quote (CSS `-webkit-line-clamp:3` via `blockquote.clamped`) and a 10-word
+cloud; "Show more" reveals all sample docs and a 24-word cloud. The toggle only
+renders when there's more to show (`>1` sample or `>10` words). `.card-show-more`
+CSS added.
+
+Cards can grow unbounded (`ProjectView.tsx:354`). Clamp `sample_docs` and
+word-cloud length on the card with a "show more" toggle.
+
+## R16 — Fix phantom empty "Next" page (P2)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** New `GET /{project_id}/documents/count?cluster_id=` endpoint
+(`DocumentCount{total}`, declared **before** `/documents/{document_id}` so "count"
+isn't matched as a doc id) + `api.documentsCount`. `DocumentsTable` queries it;
+`hasNext = offset + rows.length < total` (falls back to the old page-full heuristic
+only while the count loads), so "Next" no longer offers an empty page when the total
+is an exact multiple of `PAGE_SIZE`.
+
+`hasNext = rows.length === PAGE_SIZE` (`DocumentsTable.tsx:72`) shows a "Next" that
+leads to an empty page when the total is an exact multiple of `PAGE_SIZE`. Use a
+real total count (pairs with R12).
+
+## R17 — Project-level clustering-quality panel (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none (real-mode runs only)
+
+**Done notes:** Persisted `Project.metrics` (JSONB) + `Project.metrics_run_at` —
+migration `0005_project_metrics` (verified live up/down/up). `run_ml_pipeline` now
+captures `result.metrics` into the project on the ready commit (`None` when the run
+has no metrics, e.g. simulated). New `GET /{project_id}/metrics` →
+`ProjectMetricsRead{metrics, computed_at, stale}` where `stale` = the latest
+`ClusterEdit` postdates `metrics_run_at`. Frontend: `api.projectMetrics` + types and
+a collapsible `ui/MetricsPanel.tsx` on `ProjectView` (lazy-fetch on open) that
+labels the known keys (silhouette excl/incl noise, Davies–Bouldin,
+Calinski–Harabasz, C_v coherence, rating entropy, n_clusters, noise fraction),
+formats numbers, shows a stale warning, carries the harness honesty caveat
+(instruction-tuned embeddings inflate silhouette; excl-noise = the easy remainder),
+and shows a "only for real, non-simulated runs" message when metrics are null. No
+metrics fabricated in sim mode. Backend 64 pass; `tsc` clean.
+
+**Deviations:** Surfaced via a dedicated `GET /metrics` (not on `ProjectRead`) so the
+project list stays lean; staleness is a computed flag (no recompute of run-level
+metrics on edit, as planned).
+
+**Why:** In real mode (`SIMULATE_ML=false`) the pipeline already computes a rich,
+three-tier quality report — silhouette (noise-incl **and** noise-excl),
+Davies–Bouldin, Calinski–Harabasz, C_v topic coherence, rating entropy,
+`n_clusters`, noise fraction — into `RunResult.metrics` (see
+`reviewscope_ml/core/metrics.py` + `eval/harness.py`). The app **drops it on the
+floor**: `ml_pipeline.run_ml_pipeline` / `ml_mapping` never read `result.metrics`,
+so none of it is persisted or shown. These are already-paid-for signals the user
+never sees. Distinct from R4 cohesion, which is *per-cluster* and incremental; these
+are *whole-partition*, *run-level*, and only meaningful for a real (non-simulated)
+run — and go stale after manual edits.
+
+**Do:**
+1. **Capture + persist.** In `run_ml_pipeline`, after `persist_run_result`, read
+   `result.metrics` and store it. Cheapest: a `Project.metrics` JSONB column (+
+   migration `0005_*`) holding the dict verbatim, plus a `metrics_run_at` timestamp
+   so the UI can flag "computed before your N edits". (A separate `run_metrics`
+   table is overkill until run history exists.) Simulated runs have no real
+   geometry, so persist `null`/`{}` in sim mode — do **not** fabricate numbers.
+2. **Expose.** Add the metrics to the project read schema (`ProjectRead` or a
+   dedicated `GET /{project_id}/metrics`), nullable. Add the type + `api.metrics()`
+   to `api.ts`.
+3. **Surface.** A "Clustering quality" panel on `ProjectView` (collapsible, like
+   `EditHistory`): show silhouette (both variants), coherence, rating entropy,
+   n_clusters, noise %. **Carry the harness's own caveats** as helper text —
+   instruction-tuned embeddings inflate silhouette mechanically, so read it
+   alongside coherence (this is documented verbatim in `embed/models.py` and
+   `eval/model_sweep.py`); silhouette excl-noise is "computed on the easy
+   remainder". Hide the panel (or show "not available for simulated runs") when
+   metrics are null.
+4. **Staleness.** If `metrics_run_at` predates the latest `ClusterEdit`, badge the
+   panel "reflects the original run, not your edits" — these are not recomputed by
+   B2 (whole-partition silhouette would need every point on every edit; out of
+   scope).
+
+**Acceptance:** a real run shows silhouette/coherence/entropy/n_clusters with their
+caveats; a simulated run hides the panel (no fabricated metrics); the panel badges
+itself stale after an edit.
+
+**Reference:** `reviewscope_ml/core/metrics.py` (`compute_metrics`,
+`compute_coherence`, `compute_rating_entropy`), `eval/harness.py`
+(`_silhouette_incl_noise`, three-tier framing), and the honesty notes in
+`embed/models.py` / `eval/model_sweep.py`.
 
 ---
 
