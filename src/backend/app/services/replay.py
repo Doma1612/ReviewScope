@@ -1,11 +1,11 @@
-"""WP B6 — replay manual edits over a fresh run so re-processing never destroys
+"""Replay manual edits over a fresh run so re-processing never destroys
 human work.
 
 ``persist_run_result`` (``ml_mapping.py``) wipes and rewrites a project's clusters
 and documents from scratch on every run. Cluster ids are regenerated and any
 human-only cluster (created from a selection, or by hand) is gone. This module is
 the app analogue of ``reviewscope_ml.hitl.apply_feedback.apply_run_feedback``: it
-takes the project's :class:`ClusterEdit` audit log (B1) and re-applies the human
+takes the project's :class:`ClusterEdit` audit log and re-applies the human
 *decisions* on top of the new run — keeping the better base clustering while
 restoring renames, reassignments and human-made clusters.
 
@@ -25,7 +25,7 @@ Application order mirrors ``apply_feedback``: creates → merges → junk → sp
 label actions → doc reassignments → confirm, each group in ``created_at`` order
 (creates run first because later merges/reassignments may target them; splits and
 confirm have no app-side artifact yet and are logged + skipped). Affected clusters
-are recomputed (B2) afterwards.
+are recomputed afterwards.
 
 ``label_source == "hitl_override"`` protection: replay runs *after* persist, so a
 human rename re-applied here always wins over the run's machine label. Any future
@@ -42,7 +42,8 @@ from typing import Any
 from sqlalchemy import select
 
 from app.ml_mapping import derive_roles
-from app.models import Cluster, ClusterEdit, Document, ProjectSchema
+from app.models import Cluster, ClusterEdit, Document, Embedding, ProjectSchema
+from app.services.metrics import cohesion_score
 from app.services.recompute import _parse_rating, _terms_and_frequencies, numeric_aggregates
 
 logger = logging.getLogger("reviewscope.replay")
@@ -77,8 +78,8 @@ def snapshot_membership(session, project_id: uuid.UUID) -> MembershipSnapshot:
 
 def replay_edits(session, project_id: uuid.UUID, snapshot: MembershipSnapshot) -> None:
     """Re-apply the project's :class:`ClusterEdit` log onto the freshly persisted
-    rows. The caller owns the surrounding transaction/commit (B6 calls this from
-    ``run_ml_pipeline`` after persist, before the ``status=ready`` commit)."""
+    rows. The caller owns the surrounding transaction/commit (``run_ml_pipeline``
+    calls this after persist, before the ``status=ready`` commit)."""
     docs = list(session.execute(select(Document).where(Document.project_id == project_id)).scalars().all())
     doc_by_pk: dict[str, Document] = {d.primary_key_value: d for d in docs}
     # The fresh run's base assignment — the anchor for resolving old clusters by
@@ -232,20 +233,29 @@ def _recompute_clusters_sync(session, project_id: uuid.UUID, cluster_ids: list[u
         if cluster is None or cluster.project_id != project_id:
             continue
         rows = session.execute(
-            select(Document.text, Document.sentiment_score, Document.raw_data).where(
+            select(
+                Document.text,
+                Document.sentiment_score,
+                Document.raw_data,
+                Embedding.vector,
+            )
+            .outerjoin(Embedding, Embedding.document_id == Document.id)
+            .where(
                 Document.project_id == project_id,
                 Document.cluster_id == cluster_id,
             )
         ).all()
-        texts = [text for text, _, _ in rows]
-        sentiments = [sentiment for _, sentiment, _ in rows]
-        ratings = [_parse_rating(raw, rating_col) for _, _, raw in rows]
+        texts = [text for text, _, _, _ in rows]
+        sentiments = [sentiment for _, sentiment, _, _ in rows]
+        ratings = [_parse_rating(raw, rating_col) for _, _, raw, _ in rows]
+        vectors = [vector for _, _, _, vector in rows if vector]
 
         agg = numeric_aggregates(sentiments, ratings)
         top_terms, freqs = _terms_and_frequencies(texts)
         cluster.size = agg["size"]
         cluster.sentiment_avg = agg["sentiment_avg"]
         cluster.mean_stars = agg["mean_stars"]
+        cluster.cohesion = cohesion_score(vectors)
         cluster.top_terms = top_terms
         cluster.word_frequencies = freqs
 

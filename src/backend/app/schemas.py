@@ -113,7 +113,9 @@ class ClusterRead(BaseModel):
     word_frequencies: dict[str, Any]
     size: int
     sentiment_avg: float | None = None
+    sentiment_count: int = 0
     mean_stars: float | None = None
+    cohesion: float | None = None
     sample_docs: list[dict[str, Any]] = []
 
     model_config = {"from_attributes": True}
@@ -164,6 +166,18 @@ class BulkReassign(BaseModel):
 
 class BulkReassignResult(BaseModel):
     moved: int
+
+
+class DocumentCount(BaseModel):
+    total: int
+
+
+class ProjectMetricsRead(BaseModel):
+    # Run-level clustering-quality report; None for simulated runs. `stale` is true
+    # when manual edits postdate the run, so the figures reflect the original run.
+    metrics: dict[str, Any] | None = None
+    computed_at: datetime | None = None
+    stale: bool = False
 
 
 class ClusterCreate(BaseModel):

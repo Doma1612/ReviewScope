@@ -49,6 +49,11 @@ class Project(Base):
     source_filename: Mapped[str | None] = mapped_column(Text)
     upload_path: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Run-level clustering-quality report (silhouette/coherence/rating-entropy/…)
+    # captured from the real ML run (null in simulated mode). metrics_run_at lets the
+    # UI flag the report as stale once manual edits change the membership.
+    metrics: Mapped[dict | None] = mapped_column(JSONB)
+    metrics_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     owner: Mapped[User] = relationship()
 
@@ -86,6 +91,9 @@ class Cluster(Base):
     size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sentiment_avg: Mapped[float | None] = mapped_column(Float)
     mean_stars: Mapped[float | None] = mapped_column(Float)
+    # Cohesion = mean cosine similarity of member embeddings to the cluster centroid.
+    # Higher = tighter/more trustworthy. None when undefined (singleton/empty).
+    cohesion: Mapped[float | None] = mapped_column(Float)
 
 
 class Document(Base):
@@ -129,11 +137,11 @@ EDIT_ACTIONS = (
 
 
 class ClusterEdit(Base):
-    """Append-only audit log of every cluster/document edit (see WP B1).
+    """Append-only audit log of every cluster/document edit.
 
     Subject columns are plain UUIDs, not FKs: cluster ids are regenerated on each
     re-run and clusters get deleted, but the audit trail must outlive them so it
-    can be replayed (B6) and shown in the undo/history UI (F7).
+    can be replayed and shown in the undo/history UI.
     """
 
     __tablename__ = "cluster_edits"

@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import Float, case, cast, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_project_role
@@ -14,6 +14,8 @@ from app.models import Cluster, ClusterEdit, Document, Embedding, PipelineJob, P
 from app.schemas import (
     BulkReassign,
     BulkReassignResult,
+    DocumentCount,
+    ProjectMetricsRead,
     ClusterCreate,
     ClusterEditRead,
     ClusterFromSelection,
@@ -157,6 +159,18 @@ async def pipeline_status(project_id: uuid.UUID, db: AsyncSession = Depends(get_
     return PipelineStatusRead(project_id=project_id, status=project.status, jobs=list(jobs))
 
 
+@router.get("/{project_id}/metrics", response_model=ProjectMetricsRead)
+async def project_metrics(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ProjectMetricsRead:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
+    project = await _get_project_or_404(db, project_id)
+    # Stale = a manual edit happened after the run that produced these metrics.
+    latest_edit = (
+        await db.execute(select(func.max(ClusterEdit.created_at)).where(ClusterEdit.project_id == project_id))
+    ).scalar_one_or_none()
+    stale = bool(project.metrics_run_at and latest_edit and latest_edit > project.metrics_run_at)
+    return ProjectMetricsRead(metrics=project.metrics, computed_at=project.metrics_run_at, stale=stale)
+
+
 @router.get("/{project_id}/embeddings", response_model=list[EmbeddingPoint])
 async def embeddings(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user), limit: int | None = None) -> list[EmbeddingPoint]:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
@@ -199,10 +213,30 @@ async def embeddings(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), 
 async def clusters(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> list[ClusterRead]:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
     result = await db.execute(select(Cluster).where(Cluster.project_id == project_id).order_by(Cluster.label))
+    # One grouped query for the per-cluster count of docs that actually have a
+    # sentiment score, so the UI can show coverage ("sentiment on n of N") instead
+    # of implying the mean covers every document.
+    counts = dict(
+        (
+            await db.execute(
+                select(Document.cluster_id, func.count())
+                .where(
+                    Document.project_id == project_id,
+                    Document.cluster_id.is_not(None),
+                    Document.sentiment_score.is_not(None),
+                )
+                .group_by(Document.cluster_id)
+            )
+        ).all()
+    )
     items = []
     for cluster in result.scalars().all():
         sample_docs = await _sample_docs(db, project_id, cluster.id)
-        items.append(ClusterRead.model_validate(cluster).model_copy(update={"sample_docs": sample_docs}))
+        items.append(
+            ClusterRead.model_validate(cluster).model_copy(
+                update={"sample_docs": sample_docs, "sentiment_count": counts.get(cluster.id, 0)}
+            )
+        )
     return items
 
 
@@ -212,7 +246,12 @@ async def cluster_detail(project_id: uuid.UUID, cluster_id: uuid.UUID, db: Async
     cluster = await db.get(Cluster, cluster_id)
     if not cluster or cluster.project_id != project_id:
         raise HTTPException(status_code=404, detail="Cluster not found")
-    return ClusterRead.model_validate(cluster).model_copy(update={"sample_docs": await _sample_docs(db, project_id, cluster_id, 5)})
+    return ClusterRead.model_validate(cluster).model_copy(
+        update={
+            "sample_docs": await _sample_docs(db, project_id, cluster_id, 5),
+            "sentiment_count": await _sentiment_count(db, project_id, cluster_id),
+        }
+    )
 
 
 @router.get("/{project_id}/clusters/{cluster_id}/documents", response_model=list[DocumentRead])
@@ -346,14 +385,79 @@ async def delete_cluster(project_id: uuid.UUID, cluster_id: uuid.UUID, db: Async
     await db.commit()
 
 
+# Match a value safe to cast to a number, so a numeric range filter never errors on
+# a non-numeric raw_data cell (the CASE returns NULL → the row simply doesn't match).
+_NUMERIC_RE = r"^-?[0-9]+(\.[0-9]+)?$"
+
+
+def _document_filter_conditions(filters_json: str | None) -> list:
+    """Build WHERE conditions from a JSON facet spec over each doc's ``raw_data``.
+
+    ``filters`` is a JSON list of ``{column, op, value, type}`` where ``op`` is
+    ``eq``/``gte``/``lte``. Numeric ranges are cast through a regex-guarded CASE so a
+    non-numeric cell can't raise; date ranges compare ISO text lexically (which is
+    chronological); ``eq`` is an exact text match (booleans, exact values). The
+    column comes from the typed schema, but we still treat it defensively. Invalid
+    JSON / unknown ops are ignored rather than erroring the request."""
+    if not filters_json:
+        return []
+    try:
+        specs = json.loads(filters_json)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(specs, list):
+        return []
+
+    conditions = []
+    for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        column = spec.get("column")
+        op = spec.get("op")
+        value = spec.get("value")
+        col_type = spec.get("type", "text")
+        if not column or value in (None, ""):
+            continue
+        text_expr = Document.raw_data[column].astext
+        if op == "eq":
+            conditions.append(text_expr == str(value))
+        elif op in ("gte", "lte"):
+            if col_type in ("integer", "float"):
+                try:
+                    bound = float(value)
+                except (TypeError, ValueError):
+                    continue
+                numeric = case((text_expr.op("~")(_NUMERIC_RE), cast(text_expr, Float)), else_=None)
+                conditions.append(numeric >= bound if op == "gte" else numeric <= bound)
+            else:  # date / text — lexical comparison (ISO dates sort chronologically)
+                conditions.append(text_expr >= str(value) if op == "gte" else text_expr <= str(value))
+    return conditions
+
+
 @router.get("/{project_id}/documents", response_model=list[DocumentRead])
-async def documents(project_id: uuid.UUID, cluster_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user), limit: int = 50, offset: int = 0) -> list[Document]:
+async def documents(project_id: uuid.UUID, cluster_id: uuid.UUID | None = None, filters: str | None = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user), limit: int = 50, offset: int = 0) -> list[Document]:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
-    query = select(Document).where(Document.project_id == project_id).limit(limit).offset(offset)
+    query = select(Document).where(Document.project_id == project_id)
     if cluster_id:
         query = query.where(Document.cluster_id == cluster_id)
+    for condition in _document_filter_conditions(filters):
+        query = query.where(condition)
+    query = query.limit(limit).offset(offset)
     result = await db.execute(query)
     return list(result.scalars().all())
+
+
+# Declared before /documents/{document_id} so "count" isn't matched as a doc id.
+@router.get("/{project_id}/documents/count", response_model=DocumentCount)
+async def documents_count(project_id: uuid.UUID, cluster_id: uuid.UUID | None = None, filters: str | None = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> DocumentCount:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
+    query = select(func.count()).select_from(Document).where(Document.project_id == project_id)
+    if cluster_id:
+        query = query.where(Document.cluster_id == cluster_id)
+    for condition in _document_filter_conditions(filters):
+        query = query.where(condition)
+    total = (await db.execute(query)).scalar_one()
+    return DocumentCount(total=int(total))
 
 
 @router.get("/{project_id}/documents/{document_id}", response_model=DocumentRead)
@@ -407,7 +511,7 @@ async def bulk_reassign_documents(project_id: uuid.UUID, payload: BulkReassign, 
     )
     docs = list(result.scalars().all())
     affected: set[uuid.UUID | None] = {target_cluster_id}
-    # Capture each doc's old cluster before the move so F7 undo can put them back.
+    # Capture each doc's old cluster before the move so undo can put them back.
     before = {str(doc.id): (str(doc.cluster_id) if doc.cluster_id else None) for doc in docs}
     for doc in docs:
         affected.add(doc.cluster_id)
@@ -528,3 +632,16 @@ async def _sample_docs(db: AsyncSession, project_id: uuid.UUID, cluster_id: uuid
         select(Document.id, Document.text).where(Document.project_id == project_id, Document.cluster_id == cluster_id).limit(limit)
     )
     return [{"id": str(doc_id), "text": text[:240]} for doc_id, text in result.all()]
+
+
+async def _sentiment_count(db: AsyncSession, project_id: uuid.UUID, cluster_id: uuid.UUID) -> int:
+    """Count of this cluster's documents that carry a sentiment score (the n in the
+    "sentiment on n of N" coverage shown next to the cluster's mean)."""
+    result = await db.execute(
+        select(func.count()).where(
+            Document.project_id == project_id,
+            Document.cluster_id == cluster_id,
+            Document.sentiment_score.is_not(None),
+        )
+    )
+    return int(result.scalar_one())

@@ -1,4 +1,4 @@
-"""Endpoint-logic tests for the document reassignment routes (api/projects.py, WP B3).
+"""Endpoint-logic tests for the document reassignment routes (api/projects.py).
 
 No real DB: the routes are plain async functions, so a fake ``AsyncSession`` that
 serves ``get``/``execute`` from in-memory objects and records ``add``/``commit``

@@ -1,5 +1,5 @@
 """
-Pure-logic tests for the cluster-edit audit helper (app/services/edits.py, WP B1).
+Pure-logic tests for the cluster-edit audit helper (app/services/edits.py).
 
 No DB: ``record_edit`` only stages a row via ``db.add`` (the caller commits), so a
 tiny fake session that captures added objects is enough. Mirrors the no-DB

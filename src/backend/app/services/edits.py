@@ -1,6 +1,6 @@
-"""Helper for writing the cluster-edit audit log (WP B1).
+"""Helper for writing the cluster-edit audit log.
 
-Other WPs call ``record_edit`` inside their mutation transactions; it only stages
+Callers invoke ``record_edit`` inside their mutation transactions; it only stages
 the row (``db.add``) — the caller is responsible for committing so the edit shares
 the transaction with the change it describes.
 """

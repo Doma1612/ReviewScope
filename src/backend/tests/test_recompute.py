@@ -1,5 +1,4 @@
-"""Pure-logic tests for the cluster recompute service (app/services/recompute.py,
-WP B2).
+"""Pure-logic tests for the cluster recompute service (app/services/recompute.py).
 
 No DB and no ML stack: the size/sentiment/rating aggregation is factored into
 pure helpers, so seeding "a couple of docs" and moving one between clusters is

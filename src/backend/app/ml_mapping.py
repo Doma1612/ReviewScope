@@ -150,6 +150,20 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
     """
     project_id = uuid.UUID(str(result.project_id))
 
+    # Cohesion: mean cosine similarity of member embeddings to their centroid.
+    # Build per-(int)cluster vector lists from the run's documents + embeddings so we
+    # can seed `cohesion` at persist time, the same way edits recompute it.
+    from app.services.metrics import cohesion_score
+
+    vector_by_pk = {rec.primary_key_value: list(rec.vector) for rec in result.embeddings}
+    vectors_by_cluster_int: dict[int, list] = {}
+    for rec in result.documents:
+        if rec.cluster_id is None:
+            continue
+        vector = vector_by_pk.get(rec.primary_key_value)
+        if vector:
+            vectors_by_cluster_int.setdefault(rec.cluster_id, []).append(vector)
+
     clusters: list[Cluster] = []
     cluster_uuid_by_int: dict[int, uuid.UUID] = {}
     for rec in result.clusters:
@@ -166,6 +180,7 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
             size=rec.size,
             sentiment_avg=rec.sentiment_avg,
             mean_stars=rec.mean_stars,
+            cohesion=cohesion_score(vectors_by_cluster_int.get(rec.cluster_id, [])),
         ))
 
     documents: list[Document] = []

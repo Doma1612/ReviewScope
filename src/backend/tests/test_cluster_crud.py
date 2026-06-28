@@ -1,4 +1,4 @@
-"""Endpoint-logic tests for the cluster CRUD/merge/from-selection routes (api/projects.py, WP B4).
+"""Endpoint-logic tests for the cluster CRUD/merge/from-selection routes (api/projects.py).
 
 No real DB: the routes are plain async functions, so a fake ``AsyncSession`` that
 serves ``get``/``execute`` from in-memory objects and records ``add``/``delete``/

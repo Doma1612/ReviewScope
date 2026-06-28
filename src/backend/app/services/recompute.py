@@ -1,6 +1,6 @@
-"""WP B2 — recompute a cluster's aggregates from its current membership.
+"""Recompute a cluster's aggregates from its current membership.
 
-"Append + derive, don't patch" (gap doc §3/§4a): rather than incrementally
+"Append + derive, don't patch": rather than incrementally
 nudging a cluster's stored stats on every move, we recompute them from the
 documents currently assigned to it, so the app and the notebook agree. The
 ``top_terms`` / ``word_frequencies`` reuse the very functions the pipeline uses
@@ -23,7 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.ml_mapping import derive_roles
-from app.models import Cluster, Document, ProjectSchema
+from app.models import Cluster, Document, Embedding, ProjectSchema
+from app.services.metrics import cohesion_score
 
 
 # ── Pure aggregate helpers (no DB, no ML deps) ─────────────────────────────────
@@ -126,7 +127,14 @@ async def recompute_cluster(
     rating_col = await _rating_column(db, project_id)
     rows = (
         await db.execute(
-            select(Document.text, Document.sentiment_score, Document.raw_data).where(
+            select(
+                Document.text,
+                Document.sentiment_score,
+                Document.raw_data,
+                Embedding.vector,
+            )
+            .outerjoin(Embedding, Embedding.document_id == Document.id)
+            .where(
                 Document.project_id == project_id,
                 Document.cluster_id == cluster_id,
             )
@@ -137,9 +145,10 @@ async def recompute_cluster(
         await db.delete(cluster)
         return None
 
-    texts = [text for text, _, _ in rows]
-    sentiments = [sentiment for _, sentiment, _ in rows]
-    ratings = [_parse_rating(raw, rating_col) for _, _, raw in rows]
+    texts = [text for text, _, _, _ in rows]
+    sentiments = [sentiment for _, sentiment, _, _ in rows]
+    ratings = [_parse_rating(raw, rating_col) for _, _, raw, _ in rows]
+    vectors = [vector for _, _, _, vector in rows if vector]
 
     agg = numeric_aggregates(sentiments, ratings)
     top_terms, freqs = _terms_and_frequencies(texts)
@@ -147,6 +156,7 @@ async def recompute_cluster(
     cluster.size = agg["size"]
     cluster.sentiment_avg = agg["sentiment_avg"]
     cluster.mean_stars = agg["mean_stars"]
+    cluster.cohesion = cohesion_score(vectors)
     cluster.top_terms = top_terms
     cluster.word_frequencies = freqs
     return cluster

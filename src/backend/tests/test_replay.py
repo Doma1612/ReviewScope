@@ -1,10 +1,11 @@
-"""Replay-logic tests for the re-run survival service (services/replay.py, WP B6).
+"""Replay-logic tests for the re-run survival service (services/replay.py).
 
 No real DB / ML stack (sklearn is absent from the backend venv): replay is plain
 sync code, so a fake ``Session`` that serves the three entity ``select``s from
 in-memory lists and records ``add``/``delete`` exercises it directly.
-``_recompute_clusters_sync`` is monkeypatched to record affected ids (B2 covers
-aggregation), mirroring tests/test_cluster_crud.py.
+``_recompute_clusters_sync`` is monkeypatched to record affected ids (the
+aggregation itself is covered by tests/test_recompute.py), mirroring
+tests/test_cluster_crud.py.
 
 Run from the backend dir:  python -m pytest tests/test_replay.py
 """

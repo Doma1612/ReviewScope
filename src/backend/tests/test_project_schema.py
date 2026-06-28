@@ -1,4 +1,4 @@
-"""Endpoint-logic tests for GET/POST /api/projects/{id}/schema (api/projects.py, WP B5).
+"""Endpoint-logic tests for GET/POST /api/projects/{id}/schema (api/projects.py).
 
 No real DB: the routes are plain async functions, so a fake ``AsyncSession`` that
 serves ``get`` from in-memory objects and records ``add``/``commit`` exercises the

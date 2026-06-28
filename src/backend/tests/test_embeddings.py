@@ -1,4 +1,4 @@
-"""Unit tests for GET /{project_id}/embeddings (B7 rich hover payload).
+"""Unit tests for GET /{project_id}/embeddings (rich hover payload).
 
 Mirrors the lightweight fake-session approach used by test_cluster_crud.py: the
 route function is driven directly with an in-memory session so we can assert the
