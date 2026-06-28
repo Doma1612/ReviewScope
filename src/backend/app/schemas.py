@@ -98,6 +98,22 @@ class DocumentRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ClusterEditRead(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    actor_id: uuid.UUID
+    action: str
+    created_at: datetime
+    cluster_id: uuid.UUID | None = None
+    target_cluster_id: uuid.UUID | None = None
+    document_id: uuid.UUID | None = None
+    new_label: str | None = None
+    note: str | None = None
+    payload: dict[str, Any] = {}
+
+    model_config = {"from_attributes": True}
+
+
 class MemberCreate(BaseModel):
     email: EmailStr
     role: ProjectRole = ProjectRole.viewer

@@ -10,8 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, require_project_role
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models import Cluster, Document, Embedding, PipelineJob, Project, ProjectMember, ProjectRole, ProjectSchema, ProjectStatus, User
+from app.models import Cluster, ClusterEdit, Document, Embedding, PipelineJob, Project, ProjectMember, ProjectRole, ProjectSchema, ProjectStatus, User
 from app.schemas import (
+    ClusterEditRead,
     ClusterRead,
     DocumentRead,
     EmbeddingPoint,
@@ -225,6 +226,13 @@ async def remove_member(project_id: uuid.UUID, user_id: uuid.UUID, db: AsyncSess
     if member and member.role != ProjectRole.owner:
         await db.delete(member)
         await db.commit()
+
+
+@router.get("/{project_id}/edits", response_model=list[ClusterEditRead])
+async def list_edits(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> list[ClusterEdit]:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
+    result = await db.execute(select(ClusterEdit).where(ClusterEdit.project_id == project_id).order_by(ClusterEdit.created_at.desc()))
+    return list(result.scalars().all())
 
 
 async def _get_project_or_404(db: AsyncSession, project_id: uuid.UUID) -> Project:

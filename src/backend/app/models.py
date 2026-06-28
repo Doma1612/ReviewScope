@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import CheckConstraint, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -108,6 +108,53 @@ class Embedding(Base):
     umap_x: Mapped[float] = mapped_column(Float, nullable=False)
     umap_y: Mapped[float] = mapped_column(Float, nullable=False)
     umap_z: Mapped[float | None] = mapped_column(Float)
+
+
+# Audit vocabulary for ClusterEdit.action. Mirrors reviewscope_ml's
+# hitl.feedback.ACTIONS, plus the app-only actions that have no notebook analogue
+# (bulk reassign, create-from-selection, etc.). Keep in sync with the
+# CheckConstraint below and the migration 0003_cluster_edits.
+EDIT_ACTIONS = (
+    "approve_label",
+    "rename_label",
+    "merge_clusters",
+    "split_cluster",
+    "reassign_doc",
+    "bulk_reassign",
+    "create_cluster",
+    "create_from_selection",
+    "mark_junk",
+    "confirm_run",
+)
+
+
+class ClusterEdit(Base):
+    """Append-only audit log of every cluster/document edit (see WP B1).
+
+    Subject columns are plain UUIDs, not FKs: cluster ids are regenerated on each
+    re-run and clusters get deleted, but the audit trail must outlive them so it
+    can be replayed (B6) and shown in the undo/history UI (F7).
+    """
+
+    __tablename__ = "cluster_edits"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN (" + ", ".join(f"'{a}'" for a in EDIT_ACTIONS) + ")",
+            name="ck_cluster_edits_action",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    actor_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    cluster_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    target_cluster_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    new_label: Mapped[str | None] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}", nullable=False)
 
 
 class PipelineJob(Base):
