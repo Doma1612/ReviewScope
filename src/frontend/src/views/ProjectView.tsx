@@ -202,8 +202,6 @@ export function ProjectView() {
     mergeM.mutate({ sources: ids.filter((id) => id !== target), target });
   };
 
-  if (project.isLoading) return <main className="page">Loading project...</main>;
-
   const points = embeddings.data ?? [];
   // WebGL/render cap: sample huge projects down for display and force 2D
   // scattergl, which renders far more smoothly than scatter3d at this scale.
@@ -245,6 +243,8 @@ export function ProjectView() {
       <option value={NOISE}>Noise</option>
     </>
   );
+
+  if (project.isLoading) return <main className="page">Loading project...</main>;
 
   return (
     <main className="page project-layout">
