@@ -189,9 +189,10 @@ button:disabled, .disabled { opacity: 0.45; pointer-events: none; }
 }
 
 .page { margin: 0 auto; max-width: 1180px; padding: 2rem 1.5rem; }
+.dashboard-page { font-family: "IBM Plex Sans", "Segoe UI", sans-serif; }
 .center { display: grid; min-height: 100vh; place-items: center; }
 .page-header { align-items: center; display: flex; justify-content: space-between; margin-bottom: 1.5rem; }
-.page-header h1 { font-size: clamp(2rem, 5vw, 4rem); line-height: 0.95; margin: 0; }
+.page-header h1 { font-family: "IBM Plex Sans", "Segoe UI", sans-serif; font-size: clamp(2rem, 5vw, 4rem); line-height: 0.95; margin: 0; }
 .page-header p { color: var(--muted); margin: 0.5rem 0 0; }
 .full { grid-column: 1 / -1; }
 

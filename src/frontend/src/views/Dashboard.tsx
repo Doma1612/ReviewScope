@@ -11,7 +11,7 @@ export function Dashboard() {
   const upload = useMutation({ mutationFn: api.uploadProject, onSuccess: () => { setShowUpload(false); queryClient.invalidateQueries({ queryKey: ["projects"] }); } });
 
   return (
-    <main className="page">
+    <main className="page dashboard-page">
       <section className="page-header">
         <div><h1>Projects</h1><p>Upload CSV or JSONL files and inspect simulated analysis results.</p></div>
         <button className="primary" onClick={() => setShowUpload(true)}>New Project</button>
