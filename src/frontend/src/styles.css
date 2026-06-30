@@ -209,6 +209,10 @@ button:disabled, .disabled { opacity: 0.45; pointer-events: none; }
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 
+.auth-card button + a {
+  margin-left: 1cm;
+}
+
 label { display: grid; gap: 0.4rem; margin: 1rem 0; }
 input, select {
   background: var(--surface-strong);
