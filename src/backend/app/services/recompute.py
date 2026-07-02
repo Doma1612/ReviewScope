@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.ml_mapping import derive_roles
-from app.models import Cluster, Document, Embedding, ProjectSchema
+from app.models import Cluster, Document, Embedding, Project, ProjectSchema, Segment
 from app.services.metrics import cohesion_score
 
 
@@ -62,6 +62,29 @@ def numeric_aggregates(
     stars = [r for r in ratings if r is not None]
     return {
         "size": len(sentiment_scores),
+        "sentiment_avg": _mean(sentiments),
+        "mean_stars": _mean(stars),
+    }
+
+
+def segment_aggregates(
+    document_ids: list[Any],
+    sentiment_scores: list[float | None],
+    ratings_by_document: dict[Any, float | None],
+) -> dict[str, Any]:
+    """Aggregates for a sentence-unit cluster from its member *segments*.
+
+    ``size`` is the count of distinct parent reviews (the headline "customers"
+    number); ``n_mentions`` is the raw segment count. ``sentiment_avg`` is over
+    every segment, but ``mean_stars`` is deduped to one rating per distinct review
+    so a rambling multi-segment review can't dominate the star profile (mirrors the
+    runner's ``_dedup_parent_stats``)."""
+    distinct = list(dict.fromkeys(document_ids))
+    sentiments = [s for s in sentiment_scores if s is not None]
+    stars = [ratings_by_document[d] for d in distinct if ratings_by_document.get(d) is not None]
+    return {
+        "size": len(distinct),
+        "n_mentions": len(document_ids),
         "sentiment_avg": _mean(sentiments),
         "mean_stars": _mean(stars),
     }
@@ -125,32 +148,67 @@ async def recompute_cluster(
         return None
 
     rating_col = await _rating_column(db, project_id)
-    rows = (
-        await db.execute(
-            select(
-                Document.text,
-                Document.sentiment_score,
-                Document.raw_data,
-                Embedding.vector,
+    if await _is_sentence_unit(db, project_id):
+        # Sentence unit: aggregate over the cluster's member *segments*; size is
+        # distinct parent reviews, mean_stars deduped per review.
+        rows = (
+            await db.execute(
+                select(
+                    Segment.text,
+                    Segment.sentiment_score,
+                    Segment.document_id,
+                    Segment.vector,
+                    Document.raw_data,
+                )
+                .join(Document, Document.id == Segment.document_id)
+                .where(
+                    Segment.project_id == project_id,
+                    Segment.cluster_id == cluster_id,
+                )
             )
-            .outerjoin(Embedding, Embedding.document_id == Document.id)
-            .where(
-                Document.project_id == project_id,
-                Document.cluster_id == cluster_id,
+        ).all()
+
+        if not rows and delete_if_empty:
+            await db.delete(cluster)
+            return None
+
+        texts = [text for text, _, _, _, _ in rows]
+        sentiments = [s for _, s, _, _, _ in rows]
+        document_ids = [doc_id for _, _, doc_id, _, _ in rows]
+        vectors = [vec for _, _, _, vec, _ in rows if vec]
+        ratings_by_document = {doc_id: _parse_rating(raw, rating_col) for _, _, doc_id, _, raw in rows}
+
+        agg = segment_aggregates(document_ids, sentiments, ratings_by_document)
+        cluster.n_mentions = agg["n_mentions"]
+    else:
+        # Document unit (frozen legacy projects): aggregate over documents.
+        rows = (
+            await db.execute(
+                select(
+                    Document.text,
+                    Document.sentiment_score,
+                    Document.raw_data,
+                    Embedding.vector,
+                )
+                .outerjoin(Embedding, Embedding.document_id == Document.id)
+                .where(
+                    Document.project_id == project_id,
+                    Document.cluster_id == cluster_id,
+                )
             )
-        )
-    ).all()
+        ).all()
 
-    if not rows and delete_if_empty:
-        await db.delete(cluster)
-        return None
+        if not rows and delete_if_empty:
+            await db.delete(cluster)
+            return None
 
-    texts = [text for text, _, _, _ in rows]
-    sentiments = [sentiment for _, sentiment, _, _ in rows]
-    ratings = [_parse_rating(raw, rating_col) for _, _, raw, _ in rows]
-    vectors = [vector for _, _, _, vector in rows if vector]
+        texts = [text for text, _, _, _ in rows]
+        sentiments = [sentiment for _, sentiment, _, _ in rows]
+        ratings = [_parse_rating(raw, rating_col) for _, _, raw, _ in rows]
+        vectors = [vector for _, _, _, vector in rows if vector]
+        agg = numeric_aggregates(sentiments, ratings)
+        cluster.n_mentions = agg["size"]
 
-    agg = numeric_aggregates(sentiments, ratings)
     top_terms, freqs = _terms_and_frequencies(texts)
 
     cluster.size = agg["size"]
@@ -160,6 +218,37 @@ async def recompute_cluster(
     cluster.top_terms = top_terms
     cluster.word_frequencies = freqs
     return cluster
+
+
+async def recompute_document_primary(
+    db: AsyncSession, project_id: uuid.UUID, document_ids: list[uuid.UUID]
+) -> None:
+    """Refresh each review's derived "primary" cluster from its segments.
+
+    ``documents.cluster_id`` is a display convenience for sentence-unit projects
+    (the plurality non-noise cluster among the review's mentions; ``None`` when the
+    review has no clustered mention). Call after any segment membership change. The
+    caller owns the transaction."""
+    for document_id in dict.fromkeys(document_ids):
+        rows = (
+            await db.execute(
+                select(Segment.cluster_id).where(
+                    Segment.project_id == project_id,
+                    Segment.document_id == document_id,
+                    Segment.cluster_id.is_not(None),
+                )
+            )
+        ).all()
+        counts = Counter(cid for (cid,) in rows)
+        primary = counts.most_common(1)[0][0] if counts else None
+        doc = await db.get(Document, document_id)
+        if doc is not None and doc.project_id == project_id:
+            doc.cluster_id = primary
+
+
+async def _is_sentence_unit(db: AsyncSession, project_id: uuid.UUID) -> bool:
+    project = await db.get(Project, project_id)
+    return bool(project is not None and project.unit == "sentence")
 
 
 async def recompute_clusters(

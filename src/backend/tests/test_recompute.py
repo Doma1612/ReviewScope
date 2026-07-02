@@ -23,7 +23,25 @@ os.environ.setdefault("SYNC_DATABASE_URL", "postgresql+psycopg://u:p@localhost:5
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/backend on path
 
-from app.services.recompute import _parse_rating, numeric_aggregates  # noqa: E402
+from app.services.recompute import _parse_rating, numeric_aggregates, segment_aggregates  # noqa: E402
+
+
+def test_segment_aggregates_counts_reviews_and_dedups_stars():
+    # Cluster with 4 mentions across 2 reviews (r1 has 3, r2 has 1).
+    document_ids = ["r1", "r1", "r1", "r2"]
+    sentiments = [0.4, 0.6, None, -0.2]
+    # One rating per distinct review (a rambling review must not dominate stars).
+    ratings_by_document = {"r1": 5.0, "r2": 1.0}
+    agg = segment_aggregates(document_ids, sentiments, ratings_by_document)
+    assert agg["size"] == 2            # distinct reviews (the headline count)
+    assert agg["n_mentions"] == 4      # segment mentions
+    assert agg["sentiment_avg"] == pytest.approx((0.4 + 0.6 - 0.2) / 3)  # non-null segments
+    assert agg["mean_stars"] == pytest.approx(3.0)  # (5 + 1) / 2, deduped per review
+
+
+def test_segment_aggregates_empty():
+    agg = segment_aggregates([], [], {})
+    assert agg == {"size": 0, "n_mentions": 0, "sentiment_avg": None, "mean_stars": None}
 
 
 def test_numeric_aggregates_basic():

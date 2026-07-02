@@ -3,6 +3,7 @@ import csv
 import json
 import math
 import random
+import re
 import uuid
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
@@ -12,7 +13,7 @@ from sqlalchemy import delete, select, update
 
 from app.db.session import AsyncSessionLocal
 from app.ml_mapping import derive_roles
-from app.models import Cluster, Document, Embedding, PipelineJob, PipelineStepStatus, Project, ProjectSchema, ProjectStatus
+from app.models import Cluster, Document, Embedding, PipelineJob, PipelineStepStatus, Project, ProjectSchema, ProjectStatus, Segment
 from app.services.recompute import _parse_rating
 from app.worker import celery_app
 
@@ -135,7 +136,20 @@ def _pick_primary_key(rows: list[dict]) -> str | None:
     return None
 
 
+def _mock_segments(text: str) -> list[str]:
+    """Naive sentence split for simulated sentence-unit runs (no ML deps): keep up
+    to 3 clauses of ≥20 chars, else the whole text as a single mention."""
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text) if len(p.strip()) >= 20]
+    if not parts:
+        stripped = text.strip()
+        parts = [stripped] if stripped else []
+    return parts[:3]
+
+
 async def _persist_mock_results(db, project_id: uuid.UUID, rows: list[dict], text_column: str, primary_key: str | None) -> None:
+    """Simulated sentence-unit run: one review → several mention (segment) rows, each
+    clustered, with the review's derived primary cluster on ``Document.cluster_id``."""
+    await db.execute(delete(Segment).where(Segment.project_id == project_id))
     await db.execute(delete(Embedding).where(Embedding.document_id.in_(select(Document.id).where(Document.project_id == project_id))))
     await db.execute(delete(Document).where(Document.project_id == project_id))
     await db.execute(delete(Cluster).where(Cluster.project_id == project_id))
@@ -146,6 +160,7 @@ async def _persist_mock_results(db, project_id: uuid.UUID, rows: list[dict], tex
     clusters = []
     for index in range(cluster_count):
         cluster = Cluster(
+            id=uuid.uuid4(),
             project_id=project_id,
             label=f"Simulated Theme {index + 1}",
             summary=f"Synthetic summary for theme {index + 1}, generated for frontend and API testing.",
@@ -159,57 +174,77 @@ async def _persist_mock_results(db, project_id: uuid.UUID, rows: list[dict], tex
     await db.flush()
 
     # Mirror the recompute service: pull the rating column from the project schema
-    # so simulated clusters carry a real mean_stars (drives the StarRating UI),
-    # not just synthetic sentiment.
+    # so simulated clusters carry a real mean_stars (drives the StarRating UI).
     schema = await db.get(ProjectSchema, project_id)
     rating_col = derive_roles(schema.columns)[1] if schema else None
 
     grouped_terms: dict[uuid.UUID, Counter] = defaultdict(Counter)
     grouped_sentiment: dict[uuid.UUID, list[float]] = defaultdict(list)
-    grouped_stars: dict[uuid.UUID, list[float]] = defaultdict(list)
+    grouped_reviews: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
+    grouped_stars: dict[uuid.UUID, dict[uuid.UUID, float]] = defaultdict(dict)
     rng = random.Random(str(project_id))
+    seg_index = 0
     for idx, row in enumerate(limited_rows):
-        cluster = clusters[idx % cluster_count]
         text = str(row.get(text_column) or "")[:5000]
-        sentiment = round(rng.uniform(-0.8, 0.9), 3)
-        document = Document(
-            project_id=project_id,
-            primary_key_value=str(row.get(primary_key) if primary_key else idx + 1),
-            text=text,
-            raw_data=row,
-            cluster_id=cluster.id,
-            sentiment_score=sentiment,
-        )
-        db.add(document)
-        await db.flush()
-        angle = (idx / max(len(limited_rows), 1)) * math.tau
-        radius = 1 + (idx % cluster_count) * 0.45
+        segments = _mock_segments(text) or [text[:60] or "(empty)"]
+        doc_id = uuid.uuid4()
+        rating = _parse_rating(row, rating_col)
+        member_counts: Counter = Counter()
+        review_sentiments: list[float] = []
+        for j, seg_text in enumerate(segments):
+            cluster = clusters[(idx + j) % cluster_count]
+            sentiment = round(rng.uniform(-0.8, 0.9), 3)
+            review_sentiments.append(sentiment)
+            member_counts[cluster.id] += 1
+            angle = (seg_index / max(len(limited_rows) * 2, 1)) * math.tau
+            radius = 1 + ((idx + j) % cluster_count) * 0.45
+            db.add(
+                Segment(
+                    id=uuid.uuid4(),
+                    project_id=project_id,
+                    document_id=doc_id,
+                    segment_key=f"{row.get(primary_key) if primary_key else idx + 1}#{j}",
+                    ordinal=j,
+                    text=seg_text,
+                    cluster_id=cluster.id,
+                    sentiment_score=sentiment,
+                    vector=[round(rng.random(), 4) for _ in range(8)],
+                    umap_x=round(math.cos(angle) * radius + rng.uniform(-0.15, 0.15), 4),
+                    umap_y=round(math.sin(angle) * radius + rng.uniform(-0.15, 0.15), 4),
+                    umap_z=round(rng.uniform(-1, 1), 4),
+                )
+            )
+            grouped_terms[cluster.id].update(_terms(seg_text))
+            grouped_sentiment[cluster.id].append(sentiment)
+            grouped_reviews[cluster.id].add(doc_id)
+            if rating is not None:
+                grouped_stars[cluster.id].setdefault(doc_id, rating)  # one rating per review
+            seg_index += 1
+        primary = member_counts.most_common(1)[0][0] if member_counts else None
         db.add(
-            Embedding(
-                document_id=document.id,
-                vector=[round(rng.random(), 4) for _ in range(8)],
-                umap_x=round(math.cos(angle) * radius + rng.uniform(-0.15, 0.15), 4),
-                umap_y=round(math.sin(angle) * radius + rng.uniform(-0.15, 0.15), 4),
-                umap_z=round(rng.uniform(-1, 1), 4),
+            Document(
+                id=doc_id,
+                project_id=project_id,
+                primary_key_value=str(row.get(primary_key) if primary_key else idx + 1),
+                text=text,
+                raw_data=row,
+                cluster_id=primary,
+                sentiment_score=round(sum(review_sentiments) / len(review_sentiments), 3) if review_sentiments else None,
             )
         )
-        grouped_terms[cluster.id].update(_terms(text))
-        grouped_sentiment[cluster.id].append(sentiment)
-        rating = _parse_rating(row, rating_col)
-        if rating is not None:
-            grouped_stars[cluster.id].append(rating)
 
     for cluster in clusters:
         terms = grouped_terms[cluster.id].most_common(20)
         sentiments = grouped_sentiment[cluster.id]
-        stars = grouped_stars[cluster.id]
-        cluster.size = len(sentiments)
+        stars = list(grouped_stars[cluster.id].values())
+        cluster.size = len(grouped_reviews[cluster.id])   # distinct reviews
+        cluster.n_mentions = len(sentiments)               # segment mentions
         cluster.sentiment_avg = round(sum(sentiments) / len(sentiments), 3) if sentiments else None
         cluster.mean_stars = round(sum(stars) / len(stars), 3) if stars else None
         cluster.top_terms = [{"term": term, "score": count} for term, count in terms[:10]]
         cluster.word_frequencies = dict(terms)
 
-    await db.execute(update(Project).where(Project.id == project_id).values(doc_count=len(limited_rows)))
+    await db.execute(update(Project).where(Project.id == project_id).values(doc_count=len(limited_rows), unit="sentence"))
 
 
 def _terms(text: str) -> list[str]:

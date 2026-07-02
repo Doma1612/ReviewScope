@@ -24,7 +24,7 @@ os.environ.setdefault("SIMULATE_ML", "true")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/backend on path
 
 from app.api import projects  # noqa: E402
-from app.models import Document, ProjectMember, ProjectRole  # noqa: E402
+from app.models import Document, Project, ProjectMember, ProjectRole  # noqa: E402
 
 
 def asyncio_test(fn):
@@ -48,11 +48,15 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """Answers the role check, then serves the embeddings join rows."""
+    """Answers the role check + project lookup, then serves the embeddings join rows.
 
-    def __init__(self, *, member=None, rows=None):
+    Serves a document-unit project so the endpoint takes the legacy
+    (Document→Embedding) branch these tests exercise."""
+
+    def __init__(self, *, member=None, rows=None, unit="document"):
         self.member = member
         self.rows = rows or []
+        self.unit = unit
 
     async def execute(self, stmt):
         entity = stmt.column_descriptions[0]["entity"]
@@ -61,6 +65,9 @@ class _FakeSession:
         if entity is Document:
             return _FakeResult(items=self.rows)
         raise AssertionError(f"unexpected query for {entity!r}")
+
+    async def get(self, model, pk):
+        return Project(id=pk, name="p", owner_id=uuid.uuid4(), unit=self.unit)
 
 
 def _row(*, cluster_id=None, text="hello", pk="1", sentiment=0.5, label=None):

@@ -10,21 +10,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, require_project_role
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models import Cluster, ClusterEdit, Document, Embedding, PipelineJob, Project, ProjectMember, ProjectRole, ProjectSchema, ProjectStatus, User
+from app.models import Cluster, ClusterEdit, Document, Embedding, PipelineJob, Project, ProjectMember, ProjectRole, ProjectSchema, ProjectStatus, Segment, User
 from app.schemas import (
     BulkReassign,
     BulkReassignResult,
+    BulkSegmentReassign,
+    ClusterMembership,
     DocumentCount,
     ProjectMetricsRead,
     ClusterCreate,
     ClusterEditRead,
-    ClusterFromSelection,
+    ClusterFromSegments,
     ClusterMerge,
     ClusterRead,
     ClusterUpdate,
-    DocumentReassign,
     DocumentRead,
     EmbeddingPoint,
+    EmbeddingStats,
     MemberCreate,
     MemberRead,
     MemberUpdate,
@@ -33,10 +35,12 @@ from app.schemas import (
     ProjectSchemaRead,
     ProjectSchemaWrite,
     ProjectUpdate,
+    ReviewReassign,
+    SegmentReassign,
 )
 from app.ml_pipeline import run_ml_pipeline
 from app.services.edits import record_edit
-from app.services.recompute import recompute_clusters
+from app.services.recompute import recompute_clusters, recompute_document_primary
 from app.tasks import PIPELINE_STEPS, run_simulated_pipeline
 
 
@@ -100,6 +104,7 @@ async def list_projects(db: AsyncSession = Depends(get_db), current_user: User =
             created_at=project.created_at,
             role=role,
             last_error=project.last_error,
+            unit=project.unit,
         )
         for project, role, email in result.all()
     ]
@@ -171,9 +176,72 @@ async def project_metrics(project_id: uuid.UUID, db: AsyncSession = Depends(get_
     return ProjectMetricsRead(metrics=project.metrics, computed_at=project.metrics_run_at, stale=stale)
 
 
-@router.get("/{project_id}/embeddings", response_model=list[EmbeddingPoint])
-async def embeddings(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user), limit: int | None = None) -> list[EmbeddingPoint]:
+@router.get("/{project_id}/embeddings/stats", response_model=EmbeddingStats)
+async def embeddings_stats(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> EmbeddingStats:
+    """Total and noise (unclustered) point counts for the scatter.
+
+    Cheap COUNT queries so the frontend can render an honest "N noise / M total"
+    and decide whether the view is sampled, without downloading every point.
+    """
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
+    project = await _get_project_or_404(db, project_id)
+    model = Segment if project.unit == "sentence" else Document
+    total = await db.scalar(select(func.count()).select_from(model).where(model.project_id == project_id))
+    noise = await db.scalar(
+        select(func.count()).select_from(model).where(model.project_id == project_id, model.cluster_id.is_(None))
+    )
+    return EmbeddingStats(total=int(total or 0), noise=int(noise or 0))
+
+
+@router.get("/{project_id}/embeddings", response_model=list[EmbeddingPoint])
+async def embeddings(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user), limit: int | None = None, sample: int | None = None) -> list[EmbeddingPoint]:
+    """Scatter points, one per clustered unit (segment for sentence, review for document).
+
+    ``sample`` returns a random representative subset (``ORDER BY random() LIMIT``)
+    so large projects — a sentence run is hundreds of thousands of segments — don't
+    ship a ~180 MB payload the client only downsamples for display anyway. Use
+    ``/embeddings/stats`` for the honest total/noise counts alongside a sampled fetch.
+    """
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
+    project = await _get_project_or_404(db, project_id)
+    if project.unit == "sentence":
+        # One point per segment (mention); document_id is the parent review.
+        query = (
+            select(
+                Segment.id,
+                Segment.document_id,
+                Segment.cluster_id,
+                Segment.umap_x,
+                Segment.umap_y,
+                Segment.umap_z,
+                Segment.text,
+                Document.primary_key_value,
+                Segment.sentiment_score,
+                Cluster.label,
+            )
+            .join(Document, Document.id == Segment.document_id)
+            .outerjoin(Cluster, Cluster.id == Segment.cluster_id)
+            .where(Segment.project_id == project_id)
+        )
+        if sample is not None:
+            query = query.order_by(func.random()).limit(sample)
+        elif limit is not None:
+            query = query.limit(limit)
+        result = await db.execute(query)
+        return [
+            EmbeddingPoint(
+                document_id=doc_id,
+                segment_id=seg_id,
+                cluster_id=cluster_id,
+                x=x, y=y, z=z,
+                snippet=text[:120] if text is not None else None,
+                primary_key_value=primary_key_value,
+                sentiment_score=sentiment_score,
+                cluster_label=cluster_label,
+            )
+            for seg_id, doc_id, cluster_id, x, y, z, text, primary_key_value, sentiment_score, cluster_label in result.all()
+        ]
+
     query = (
         select(
             Document.id,
@@ -190,7 +258,9 @@ async def embeddings(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), 
         .outerjoin(Cluster, Cluster.id == Document.cluster_id)
         .where(Document.project_id == project_id)
     )
-    if limit is not None:
+    if sample is not None:
+        query = query.order_by(func.random()).limit(sample)
+    elif limit is not None:
         query = query.limit(limit)
     result = await db.execute(query)
     return [
@@ -212,26 +282,28 @@ async def embeddings(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), 
 @router.get("/{project_id}/clusters", response_model=list[ClusterRead])
 async def clusters(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> list[ClusterRead]:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
+    project = await _get_project_or_404(db, project_id)
+    sentence = project.unit == "sentence"
     result = await db.execute(select(Cluster).where(Cluster.project_id == project_id).order_by(Cluster.label))
-    # One grouped query for the per-cluster count of docs that actually have a
+    # One grouped query for the per-cluster count of members that actually have a
     # sentiment score, so the UI can show coverage ("sentiment on n of N") instead
-    # of implying the mean covers every document.
-    counts = dict(
-        (
-            await db.execute(
-                select(Document.cluster_id, func.count())
-                .where(
-                    Document.project_id == project_id,
-                    Document.cluster_id.is_not(None),
-                    Document.sentiment_score.is_not(None),
-                )
-                .group_by(Document.cluster_id)
-            )
-        ).all()
-    )
+    # of implying the mean covers every member. Members are segments for sentence.
+    if sentence:
+        counts_q = (
+            select(Segment.cluster_id, func.count())
+            .where(Segment.project_id == project_id, Segment.cluster_id.is_not(None), Segment.sentiment_score.is_not(None))
+            .group_by(Segment.cluster_id)
+        )
+    else:
+        counts_q = (
+            select(Document.cluster_id, func.count())
+            .where(Document.project_id == project_id, Document.cluster_id.is_not(None), Document.sentiment_score.is_not(None))
+            .group_by(Document.cluster_id)
+        )
+    counts = dict((await db.execute(counts_q)).all())
     items = []
     for cluster in result.scalars().all():
-        sample_docs = await _sample_docs(db, project_id, cluster.id)
+        sample_docs = await _sample_docs(db, project_id, cluster.id, sentence=sentence)
         items.append(
             ClusterRead.model_validate(cluster).model_copy(
                 update={"sample_docs": sample_docs, "sentiment_count": counts.get(cluster.id, 0)}
@@ -246,24 +318,44 @@ async def cluster_detail(project_id: uuid.UUID, cluster_id: uuid.UUID, db: Async
     cluster = await db.get(Cluster, cluster_id)
     if not cluster or cluster.project_id != project_id:
         raise HTTPException(status_code=404, detail="Cluster not found")
+    project = await _get_project_or_404(db, project_id)
+    sentence = project.unit == "sentence"
     return ClusterRead.model_validate(cluster).model_copy(
         update={
-            "sample_docs": await _sample_docs(db, project_id, cluster_id, 5),
-            "sentiment_count": await _sentiment_count(db, project_id, cluster_id),
+            "sample_docs": await _sample_docs(db, project_id, cluster_id, 5, sentence=sentence),
+            "sentiment_count": await _sentiment_count(db, project_id, cluster_id, sentence=sentence),
         }
     )
 
 
 @router.get("/{project_id}/clusters/{cluster_id}/documents", response_model=list[DocumentRead])
-async def cluster_documents(project_id: uuid.UUID, cluster_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user), limit: int = 50, offset: int = 0) -> list[Document]:
+async def cluster_documents(project_id: uuid.UUID, cluster_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user), limit: int = 50, offset: int = 0) -> list[DocumentRead]:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
+    project = await _get_project_or_404(db, project_id)
+    if project.unit == "sentence":
+        # Distinct reviews that have at least one mention in this cluster.
+        doc_ids = (
+            await db.execute(
+                select(Segment.document_id)
+                .where(Segment.project_id == project_id, Segment.cluster_id == cluster_id)
+                .group_by(Segment.document_id)
+                .limit(limit)
+                .offset(offset)
+            )
+        ).scalars().all()
+        if not doc_ids:
+            return []
+        docs = (await db.execute(select(Document).where(Document.id.in_(doc_ids)))).scalars().all()
+        memberships = await _document_memberships(db, project_id, list(doc_ids))
+        return [_document_read(doc, memberships.get(doc.id, [])) for doc in docs]
     result = await db.execute(select(Document).where(Document.project_id == project_id, Document.cluster_id == cluster_id).limit(limit).offset(offset))
-    return list(result.scalars().all())
+    return [_document_read(doc, []) for doc in result.scalars().all()]
 
 
 @router.post("/{project_id}/clusters", response_model=ClusterRead, status_code=status.HTTP_201_CREATED)
 async def create_cluster(project_id: uuid.UUID, payload: ClusterCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ClusterRead:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    _require_editable(await _get_project_or_404(db, project_id))
     cluster = Cluster(
         id=uuid.uuid4(),
         project_id=project_id,
@@ -284,6 +376,8 @@ async def create_cluster(project_id: uuid.UUID, payload: ClusterCreate, db: Asyn
 @router.post("/{project_id}/clusters/merge", response_model=ClusterRead)
 async def merge_clusters(project_id: uuid.UUID, payload: ClusterMerge, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ClusterRead:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    project = await _get_project_or_404(db, project_id)
+    _require_editable(project)
     if payload.target_id in payload.source_ids:
         raise HTTPException(status_code=400, detail="target_id cannot be among source_ids")
     target = await db.get(Cluster, payload.target_id)
@@ -295,23 +389,29 @@ async def merge_clusters(project_id: uuid.UUID, payload: ClusterMerge, db: Async
         if not source or source.project_id != project_id:
             raise HTTPException(status_code=404, detail="Source cluster not found")
         sources.append(source)
-    result = await db.execute(
-        select(Document).where(Document.project_id == project_id, Document.cluster_id.in_(payload.source_ids))
-    )
-    for doc in result.scalars().all():
-        doc.cluster_id = payload.target_id
+    # Move every mention of the source clusters into the target, then refresh the
+    # affected reviews' derived primary cluster.
+    segs = (await db.execute(
+        select(Segment).where(Segment.project_id == project_id, Segment.cluster_id.in_(payload.source_ids))
+    )).scalars().all()
+    affected_docs = {seg.document_id for seg in segs}
+    for seg in segs:
+        seg.cluster_id = payload.target_id
     for source in sources:
         record_edit(db, project_id=project_id, actor_id=current_user.id, action="merge_clusters", cluster_id=source.id, target_cluster_id=payload.target_id)
         await db.delete(source)
     await recompute_clusters(db, project_id, [payload.target_id])
+    await recompute_document_primary(db, project_id, list(affected_docs))
     await db.commit()
     await db.refresh(target)
-    return ClusterRead.model_validate(target).model_copy(update={"sample_docs": await _sample_docs(db, project_id, target.id, 5)})
+    return ClusterRead.model_validate(target).model_copy(update={"sample_docs": await _sample_docs(db, project_id, target.id, 5, sentence=True)})
 
 
 @router.post("/{project_id}/clusters/from-selection", response_model=ClusterRead, status_code=status.HTTP_201_CREATED)
-async def cluster_from_selection(project_id: uuid.UUID, payload: ClusterFromSelection, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ClusterRead:
+async def cluster_from_selection(project_id: uuid.UUID, payload: ClusterFromSegments, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ClusterRead:
+    """Create a cluster from a lasso selection of *segment* mentions (sentence-unit)."""
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    _require_editable(await _get_project_or_404(db, project_id))
     cluster = Cluster(
         id=uuid.uuid4(),
         project_id=project_id,
@@ -323,15 +423,16 @@ async def cluster_from_selection(project_id: uuid.UUID, payload: ClusterFromSele
         size=0,
     )
     db.add(cluster)
-    result = await db.execute(
-        select(Document).where(Document.project_id == project_id, Document.id.in_(payload.document_ids))
-    )
-    docs = list(result.scalars().all())
+    segs = list((await db.execute(
+        select(Segment).where(Segment.project_id == project_id, Segment.id.in_(payload.segment_ids))
+    )).scalars().all())
     affected: set[uuid.UUID] = {cluster.id}
-    for doc in docs:
-        if doc.cluster_id is not None:
-            affected.add(doc.cluster_id)
-        doc.cluster_id = cluster.id
+    affected_docs: set[uuid.UUID] = set()
+    for seg in segs:
+        if seg.cluster_id is not None:
+            affected.add(seg.cluster_id)
+        seg.cluster_id = cluster.id
+        affected_docs.add(seg.document_id)
     record_edit(
         db,
         project_id=project_id,
@@ -339,17 +440,19 @@ async def cluster_from_selection(project_id: uuid.UUID, payload: ClusterFromSele
         action="create_from_selection",
         cluster_id=cluster.id,
         new_label=payload.label,
-        payload={"document_ids": [str(doc.id) for doc in docs]},
+        payload={"segment_ids": [str(seg.id) for seg in segs]},
     )
     await recompute_clusters(db, project_id, list(affected))
+    await recompute_document_primary(db, project_id, list(affected_docs))
     await db.commit()
     await db.refresh(cluster)
-    return ClusterRead.model_validate(cluster).model_copy(update={"sample_docs": await _sample_docs(db, project_id, cluster.id, 5)})
+    return ClusterRead.model_validate(cluster).model_copy(update={"sample_docs": await _sample_docs(db, project_id, cluster.id, 5, sentence=True)})
 
 
 @router.patch("/{project_id}/clusters/{cluster_id}", response_model=ClusterRead | None)
 async def update_cluster(project_id: uuid.UUID, cluster_id: uuid.UUID, payload: ClusterUpdate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ClusterRead | None:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    _require_editable(await _get_project_or_404(db, project_id))
     cluster = await db.get(Cluster, cluster_id)
     if not cluster or cluster.project_id != project_id:
         raise HTTPException(status_code=404, detail="Cluster not found")
@@ -372,12 +475,13 @@ async def update_cluster(project_id: uuid.UUID, cluster_id: uuid.UUID, payload: 
         raise HTTPException(status_code=400, detail="Provide one of label, approve, or mark_junk")
     await db.commit()
     await db.refresh(cluster)
-    return ClusterRead.model_validate(cluster).model_copy(update={"sample_docs": await _sample_docs(db, project_id, cluster_id, 5)})
+    return ClusterRead.model_validate(cluster).model_copy(update={"sample_docs": await _sample_docs(db, project_id, cluster_id, 5, sentence=True)})
 
 
 @router.delete("/{project_id}/clusters/{cluster_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_cluster(project_id: uuid.UUID, cluster_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> None:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    _require_editable(await _get_project_or_404(db, project_id))
     cluster = await db.get(Cluster, cluster_id)
     if not cluster or cluster.project_id != project_id:
         raise HTTPException(status_code=404, detail="Cluster not found")
@@ -437,14 +541,25 @@ def _document_filter_conditions(filters_json: str | None) -> list:
 @router.get("/{project_id}/documents", response_model=list[DocumentRead])
 async def documents(project_id: uuid.UUID, cluster_id: uuid.UUID | None = None, filters: str | None = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user), limit: int = 50, offset: int = 0) -> list[Document]:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
+    project = await _get_project_or_404(db, project_id)
+    sentence = project.unit == "sentence"
     query = select(Document).where(Document.project_id == project_id)
     if cluster_id:
-        query = query.where(Document.cluster_id == cluster_id)
+        # For sentence-unit, filter to reviews with a mention in the cluster (not
+        # only those whose *primary* is the cluster) so the cluster page is complete.
+        if sentence:
+            member_ids = select(Segment.document_id).where(
+                Segment.project_id == project_id, Segment.cluster_id == cluster_id
+            )
+            query = query.where(Document.id.in_(member_ids))
+        else:
+            query = query.where(Document.cluster_id == cluster_id)
     for condition in _document_filter_conditions(filters):
         query = query.where(condition)
     query = query.limit(limit).offset(offset)
-    result = await db.execute(query)
-    return list(result.scalars().all())
+    docs = list((await db.execute(query)).scalars().all())
+    memberships = await _document_memberships(db, project_id, [d.id for d in docs]) if sentence else {}
+    return [_document_read(doc, memberships.get(doc.id, [])) for doc in docs]
 
 
 # Declared before /documents/{document_id} so "count" isn't matched as a doc id.
@@ -461,17 +576,22 @@ async def documents_count(project_id: uuid.UUID, cluster_id: uuid.UUID | None = 
 
 
 @router.get("/{project_id}/documents/{document_id}", response_model=DocumentRead)
-async def document(project_id: uuid.UUID, document_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> Document:
+async def document(project_id: uuid.UUID, document_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> DocumentRead:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
     doc = await db.get(Document, document_id)
     if not doc or doc.project_id != project_id:
         raise HTTPException(status_code=404, detail="Document not found")
-    return doc
+    project = await _get_project_or_404(db, project_id)
+    memberships = (await _document_memberships(db, project_id, [doc.id])).get(doc.id, []) if project.unit == "sentence" else []
+    return _document_read(doc, memberships)
 
 
 @router.patch("/{project_id}/documents/{document_id}", response_model=DocumentRead)
-async def reassign_document(project_id: uuid.UUID, document_id: uuid.UUID, payload: DocumentReassign, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> Document:
+async def reassign_document(project_id: uuid.UUID, document_id: uuid.UUID, payload: ReviewReassign, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> DocumentRead:
+    """Move *all* of a review's mentions to one cluster (sentence-unit "move all")."""
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    project = await _get_project_or_404(db, project_id)
+    _require_editable(project)
     doc = await db.get(Document, document_id)
     if not doc or doc.project_id != project_id:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -480,53 +600,142 @@ async def reassign_document(project_id: uuid.UUID, document_id: uuid.UUID, paylo
         cluster = await db.get(Cluster, target_cluster_id)
         if not cluster or cluster.project_id != project_id:
             raise HTTPException(status_code=404, detail="Cluster not found")
-    old_cluster_id = doc.cluster_id
-    doc.cluster_id = target_cluster_id
+    old_primary = doc.cluster_id
+    segs = list((await db.execute(
+        select(Segment).where(Segment.project_id == project_id, Segment.document_id == document_id)
+    )).scalars().all())
+    affected: set[uuid.UUID] = {target_cluster_id} if target_cluster_id is not None else set()
+    for seg in segs:
+        if seg.cluster_id is not None:
+            affected.add(seg.cluster_id)
+        seg.cluster_id = target_cluster_id
     record_edit(
         db,
         project_id=project_id,
         actor_id=current_user.id,
-        action="reassign_doc",
+        action="reassign_review",
         document_id=document_id,
-        cluster_id=old_cluster_id,
+        cluster_id=old_primary,
         target_cluster_id=target_cluster_id,
     )
-    affected = [cid for cid in {old_cluster_id, target_cluster_id} if cid is not None]
-    await recompute_clusters(db, project_id, affected)
+    await recompute_clusters(db, project_id, list(affected))
+    await recompute_document_primary(db, project_id, [document_id])
     await db.commit()
     await db.refresh(doc)
-    return doc
+    memberships = (await _document_memberships(db, project_id, [doc.id])).get(doc.id, [])
+    return _document_read(doc, memberships)
 
 
 @router.post("/{project_id}/documents/reassign", response_model=BulkReassignResult)
 async def bulk_reassign_documents(project_id: uuid.UUID, payload: BulkReassign, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> BulkReassignResult:
+    """Move all mentions of each listed review to one cluster (sentence-unit)."""
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    _require_editable(await _get_project_or_404(db, project_id))
     target_cluster_id = payload.cluster_id
     if target_cluster_id is not None:
         cluster = await db.get(Cluster, target_cluster_id)
         if not cluster or cluster.project_id != project_id:
             raise HTTPException(status_code=404, detail="Cluster not found")
-    result = await db.execute(
+    docs = list((await db.execute(
         select(Document).where(Document.project_id == project_id, Document.id.in_(payload.document_ids))
-    )
-    docs = list(result.scalars().all())
-    affected: set[uuid.UUID | None] = {target_cluster_id}
-    # Capture each doc's old cluster before the move so undo can put them back.
+    )).scalars().all())
+    doc_ids = [doc.id for doc in docs]
+    # Capture each review's old primary before the move so undo can restore it.
     before = {str(doc.id): (str(doc.cluster_id) if doc.cluster_id else None) for doc in docs}
-    for doc in docs:
-        affected.add(doc.cluster_id)
-        doc.cluster_id = target_cluster_id
+    segs = list((await db.execute(
+        select(Segment).where(Segment.project_id == project_id, Segment.document_id.in_(doc_ids))
+    )).scalars().all())
+    affected: set[uuid.UUID] = {target_cluster_id} if target_cluster_id is not None else set()
+    for seg in segs:
+        if seg.cluster_id is not None:
+            affected.add(seg.cluster_id)
+        seg.cluster_id = target_cluster_id
     record_edit(
         db,
         project_id=project_id,
         actor_id=current_user.id,
         action="bulk_reassign",
         target_cluster_id=target_cluster_id,
-        payload={"document_ids": [str(doc.id) for doc in docs], "before": before},
+        payload={"document_ids": [str(d) for d in doc_ids], "before": before},
     )
-    await recompute_clusters(db, project_id, [cid for cid in affected if cid is not None])
+    await recompute_clusters(db, project_id, list(affected))
+    await recompute_document_primary(db, project_id, doc_ids)
     await db.commit()
     return BulkReassignResult(moved=len(docs))
+
+
+@router.patch("/{project_id}/segments/{segment_id}", response_model=EmbeddingPoint)
+async def reassign_segment(project_id: uuid.UUID, segment_id: uuid.UUID, payload: SegmentReassign, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> EmbeddingPoint:
+    """Move a single mention (segment) to a cluster (or noise)."""
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    _require_editable(await _get_project_or_404(db, project_id))
+    seg = await db.get(Segment, segment_id)
+    if not seg or seg.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Segment not found")
+    target_cluster_id = payload.cluster_id
+    if target_cluster_id is not None:
+        cluster = await db.get(Cluster, target_cluster_id)
+        if not cluster or cluster.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Cluster not found")
+    old_cluster_id = seg.cluster_id
+    seg.cluster_id = target_cluster_id
+    record_edit(
+        db,
+        project_id=project_id,
+        actor_id=current_user.id,
+        action="reassign_segment",
+        segment_id=segment_id,
+        cluster_id=old_cluster_id,
+        target_cluster_id=target_cluster_id,
+    )
+    await recompute_clusters(db, project_id, [cid for cid in {old_cluster_id, target_cluster_id} if cid is not None])
+    await recompute_document_primary(db, project_id, [seg.document_id])
+    await db.commit()
+    await db.refresh(seg)
+    label = None
+    if seg.cluster_id is not None:
+        c = await db.get(Cluster, seg.cluster_id)
+        label = c.label if c else None
+    return EmbeddingPoint(
+        document_id=seg.document_id, segment_id=seg.id, cluster_id=seg.cluster_id,
+        x=seg.umap_x, y=seg.umap_y, z=seg.umap_z, snippet=seg.text[:120],
+        sentiment_score=seg.sentiment_score, cluster_label=label,
+    )
+
+
+@router.post("/{project_id}/segments/reassign", response_model=BulkReassignResult)
+async def bulk_reassign_segments(project_id: uuid.UUID, payload: BulkSegmentReassign, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> BulkReassignResult:
+    """Move a lasso selection of mentions (segments) to one cluster (or noise)."""
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
+    _require_editable(await _get_project_or_404(db, project_id))
+    target_cluster_id = payload.cluster_id
+    if target_cluster_id is not None:
+        cluster = await db.get(Cluster, target_cluster_id)
+        if not cluster or cluster.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Cluster not found")
+    segs = list((await db.execute(
+        select(Segment).where(Segment.project_id == project_id, Segment.id.in_(payload.segment_ids))
+    )).scalars().all())
+    before = {str(seg.id): (str(seg.cluster_id) if seg.cluster_id else None) for seg in segs}
+    affected: set[uuid.UUID] = {target_cluster_id} if target_cluster_id is not None else set()
+    affected_docs: set[uuid.UUID] = set()
+    for seg in segs:
+        if seg.cluster_id is not None:
+            affected.add(seg.cluster_id)
+        seg.cluster_id = target_cluster_id
+        affected_docs.add(seg.document_id)
+    record_edit(
+        db,
+        project_id=project_id,
+        actor_id=current_user.id,
+        action="bulk_reassign_segments",
+        target_cluster_id=target_cluster_id,
+        payload={"segment_ids": [str(seg.id) for seg in segs], "before": before},
+    )
+    await recompute_clusters(db, project_id, list(affected))
+    await recompute_document_primary(db, project_id, list(affected_docs))
+    await db.commit()
+    return BulkReassignResult(moved=len(segs))
 
 
 @router.get("/{project_id}/members", response_model=list[MemberRead])
@@ -584,25 +793,27 @@ async def list_edits(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), 
 
 
 async def _junk_cluster(db: AsyncSession, project_id: uuid.UUID, cluster: Cluster, actor_id: uuid.UUID) -> None:
-    """Mark a cluster as junk: its documents become noise and the cluster is removed.
+    """Mark a cluster as junk: its mentions become noise and the cluster is removed.
 
-    Shared by ``DELETE /clusters/{id}`` and ``PATCH`` with ``mark_junk``. Stages the
-    audit row and deletes the cluster; the caller owns the commit."""
-    result = await db.execute(
-        select(Document).where(Document.project_id == project_id, Document.cluster_id == cluster.id)
-    )
-    docs = list(result.scalars().all())
-    for doc in docs:
-        doc.cluster_id = None
+    Sentence-unit only (guarded by callers via ``_require_editable``): moves the
+    cluster's segments to noise, refreshes the affected reviews' derived primary,
+    stages the audit row, and deletes the cluster. The caller owns the commit."""
+    segs = list((await db.execute(
+        select(Segment).where(Segment.project_id == project_id, Segment.cluster_id == cluster.id)
+    )).scalars().all())
+    affected_docs = {seg.document_id for seg in segs}
+    for seg in segs:
+        seg.cluster_id = None
     record_edit(
         db,
         project_id=project_id,
         actor_id=actor_id,
         action="mark_junk",
         cluster_id=cluster.id,
-        payload={"document_ids": [str(doc.id) for doc in docs]},
+        payload={"segment_ids": [str(seg.id) for seg in segs]},
     )
     await db.delete(cluster)
+    await recompute_document_primary(db, project_id, list(affected_docs))
 
 
 async def _get_project_or_404(db: AsyncSession, project_id: uuid.UUID) -> Project:
@@ -624,24 +835,99 @@ async def _project_read(db: AsyncSession, project: Project, role: ProjectRole) -
         created_at=project.created_at,
         role=role,
         last_error=project.last_error,
+        unit=project.unit,
     )
 
 
-async def _sample_docs(db: AsyncSession, project_id: uuid.UUID, cluster_id: uuid.UUID, limit: int = 3) -> list[dict]:
-    result = await db.execute(
-        select(Document.id, Document.text).where(Document.project_id == project_id, Document.cluster_id == cluster_id).limit(limit)
+def _document_read(doc: Document, memberships: list[ClusterMembership]) -> DocumentRead:
+    return DocumentRead(
+        id=doc.id,
+        primary_key_value=doc.primary_key_value,
+        text=doc.text,
+        raw_data=doc.raw_data,
+        cluster_id=doc.cluster_id,
+        sentiment_score=doc.sentiment_score,
+        memberships=memberships,
+        primary_cluster_id=doc.cluster_id,
     )
-    return [{"id": str(doc_id), "text": text[:240]} for doc_id, text in result.all()]
 
 
-async def _sentiment_count(db: AsyncSession, project_id: uuid.UUID, cluster_id: uuid.UUID) -> int:
-    """Count of this cluster's documents that carry a sentiment score (the n in the
-    "sentiment on n of N" coverage shown next to the cluster's mean)."""
-    result = await db.execute(
-        select(func.count()).where(
+def _require_editable(project: Project) -> None:
+    """Editing is only supported on sentence-unit projects. Document-unit projects
+    are frozen (read-only) — re-run to upgrade them to sentence-level."""
+    if project.unit != "sentence":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This project is document-level and read-only. Re-run it to enable segment-level editing.",
+        )
+
+
+async def _sample_docs(db: AsyncSession, project_id: uuid.UUID, cluster_id: uuid.UUID, limit: int = 3, *, sentence: bool = False) -> list[dict]:
+    """Short member samples for a cluster card — segment texts for sentence-unit
+    projects, whole-document texts otherwise."""
+    if sentence:
+        result = await db.execute(
+            select(Segment.id, Segment.text).where(Segment.project_id == project_id, Segment.cluster_id == cluster_id).limit(limit)
+        )
+    else:
+        result = await db.execute(
+            select(Document.id, Document.text).where(Document.project_id == project_id, Document.cluster_id == cluster_id).limit(limit)
+        )
+    return [{"id": str(row_id), "text": text[:240]} for row_id, text in result.all()]
+
+
+async def _sentiment_count(db: AsyncSession, project_id: uuid.UUID, cluster_id: uuid.UUID, *, sentence: bool = False) -> int:
+    """Count of this cluster's members carrying a sentiment score (the n in the
+    "sentiment on n of N" coverage). Members are segments for sentence-unit."""
+    if sentence:
+        query = select(func.count()).where(
+            Segment.project_id == project_id,
+            Segment.cluster_id == cluster_id,
+            Segment.sentiment_score.is_not(None),
+        )
+    else:
+        query = select(func.count()).where(
             Document.project_id == project_id,
             Document.cluster_id == cluster_id,
             Document.sentiment_score.is_not(None),
         )
-    )
+    result = await db.execute(query)
     return int(result.scalar_one())
+
+
+async def _document_memberships(db: AsyncSession, project_id: uuid.UUID, document_ids: list[uuid.UUID]) -> dict[uuid.UUID, list[ClusterMembership]]:
+    """Per-review cluster membership for sentence-unit projects: for each document,
+    the clusters its mentions fall into with mention counts + share (of the review's
+    segments). Noise mentions are excluded from the chips but counted in the share."""
+    if not document_ids:
+        return {}
+    totals = dict(
+        (
+            await db.execute(
+                select(Segment.document_id, func.count())
+                .where(Segment.project_id == project_id, Segment.document_id.in_(document_ids))
+                .group_by(Segment.document_id)
+            )
+        ).all()
+    )
+    rows = (
+        await db.execute(
+            select(Segment.document_id, Segment.cluster_id, Cluster.label, func.count())
+            .join(Cluster, Cluster.id == Segment.cluster_id)
+            .where(
+                Segment.project_id == project_id,
+                Segment.document_id.in_(document_ids),
+                Segment.cluster_id.is_not(None),
+            )
+            .group_by(Segment.document_id, Segment.cluster_id, Cluster.label)
+        )
+    ).all()
+    out: dict[uuid.UUID, list[ClusterMembership]] = {}
+    for doc_id, cluster_id, label, count in rows:
+        total = totals.get(doc_id, count) or count
+        out.setdefault(doc_id, []).append(
+            ClusterMembership(cluster_id=cluster_id, cluster_label=label, mention_count=int(count), share=round(count / total, 4))
+        )
+    for memberships in out.values():
+        memberships.sort(key=lambda m: m.mention_count, reverse=True)
+    return out

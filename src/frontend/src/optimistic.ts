@@ -142,6 +142,7 @@ export function applyCreateFromSelection(
     top_terms: [],
     word_frequencies: {},
     size: docIds.size,
+    n_mentions: docIds.size,
     sentiment_avg: null,
     sentiment_count: 0,
     mean_stars: null,

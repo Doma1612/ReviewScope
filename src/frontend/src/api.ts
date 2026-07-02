@@ -8,6 +8,9 @@ export type Project = {
   created_at: string;
   role: "owner" | "viewer";
   last_error: string | null;
+  // "document" = one cluster per review (frozen/read-only); "sentence" = segment
+  // (mention) level, a review maps to several clusters and editing is enabled.
+  unit: "document" | "sentence";
 };
 
 export type PipelineStatus = {
@@ -18,6 +21,9 @@ export type PipelineStatus = {
 
 export type EmbeddingPoint = {
   document_id: string;
+  // Set for sentence-unit projects, where a point is a mention (segment) and
+  // document_id is the parent review. Null for document-unit projects.
+  segment_id: string | null;
   cluster_id: string | null;
   x: number;
   y: number;
@@ -34,14 +40,26 @@ export type Cluster = {
   label_source: string;
   top_terms: { term: string; score: number }[];
   word_frequencies: Record<string, number>;
-  size: number;
+  size: number;         // distinct parent reviews
+  n_mentions: number;   // segment mentions (== size for document unit)
   sentiment_avg: number | null;
   sentiment_count: number;
   mean_stars: number | null;
   cohesion: number | null;
   sample_docs: { id: string; text: string }[];
 };
-export type DocumentItem = { id: string; primary_key_value: string; text: string; raw_data: Record<string, unknown>; cluster_id: string | null; sentiment_score: number | null };
+export type ClusterMembership = { cluster_id: string; cluster_label: string; mention_count: number; share: number };
+export type DocumentItem = {
+  id: string;
+  primary_key_value: string;
+  text: string;
+  raw_data: Record<string, unknown>;
+  cluster_id: string | null;
+  sentiment_score: number | null;
+  // Sentence-unit only: the clusters this review's mentions fall into.
+  memberships?: ClusterMembership[];
+  primary_cluster_id?: string | null;
+};
 export type Member = { user_id: string; email: string; role: "owner" | "viewer" };
 export type Models = { embedding_model: string; label_model: string; variant: string; simulated: boolean };
 export type Health = { status: string };
@@ -57,6 +75,7 @@ export type ClusterEdit = {
   cluster_id: string | null;
   target_cluster_id: string | null;
   document_id: string | null;
+  segment_id: string | null;
   new_label: string | null;
   note: string | null;
   payload: Record<string, unknown>;
@@ -89,7 +108,9 @@ export const api = {
   deleteProject: (projectId: string) => request<void>(`/api/projects/${projectId}`, { method: "DELETE" }),
   uploadProject: (form: FormData) => request<Project>("/api/projects", { method: "POST", body: form }),
   pipelineStatus: (projectId: string) => request<PipelineStatus>(`/api/projects/${projectId}/pipeline/status`),
-  embeddings: (projectId: string) => request<EmbeddingPoint[]>(`/api/projects/${projectId}/embeddings`),
+  embeddings: (projectId: string, sample?: number) =>
+    request<EmbeddingPoint[]>(`/api/projects/${projectId}/embeddings${sample != null ? `?sample=${sample}` : ""}`),
+  embeddingStats: (projectId: string) => request<{ total: number; noise: number }>(`/api/projects/${projectId}/embeddings/stats`),
   clusters: (projectId: string) => request<Cluster[]>(`/api/projects/${projectId}/clusters`),
   cluster: (projectId: string, clusterId: string) => request<Cluster>(`/api/projects/${projectId}/clusters/${clusterId}`),
   documents: (projectId: string, params: { clusterId?: string; limit?: number; offset?: number; filters?: DocumentFilter[] } = {}) => {
@@ -109,16 +130,22 @@ export const api = {
     return request<{ total: number }>(`/api/projects/${projectId}/documents/count${qs ? `?${qs}` : ""}`);
   },
   clusterDocuments: (projectId: string, clusterId: string) => request<DocumentItem[]>(`/api/projects/${projectId}/clusters/${clusterId}/documents`),
-  reassignDocument: (projectId: string, documentId: string, clusterId: string | null) =>
+  // Move all of a review's mentions to one cluster (sentence-unit "move all").
+  reassignReview: (projectId: string, documentId: string, clusterId: string | null) =>
     request<DocumentItem>(`/api/projects/${projectId}/documents/${documentId}`, { method: "PATCH", body: JSON.stringify({ cluster_id: clusterId }) }),
   bulkReassign: (projectId: string, documentIds: string[], clusterId: string | null) =>
     request<{ moved: number }>(`/api/projects/${projectId}/documents/reassign`, { method: "POST", body: JSON.stringify({ document_ids: documentIds, cluster_id: clusterId }) }),
+  // Segment-level (mention) edits.
+  reassignSegment: (projectId: string, segmentId: string, clusterId: string | null) =>
+    request<EmbeddingPoint>(`/api/projects/${projectId}/segments/${segmentId}`, { method: "PATCH", body: JSON.stringify({ cluster_id: clusterId }) }),
+  bulkReassignSegments: (projectId: string, segmentIds: string[], clusterId: string | null) =>
+    request<{ moved: number }>(`/api/projects/${projectId}/segments/reassign`, { method: "POST", body: JSON.stringify({ segment_ids: segmentIds, cluster_id: clusterId }) }),
   createCluster: (projectId: string, label: string) =>
     request<Cluster>(`/api/projects/${projectId}/clusters`, { method: "POST", body: JSON.stringify({ label }) }),
   mergeClusters: (projectId: string, sourceIds: string[], targetId: string) =>
     request<Cluster>(`/api/projects/${projectId}/clusters/merge`, { method: "POST", body: JSON.stringify({ source_ids: sourceIds, target_id: targetId }) }),
-  createClusterFromSelection: (projectId: string, documentIds: string[], label: string) =>
-    request<Cluster>(`/api/projects/${projectId}/clusters/from-selection`, { method: "POST", body: JSON.stringify({ document_ids: documentIds, label }) }),
+  createClusterFromSegments: (projectId: string, segmentIds: string[], label: string) =>
+    request<Cluster>(`/api/projects/${projectId}/clusters/from-selection`, { method: "POST", body: JSON.stringify({ segment_ids: segmentIds, label }) }),
   updateCluster: (projectId: string, clusterId: string, changes: { label?: string; approve?: boolean; markJunk?: boolean }) =>
     request<Cluster | void>(`/api/projects/${projectId}/clusters/${clusterId}`, { method: "PATCH", body: JSON.stringify({ label: changes.label, approve: changes.approve, mark_junk: changes.markJunk }) }),
   deleteCluster: (projectId: string, clusterId: string) =>

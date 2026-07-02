@@ -59,43 +59,96 @@ class SentimentScorer:
         device: str = "cpu",
         batch_size: int = 128,
         max_length: int = 512,
+        show_progress: bool = True,
     ):
         self.model_name = model_name
         self.device = device
         self.batch_size = batch_size
         self.max_length = max_length
-        self._model = None
-        self._tokenizer = None
+        self.show_progress = show_progress
+        # One (model, tokenizer) replica per device, loaded lazily. On CUDA the
+        # replicas span every visible card so score() is data-parallel across GPUs
+        # (CUDA_VISIBLE_DEVICES is already pinned to idle cards upstream).
+        self._replicas: dict[str, tuple] = {}
 
-    def _load(self):
-        if self._model is None:
+    def _target_devices(self) -> list[str]:
+        """Devices to shard across: every visible CUDA card, else the one device.
+
+        Mirrors the embedder (embed/sentence_transformer.py::_target_devices):
+        CUDA_VISIBLE_DEVICES is pinned to idle cards upstream, so using all of
+        them is safe. RoBERTa-base is small (~0.5 GB), so a replica per card is cheap.
+        """
+        if self.device != "cuda":
+            return [self.device]
+        import torch
+
+        if not torch.cuda.is_available():
+            return [self.device]
+        return [f"cuda:{i}" for i in range(max(1, torch.cuda.device_count()))]
+
+    def _load(self, device: str):
+        if device not in self._replicas:
             import torch
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self._model = AutoModelForSequenceClassification.from_pretrained(
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            model = AutoModelForSequenceClassification.from_pretrained(
                 self.model_name, torch_dtype=torch.float32  # Pascal: no bf16
-            ).to(self.device)
-            self._model.eval()
-        return self._model, self._tokenizer
+            ).to(device)
+            model.eval()
+            self._replicas[device] = (model, tokenizer)
+        return self._replicas[device]
 
     def score(self, texts: list[str]) -> np.ndarray:
-        """Signed sentiment score per text: P(positive) - P(negative)."""
+        """Signed sentiment score per text: P(positive) - P(negative).
+
+        Sharded across every visible GPU — contiguous slices, one model replica
+        per card, threads (torch releases the GIL inside CUDA kernels) — then
+        reassembled in order. Single-device work (CPU, one GPU, or a tiny batch)
+        stays on one card. Mirrors the embedder's in-process data-parallel encode.
+        """
+        devices = self._target_devices()
+        logger.info(
+            "scoring sentiment for %d texts (%s, batch %d, devices %s)",
+            len(texts), self.model_name, self.batch_size, devices,
+        )
+        if len(devices) == 1 or len(texts) < 2 * self.batch_size:
+            return self._score_on(devices[0], texts, progress=self.show_progress)
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        bounds = np.linspace(0, len(texts), len(devices) + 1, dtype=int)
+        shards = [(dev, a, b) for dev, a, b in zip(devices, bounds[:-1], bounds[1:]) if b > a]
+        scores = np.empty(len(texts), dtype=np.float32)
+        with ThreadPoolExecutor(max_workers=len(shards)) as pool:
+            # Only the first shard draws a bar — parallel bars would interleave;
+            # shards are equal-sized, so one is representative (mirrors the embedder).
+            futures = {
+                pool.submit(self._score_on, dev, texts[a:b], progress=(self.show_progress and i == 0)): (a, b)
+                for i, (dev, a, b) in enumerate(shards)
+            }
+            for fut, (a, b) in futures.items():
+                scores[a:b] = fut.result()
+        return scores
+
+    def _score_on(self, device: str, texts: list[str], progress: bool = False) -> np.ndarray:
+        """Score one contiguous shard on a single device."""
         import torch
 
-        model, tokenizer = self._load()
-        logger.info(
-            "scoring sentiment for %d texts (%s, batch %d, device %s)",
-            len(texts), self.model_name, self.batch_size, self.device,
-        )
+        model, tokenizer = self._load(device)
         scores = np.empty(len(texts), dtype=np.float32)
+        starts = range(0, len(texts), self.batch_size)
+        if progress:
+            from tqdm.auto import tqdm
+
+            starts = tqdm(starts, desc="Sentiment", unit="batch")
         with torch.inference_mode():
-            for start in range(0, len(texts), self.batch_size):
+            for start in starts:
                 chunk = texts[start:start + self.batch_size]
                 enc = tokenizer(
                     chunk, padding=True, truncation=True,
                     max_length=self.max_length, return_tensors="pt",
-                ).to(self.device)
+                ).to(device)
                 probs = torch.softmax(model(**enc).logits, dim=-1)
                 # TweetEval label order: 0=negative, 1=neutral, 2=positive
                 scores[start:start + len(chunk)] = (
@@ -104,8 +157,7 @@ class SentimentScorer:
         return scores
 
     def close(self) -> None:
-        self._model = None
-        self._tokenizer = None
+        self._replicas.clear()
         release_cuda_memory()
         logger.info("released sentiment model %s", self.model_name)
 

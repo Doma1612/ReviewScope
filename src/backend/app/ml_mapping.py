@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 from sqlalchemy import delete, select, update
 
-from app.models import Cluster, Document, Embedding, PipelineJob, PipelineStepStatus, Project
+from app.models import Cluster, Document, Embedding, PipelineJob, PipelineStepStatus, Project, Segment
 
 
 # Canonical lowercase step order, matching the rows pre-created in
@@ -140,29 +140,39 @@ class DbProgressSink:
 
 # ── Result → ORM ──────────────────────────────────────────────────────────────
 
-def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding]]:
-    """Map a ``RunResult`` to (clusters, documents, embeddings) ORM rows.
+def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding], list[Segment]]:
+    """Map a ``RunResult`` to (clusters, documents, embeddings, segments) ORM rows.
 
     UUIDs are assigned eagerly (not left to SQLAlchemy defaults) so the integer
     ``cluster_id`` → cluster-UUID map and the ``primary_key_value`` → document-UUID
-    join can be built before any flush. Noise documents (``cluster_id is None``)
-    keep a ``NULL`` FK.
+    join can be built before any flush. Noise members keep a ``NULL`` FK.
+
+    Document-unit runs populate ``embeddings`` (one per review) and leave
+    ``segments`` empty; sentence-unit runs do the reverse — ``segments`` are the
+    clustered mentions and each ``Document`` carries the review's derived primary
+    cluster. Exactly one of the two collections is non-empty.
     """
     project_id = uuid.UUID(str(result.project_id))
+    unit = getattr(result, "unit", "document")
 
-    # Cohesion: mean cosine similarity of member embeddings to their centroid.
-    # Build per-(int)cluster vector lists from the run's documents + embeddings so we
-    # can seed `cohesion` at persist time, the same way edits recompute it.
+    # Cohesion: mean cosine similarity of member vectors to their centroid, seeded
+    # here from the clustered unit's vectors (embeddings for document runs, the
+    # segments themselves for sentence runs) so `cohesion` matches later recomputes.
     from app.services.metrics import cohesion_score
 
-    vector_by_pk = {rec.primary_key_value: list(rec.vector) for rec in result.embeddings}
     vectors_by_cluster_int: dict[int, list] = {}
-    for rec in result.documents:
-        if rec.cluster_id is None:
-            continue
-        vector = vector_by_pk.get(rec.primary_key_value)
-        if vector:
-            vectors_by_cluster_int.setdefault(rec.cluster_id, []).append(vector)
+    if unit == "sentence":
+        for rec in result.segments:
+            if rec.cluster_id is not None and rec.vector:
+                vectors_by_cluster_int.setdefault(rec.cluster_id, []).append(list(rec.vector))
+    else:
+        vector_by_pk = {rec.primary_key_value: list(rec.vector) for rec in result.embeddings}
+        for rec in result.documents:
+            if rec.cluster_id is None:
+                continue
+            vector = vector_by_pk.get(rec.primary_key_value)
+            if vector:
+                vectors_by_cluster_int.setdefault(rec.cluster_id, []).append(vector)
 
     clusters: list[Cluster] = []
     cluster_uuid_by_int: dict[int, uuid.UUID] = {}
@@ -178,10 +188,14 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
             top_terms=list(rec.top_terms),
             word_frequencies=dict(rec.word_frequencies),
             size=rec.size,
+            n_mentions=getattr(rec, "n_mentions", rec.size),
             sentiment_avg=rec.sentiment_avg,
             mean_stars=rec.mean_stars,
             cohesion=cohesion_score(vectors_by_cluster_int.get(rec.cluster_id, [])),
         ))
+
+    def to_uuid(int_cid) -> uuid.UUID | None:
+        return cluster_uuid_by_int.get(int_cid) if int_cid is not None else None
 
     documents: list[Document] = []
     doc_uuid_by_pk: dict[str, uuid.UUID] = {}
@@ -194,7 +208,7 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
             primary_key_value=rec.primary_key_value,
             text=rec.text,
             raw_data=dict(rec.raw_data),
-            cluster_id=cluster_uuid_by_int.get(rec.cluster_id) if rec.cluster_id is not None else None,
+            cluster_id=to_uuid(rec.cluster_id),
             sentiment_score=rec.sentiment_score,
         ))
 
@@ -211,15 +225,39 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
             umap_z=rec.umap_z,
         ))
 
-    return clusters, documents, embeddings
+    segments: list[Segment] = []
+    for rec in getattr(result, "segments", None) or []:
+        did = doc_uuid_by_pk.get(rec.parent_key)
+        if did is None:
+            continue  # segment whose parent review didn't survive — skip defensively
+        segments.append(Segment(
+            id=uuid.uuid4(),
+            project_id=project_id,
+            document_id=did,
+            segment_key=rec.segment_key,
+            ordinal=rec.ordinal,
+            text=rec.text,
+            cluster_id=to_uuid(rec.cluster_id),
+            sentiment_score=rec.sentiment_score,
+            vector=list(rec.vector),
+            umap_x=rec.umap_x,
+            umap_y=rec.umap_y,
+            umap_z=rec.umap_z,
+        ))
+
+    return clusters, documents, embeddings, segments
 
 
 def persist_run_result(session, result) -> int:
     """Replace a project's analysis rows with a finished run. Returns doc count.
 
-    The caller (the Celery task) owns the surrounding transaction/commit.
+    The caller (the Celery task) owns the surrounding transaction/commit. Wipes in
+    FK-safe order (segments + embeddings → documents → clusters) and re-inserts,
+    then stamps the project's ``unit`` so the read path knows which shape to serve.
     """
     project_id = uuid.UUID(str(result.project_id))
+    unit = getattr(result, "unit", "document")
+    session.execute(delete(Segment).where(Segment.project_id == project_id))
     session.execute(
         delete(Embedding).where(
             Embedding.document_id.in_(select(Document.id).where(Document.project_id == project_id))
@@ -229,15 +267,16 @@ def persist_run_result(session, result) -> int:
     session.execute(delete(Cluster).where(Cluster.project_id == project_id))
     session.flush()
 
-    clusters, documents, embeddings = result_to_orm(result)
+    clusters, documents, embeddings, segments = result_to_orm(result)
     session.add_all(clusters)
     session.flush()
     session.add_all(documents)
     session.flush()
     session.add_all(embeddings)
+    session.add_all(segments)
     session.flush()
 
     session.execute(
-        update(Project).where(Project.id == project_id).values(doc_count=len(documents))
+        update(Project).where(Project.id == project_id).values(doc_count=len(documents), unit=unit)
     )
     return len(documents)

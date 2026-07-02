@@ -48,6 +48,31 @@ class DocumentRecord:
     raw_data: dict[str, Any]         # documents.raw_data (all original columns)
     cluster_id: Optional[int]        # documents.cluster_id (None = noise/unassigned)
     sentiment_score: Optional[float] = None  # documents.sentiment_score
+    # Sentence-unit only: the review's derived "primary" cluster (plurality of
+    # its segments' labels; None = all-noise) and how many segments it produced.
+    # For document-unit runs primary_cluster_id == cluster_id and n_segments == 1.
+    primary_cluster_id: Optional[int] = None
+    n_segments: int = 1
+
+
+@dataclass
+class SegmentRecord:
+    """A sentence mention — the clustered unit for sentence-unit runs.
+
+    ``segment_key`` is the deterministic ``{review_pk}#{i}`` id; ``parent_key`` is
+    the review's primary_key_value (``parent_id(segment_key)``).
+    """
+
+    segment_key: str
+    parent_key: str
+    ordinal: int
+    text: str
+    cluster_id: Optional[int]        # pipeline int id, None = noise
+    sentiment_score: Optional[float] = None
+    vector: list[float] = field(default_factory=list)
+    umap_x: float = 0.0
+    umap_y: float = 0.0
+    umap_z: Optional[float] = None
 
 
 @dataclass
@@ -67,10 +92,11 @@ class ClusterRecord:
     label_source: str                # provenance: ollama:<model> | terms_fallback | hitl_override
     top_terms: list[dict[str, Any]]  # clusters.top_terms  [{term, score}, ...]
     word_frequencies: dict[str, int] # clusters.word_frequencies (drives the word cloud)
-    size: int                        # clusters.size
+    size: int                        # clusters.size (distinct parent reviews)
     sentiment_avg: Optional[float] = None  # clusters.sentiment_avg
     mean_stars: Optional[float] = None     # avg star rating (if a rating column exists)
     sample_doc_ids: list[str] = field(default_factory=list)  # random member samples
+    n_mentions: int = 0              # clusters.n_mentions (segment count; == size for document unit)
 
 
 @dataclass
@@ -83,6 +109,10 @@ class RunResult:
     clusters: list[ClusterRecord]
     manifest: dict[str, Any]         # provenance: spec, seed, per-stage cost, label sources
     metrics: dict[str, Any]          # three-tier metrics + failure flags
+    # "document" (one cluster per review; embeddings populated) or "sentence"
+    # (segments populated, embeddings empty). Selects the backend persist path.
+    unit: str = "document"
+    segments: list[SegmentRecord] = field(default_factory=list)
 
     @property
     def n_documents(self) -> int:

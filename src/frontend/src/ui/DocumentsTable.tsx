@@ -3,8 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api, Cluster, DocumentFilter, SchemaColumn } from "../api";
-import { applyReassign, beginOptimistic, invalidateAll, rollback, Snapshot } from "../optimistic";
-import { captureClusters, toastReassign } from "../undo";
+import { invalidateAll } from "../optimistic";
 
 const PAGE_SIZE = 50;
 // Sentinel select value for "noise" (Document.cluster_id IS NULL) — the API takes null.
@@ -81,7 +80,7 @@ function DocumentFacet({ column, values, onChange }: { column: SchemaColumn; val
 // When `editable` (owner + edit mode), each row gets a select-checkbox and a
 // "move to cluster" dropdown, plus a bulk-reassign toolbar — wired to B3's single
 // (reassignDocument) and bulk (bulkReassign) endpoints.
-export function DocumentsTable({ projectId, clusterId, editable = false, clusters = [] }: { projectId: string; clusterId?: string; editable?: boolean; clusters?: Cluster[] }) {
+export function DocumentsTable({ projectId, clusterId, editable = false, clusters = [], sentence = false }: { projectId: string; clusterId?: string; editable?: boolean; clusters?: Cluster[]; sentence?: boolean }) {
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkTarget, setBulkTarget] = useState("");
@@ -113,36 +112,18 @@ export function DocumentsTable({ projectId, clusterId, editable = false, cluster
   const clusterById = new Map(clusters.map((cluster) => [cluster.id, cluster]));
   const showClusterColumn = !clusterId && clusters.length > 0;
 
-  // Any reassignment changes membership; mutate the cache optimistically, roll back
-  // on error, and reconcile via invalidateAll on settle. See ../optimistic.
-  const onError = (_e: unknown, _v: unknown, ctx: { snapshot: Snapshot } | undefined) => {
-    if (ctx) rollback(queryClient, ctx.snapshot);
-  };
+  // Reassigning a review moves *all* its mentions to one cluster. Membership fans
+  // out per review, so we reconcile by invalidating on settle rather than patching
+  // the document-keyed cache in place.
   const onSettled = () => invalidateAll(queryClient, projectId);
   const moveOne = useMutation({
-    mutationFn: ({ id, target }: { id: string; target: string }) => api.reassignDocument(projectId, id, resolveTarget(target)),
-    onMutate: async ({ id, target }: { id: string; target: string }) => {
-      const snapshot = await beginOptimistic(queryClient, projectId);
-      const prev = captureClusters(queryClient, projectId, [id], clusterId);
-      applyReassign(queryClient, projectId, new Set([id]), resolveTarget(target), clusters);
-      return { snapshot, prev };
-    },
-    onError,
+    mutationFn: ({ id, target }: { id: string; target: string }) => api.reassignReview(projectId, id, resolveTarget(target)),
     onSettled,
-    onSuccess: (_data, _vars, ctx) => { if (ctx) toastReassign(queryClient, projectId, ctx.prev, 1); },
   });
   const moveBulk = useMutation({
     mutationFn: (target: string) => api.bulkReassign(projectId, [...selected], resolveTarget(target)),
-    onMutate: async (target: string) => {
-      const ids = [...selected];
-      const snapshot = await beginOptimistic(queryClient, projectId);
-      const prev = captureClusters(queryClient, projectId, ids, clusterId);
-      applyReassign(queryClient, projectId, new Set(ids), resolveTarget(target), clusters);
-      return { snapshot, prev, count: ids.length };
-    },
-    onError,
     onSettled,
-    onSuccess: (_data, _vars, ctx) => { setSelected(new Set()); setBulkTarget(""); if (ctx) toastReassign(queryClient, projectId, ctx.prev, ctx.count); },
+    onSuccess: () => { setSelected(new Set()); setBulkTarget(""); },
   });
 
   const rows = documents.data ?? [];
@@ -188,7 +169,7 @@ export function DocumentsTable({ projectId, clusterId, editable = false, cluster
 
   const targetOptions = (
     <>
-      <option value="">Move to…</option>
+      <option value="">{sentence ? "Move all to…" : "Move to…"}</option>
       {clusters.map((cluster) => <option key={cluster.id} value={cluster.id}>{cluster.label}</option>)}
       <option value={NOISE}>Noise</option>
     </>
@@ -214,7 +195,7 @@ export function DocumentsTable({ projectId, clusterId, editable = false, cluster
             <tr>
               {editable && <th><input type="checkbox" checked={allOnPageSelected} onChange={toggleAll} aria-label="Select all rows" /></th>}
               {columns.map((col) => <th key={col.name}>{col.name}{col.is_primary_key ? " 🔑" : ""}</th>)}
-              {showClusterColumn && <th>Cluster</th>}
+              {showClusterColumn && <th>{sentence ? "Clusters" : "Cluster"}</th>}
               {editable && <th>Move</th>}
             </tr>
           </thead>
@@ -225,9 +206,25 @@ export function DocumentsTable({ projectId, clusterId, editable = false, cluster
                 {columns.map((col) => <td key={col.name}>{formatCell(doc.raw_data[col.name])}</td>)}
                 {showClusterColumn && (
                   <td>
-                    {doc.cluster_id && clusterById.has(doc.cluster_id)
-                      ? <Link to={`/projects/${projectId}/clusters/${doc.cluster_id}`}>{clusterById.get(doc.cluster_id)!.label}</Link>
-                      : <span className="documents-table-noise">noise</span>}
+                    {sentence ? (
+                      doc.memberships && doc.memberships.length > 0 ? (
+                        <span className="membership-chips">
+                          {doc.memberships.map((m) => (
+                            <Link
+                              key={m.cluster_id}
+                              className={`membership-chip ${m.cluster_id === doc.primary_cluster_id ? "primary" : ""}`}
+                              to={`/projects/${projectId}/clusters/${m.cluster_id}`}
+                            >
+                              {m.cluster_label}<small>×{m.mention_count}</small>
+                            </Link>
+                          ))}
+                        </span>
+                      ) : <span className="documents-table-noise">noise</span>
+                    ) : (
+                      doc.cluster_id && clusterById.has(doc.cluster_id)
+                        ? <Link to={`/projects/${projectId}/clusters/${doc.cluster_id}`}>{clusterById.get(doc.cluster_id)!.label}</Link>
+                        : <span className="documents-table-noise">noise</span>
+                    )}
                   </td>
                 )}
                 {editable && (

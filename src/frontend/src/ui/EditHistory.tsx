@@ -13,8 +13,12 @@ import { api, Cluster, ClusterEdit } from "../api";
 export function isUndoable(edit: ClusterEdit): boolean {
   switch (edit.action) {
     case "reassign_doc":
+    case "reassign_review":
       return Boolean(edit.document_id);
+    case "reassign_segment":
+      return Boolean(edit.segment_id);
     case "bulk_reassign":
+    case "bulk_reassign_segments":
       return edit.payload != null && typeof edit.payload.before === "object" && edit.payload.before !== null;
     case "rename_label":
       return edit.payload != null && typeof edit.payload.before === "string";
@@ -30,9 +34,17 @@ function describe(edit: ClusterEdit, clusterLabel: (id: string | null) => string
   switch (edit.action) {
     case "reassign_doc":
       return `Moved a document → ${target()}`;
+    case "reassign_review":
+      return `Moved a review's mentions → ${target()}`;
+    case "reassign_segment":
+      return `Moved a mention → ${target()}`;
     case "bulk_reassign": {
       const count = Array.isArray(edit.payload?.document_ids) ? (edit.payload!.document_ids as unknown[]).length : 0;
-      return `Moved ${count} document${count === 1 ? "" : "s"} → ${target()}`;
+      return `Moved ${count} review${count === 1 ? "" : "s"} → ${target()}`;
+    }
+    case "bulk_reassign_segments": {
+      const count = Array.isArray(edit.payload?.segment_ids) ? (edit.payload!.segment_ids as unknown[]).length : 0;
+      return `Moved ${count} mention${count === 1 ? "" : "s"} → ${target()}`;
     }
     case "merge_clusters":
       return `Merged a cluster → ${target()}`;

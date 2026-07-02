@@ -33,6 +33,8 @@ export function ClusterDetail() {
 
   const [editMode, setEditMode] = useState(false);
   const isOwner = project.data?.role === "owner";
+  const isSentence = project.data?.unit === "sentence";
+  const canEdit = isOwner && isSentence;
 
   const buckets = useMemo(() => sentimentBuckets(documents.data ?? []), [documents.data]);
   const hasSentiment = buckets.negative + buckets.neutral + buckets.positive > 0;
@@ -41,8 +43,8 @@ export function ClusterDetail() {
     <main className="page">
       <Link to={`/projects/${projectId}`}>Back to cluster view</Link>
       <section className="page-header">
-        <div><h1 className="cluster-detail-title">{cluster.data?.label ?? "Cluster"}{cluster.data && <LabelSourceBadge labelSource={cluster.data.label_source} />}</h1><p className="cluster-detail-meta">{cluster.data?.size ?? 0} documents · {cluster.data ? sentimentSummary(cluster.data.sentiment_avg, cluster.data.sentiment_count, cluster.data.size) : "sentiment n/a"}{cluster.data?.mean_stars != null && <> · <StarRating value={cluster.data.mean_stars} /></>}{cluster.data?.cohesion != null && <CohesionChip value={cluster.data.cohesion} />}</p></div>
-        {isOwner && <button className={`button ${editMode ? "primary" : "secondary"}`} onClick={() => setEditMode((prev) => !prev)} type="button">{editMode ? "Done editing" : "Edit documents"}</button>}
+        <div><h1 className="cluster-detail-title">{cluster.data?.label ?? "Cluster"}{cluster.data && <LabelSourceBadge labelSource={cluster.data.label_source} />}</h1><p className="cluster-detail-meta">{cluster.data?.size ?? 0} {isSentence ? "reviews" : "documents"}{isSentence && cluster.data && cluster.data.n_mentions > cluster.data.size ? ` · ${cluster.data.n_mentions.toLocaleString()} mentions` : ""} · {cluster.data ? sentimentSummary(cluster.data.sentiment_avg, cluster.data.sentiment_count, cluster.data.size) : "sentiment n/a"}{cluster.data?.mean_stars != null && <> · <StarRating value={cluster.data.mean_stars} /></>}{cluster.data?.cohesion != null && <CohesionChip value={cluster.data.cohesion} />}</p></div>
+        {canEdit && <button className={`button ${editMode ? "primary" : "secondary"}`} onClick={() => setEditMode((prev) => !prev)} type="button">{editMode ? "Done editing" : "Edit documents"}</button>}
       </section>
       <section className="card"><p>{cluster.data?.summary}</p><WordCloud frequencies={cluster.data?.word_frequencies} /><div className="terms">{cluster.data?.top_terms.map((term) => <span key={term.term}>{term.term} {term.score}</span>)}</div></section>
       {hasSentiment && (
@@ -61,7 +63,7 @@ export function ClusterDetail() {
           />
         </section>
       )}
-      <section className="card"><h2>Documents</h2><DocumentsTable projectId={projectId} clusterId={clusterId} editable={Boolean(editMode && isOwner)} clusters={clusters.data ?? []} /></section>
+      <section className="card"><h2>{isSentence ? "Reviews" : "Documents"}</h2><DocumentsTable projectId={projectId} clusterId={clusterId} editable={Boolean(editMode && canEdit)} clusters={clusters.data ?? []} sentence={isSentence} /></section>
     </main>
   );
 }

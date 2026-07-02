@@ -5,7 +5,7 @@ import { Link } from "react-router-dom";
 import { api, Cluster, EmbeddingPoint, Project } from "../api";
 import { NOISE_COLOR, clusterColor, pointColor } from "../colors";
 import { hoverTitle, sentimentSummary } from "../hover";
-import { samplePoints } from "../plot";
+import { POINT_CAP, samplePoints } from "../plot";
 import { useSimulated } from "../useSimulated";
 
 export function DeckDashboard() {
@@ -14,7 +14,8 @@ export function DeckDashboard() {
   const simulated = useSimulated();
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects, refetchInterval: (query) => query.state.data?.some((project) => project.status !== "ready" && project.status !== "failed") ? 3000 : false });
   const selectedProject = projects.data?.find((project) => project.id === selectedProjectId) ?? projects.data?.find((project) => project.status === "ready") ?? projects.data?.[0];
-  const embeddings = useQuery({ queryKey: ["deck-embeddings", selectedProject?.id], queryFn: () => api.embeddings(selectedProject!.id), enabled: selectedProject?.status === "ready" });
+  const embeddings = useQuery({ queryKey: ["deck-embeddings", selectedProject?.id], queryFn: () => api.embeddings(selectedProject!.id, POINT_CAP), enabled: selectedProject?.status === "ready" });
+  const embeddingStats = useQuery({ queryKey: ["deck-embeddings-stats", selectedProject?.id], queryFn: () => api.embeddingStats(selectedProject!.id), enabled: selectedProject?.status === "ready" });
   const clusters = useQuery({ queryKey: ["deck-clusters", selectedProject?.id], queryFn: () => api.clusters(selectedProject!.id), enabled: selectedProject?.status === "ready" });
 
   useEffect(() => {
@@ -30,7 +31,9 @@ export function DeckDashboard() {
   const readyProjects = projects.data?.filter((project) => project.status === "ready").length ?? 0;
   const totalDocs = projects.data?.reduce((sum, project) => sum + project.doc_count, 0) ?? 0;
   const clusterLookup = new Map((clusters.data ?? []).map((cluster, index) => [cluster.id, { cluster, color: clusterColor(index) }]));
-  const noiseCount = (embeddings.data ?? []).filter((point) => point.cluster_id == null).length;
+  // Honest count from the full-set COUNT, not the sampled display points.
+  const noiseCount = embeddingStats.data?.noise ?? (embeddings.data ?? []).filter((point) => point.cluster_id == null).length;
+  const totalPoints = embeddingStats.data?.total ?? (embeddings.data ?? []).length;
 
   return (
     <main className="deck-page">
@@ -78,7 +81,7 @@ export function DeckDashboard() {
             </div>
             {selectedProject?.status === "ready" && <Link className="deck-open" to={`/projects/${selectedProject.id}`}>Open Detail</Link>}
           </div>
-          <PointCloud points={embeddings.data ?? []} clusters={clusters.data ?? []} highlightedClusterId={highlightedClusterId} simulated={simulated} />
+          <PointCloud points={embeddings.data ?? []} total={totalPoints} clusters={clusters.data ?? []} highlightedClusterId={highlightedClusterId} simulated={simulated} />
           {selectedProject && selectedProject.status !== "ready" && (
             <div className="deck-map-empty">
               <strong>{selectedProject.status}</strong>
@@ -126,12 +129,12 @@ function Metric({ label, value }: { label: string; value: number }) {
   );
 }
 
-function PointCloud({ points, clusters, highlightedClusterId, simulated }: { points: EmbeddingPoint[]; clusters: Cluster[]; highlightedClusterId: string | null; simulated: boolean }) {
-  // Cap the rendered DOM nodes — bounds come from the full set so the layout
-  // stays stable, but we only paint a sampled subset for huge projects.
+function PointCloud({ points, total, clusters, highlightedClusterId, simulated }: { points: EmbeddingPoint[]; total: number; clusters: Cluster[]; highlightedClusterId: string | null; simulated: boolean }) {
+  // Cap the rendered DOM nodes. `points` is already a server-side sample of the
+  // `total` units; we further downsample for the DOM and report against `total`.
   const bounds = getBounds(points);
   const displayPoints = samplePoints(points);
-  const capped = displayPoints.length < points.length;
+  const capped = total > displayPoints.length;
   const clusterIndex = new Map(clusters.map((cluster, index) => [cluster.id, index]));
 
   return (
@@ -144,7 +147,7 @@ function PointCloud({ points, clusters, highlightedClusterId, simulated }: { poi
         return (
           <span
             className={`deck-point ${muted ? "muted" : ""}`}
-            key={point.document_id}
+            key={point.segment_id ?? point.document_id}
             style={{
               "--point-color": color,
               left: `${scale(point.x, bounds.minX, bounds.maxX)}%`,
@@ -155,7 +158,7 @@ function PointCloud({ points, clusters, highlightedClusterId, simulated }: { poi
         );
       })}
       <div className="deck-map-caption">
-        <span>{capped ? `Overview: ${displayPoints.length.toLocaleString()} of ${points.length.toLocaleString()} · small clusters may be under-sampled` : `${points.length.toLocaleString()} projected documents`}</span>
+        <span>{capped ? `Overview: ${displayPoints.length.toLocaleString()} of ${total.toLocaleString()} · small clusters may be under-sampled` : `${total.toLocaleString()} projected documents`}</span>
         <span>UMAP x/y · distances aren't metric{simulated ? " · simulated layer data" : ""}</span>
       </div>
     </div>

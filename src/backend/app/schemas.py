@@ -35,6 +35,9 @@ class ProjectRead(BaseModel):
     created_at: datetime
     role: ProjectRole
     last_error: str | None = None
+    # "document" (one cluster per review; frozen/read-only) or "sentence"
+    # (segment-level; a review maps to several clusters; editable).
+    unit: str = "document"
 
 
 class ProjectUpdate(BaseModel):
@@ -93,7 +96,11 @@ class PipelineStatusRead(BaseModel):
 
 
 class EmbeddingPoint(BaseModel):
+    # For sentence-unit projects a point is a segment (mention): `segment_id` is set
+    # and `document_id` is the parent review. For document-unit projects `segment_id`
+    # is None and `document_id` is the point.
     document_id: uuid.UUID
+    segment_id: uuid.UUID | None = None
     cluster_id: uuid.UUID | None
     x: float
     y: float
@@ -104,6 +111,12 @@ class EmbeddingPoint(BaseModel):
     cluster_label: str | None = None
 
 
+class EmbeddingStats(BaseModel):
+    # Honest totals for a (possibly sampled) scatter fetch.
+    total: int
+    noise: int
+
+
 class ClusterRead(BaseModel):
     id: uuid.UUID
     label: str
@@ -111,7 +124,8 @@ class ClusterRead(BaseModel):
     label_source: str = "terms_fallback"
     top_terms: list[dict[str, Any]]
     word_frequencies: dict[str, Any]
-    size: int
+    size: int              # distinct parent reviews
+    n_mentions: int = 0    # segment mentions (== size for document unit)
     sentiment_avg: float | None = None
     sentiment_count: int = 0
     mean_stars: float | None = None
@@ -128,6 +142,13 @@ class ModelsRead(BaseModel):
     simulated: bool
 
 
+class ClusterMembership(BaseModel):
+    cluster_id: uuid.UUID
+    cluster_label: str
+    mention_count: int
+    share: float
+
+
 class DocumentRead(BaseModel):
     id: uuid.UUID
     primary_key_value: str
@@ -135,6 +156,10 @@ class DocumentRead(BaseModel):
     raw_data: dict[str, Any]
     cluster_id: uuid.UUID | None
     sentiment_score: float | None = None
+    # Sentence-unit only: the clusters this review's mentions fall into (empty for
+    # document-unit projects). primary_cluster_id == cluster_id (the plurality one).
+    memberships: list[ClusterMembership] = []
+    primary_cluster_id: uuid.UUID | None = None
 
     model_config = {"from_attributes": True}
 
@@ -148,6 +173,7 @@ class ClusterEditRead(BaseModel):
     cluster_id: uuid.UUID | None = None
     target_cluster_id: uuid.UUID | None = None
     document_id: uuid.UUID | None = None
+    segment_id: uuid.UUID | None = None
     new_label: str | None = None
     note: str | None = None
     payload: dict[str, Any] = {}
@@ -192,6 +218,24 @@ class ClusterMerge(BaseModel):
 class ClusterFromSelection(BaseModel):
     document_ids: list[uuid.UUID]
     label: str
+
+
+class SegmentReassign(BaseModel):
+    cluster_id: uuid.UUID | None = None  # None = move mention to noise
+
+
+class BulkSegmentReassign(BaseModel):
+    segment_ids: list[uuid.UUID]
+    cluster_id: uuid.UUID | None = None
+
+
+class ClusterFromSegments(BaseModel):
+    segment_ids: list[uuid.UUID]
+    label: str
+
+
+class ReviewReassign(BaseModel):
+    cluster_id: uuid.UUID | None = None  # move all of a review's mentions
 
 
 class ClusterUpdate(BaseModel):
