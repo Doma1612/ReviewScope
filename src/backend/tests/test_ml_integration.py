@@ -178,9 +178,10 @@ def test_result_to_orm_resolves_clusters_and_joins_embeddings():
         ],
     )
 
-    clusters, documents, embeddings = result_to_orm(result)
+    clusters, documents, embeddings, segments = result_to_orm(result)
 
     assert len(clusters) == 2 and len(documents) == 4 and len(embeddings) == 4
+    assert segments == []  # document-unit run produces no segment rows
     by_int = {c.label: c.id for c in clusters}
 
     docs_by_pk = {d.primary_key_value: d for d in documents}

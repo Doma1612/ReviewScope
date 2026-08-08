@@ -3,6 +3,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
+import { Toaster } from "./toast";
 import { AppShell } from "./ui/AppShell";
 import { ThemeProvider } from "./ui/ThemeProvider";
 import { AuthPage } from "./views/AuthPage";
@@ -35,6 +36,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </BrowserRouter>
+        <Toaster />
       </ThemeProvider>
     </QueryClientProvider>
   </React.StrictMode>,

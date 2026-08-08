@@ -3,15 +3,19 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api, Cluster, EmbeddingPoint, Project } from "../api";
-
-const PALETTE = ["#38bdf8", "#a78bfa", "#34d399", "#f59e0b", "#fb7185", "#22d3ee", "#f472b6", "#bef264"];
+import { NOISE_COLOR, clusterColor, pointColor } from "../colors";
+import { hoverTitle, sentimentSummary } from "../hover";
+import { POINT_CAP, samplePoints } from "../plot";
+import { useSimulated } from "../useSimulated";
 
 export function DeckDashboard() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [highlightedClusterId, setHighlightedClusterId] = useState<string | null>(null);
+  const simulated = useSimulated();
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects, refetchInterval: (query) => query.state.data?.some((project) => project.status !== "ready" && project.status !== "failed") ? 3000 : false });
   const selectedProject = projects.data?.find((project) => project.id === selectedProjectId) ?? projects.data?.find((project) => project.status === "ready") ?? projects.data?.[0];
-  const embeddings = useQuery({ queryKey: ["deck-embeddings", selectedProject?.id], queryFn: () => api.embeddings(selectedProject!.id), enabled: selectedProject?.status === "ready" });
+  const embeddings = useQuery({ queryKey: ["deck-embeddings", selectedProject?.id], queryFn: () => api.embeddings(selectedProject!.id, POINT_CAP), enabled: selectedProject?.status === "ready" });
+  const embeddingStats = useQuery({ queryKey: ["deck-embeddings-stats", selectedProject?.id], queryFn: () => api.embeddingStats(selectedProject!.id), enabled: selectedProject?.status === "ready" });
   const clusters = useQuery({ queryKey: ["deck-clusters", selectedProject?.id], queryFn: () => api.clusters(selectedProject!.id), enabled: selectedProject?.status === "ready" });
 
   useEffect(() => {
@@ -26,15 +30,18 @@ export function DeckDashboard() {
 
   const readyProjects = projects.data?.filter((project) => project.status === "ready").length ?? 0;
   const totalDocs = projects.data?.reduce((sum, project) => sum + project.doc_count, 0) ?? 0;
-  const clusterLookup = new Map((clusters.data ?? []).map((cluster, index) => [cluster.id, { cluster, color: PALETTE[index % PALETTE.length] }]));
+  const clusterLookup = new Map((clusters.data ?? []).map((cluster, index) => [cluster.id, { cluster, color: clusterColor(index) }]));
+  // Honest count from the full-set COUNT, not the sampled display points.
+  const noiseCount = embeddingStats.data?.noise ?? (embeddings.data ?? []).filter((point) => point.cluster_id == null).length;
+  const totalPoints = embeddingStats.data?.total ?? (embeddings.data ?? []).length;
 
   return (
     <main className="deck-page">
       <section className="deck-hero">
         <div>
-          <p className="deck-kicker">Spatial Analysis Console</p>
+          <p className="deck-kicker">Read-only overview</p>
           <h1>Cluster Atlas</h1>
-          <p>Deck.gl-inspired point-cloud dashboard for scanning project topology before opening the detailed Plotly view.</p>
+          <p>A quick spatial scan of project topology. Open a project from <Link to="/" className="deck-link">Projects</Link> for the full workspace — editing, documents, and the detailed Plotly view.</p>
         </div>
         <div className="deck-metrics">
           <Metric label="Projects" value={projects.data?.length ?? 0} />
@@ -47,7 +54,7 @@ export function DeckDashboard() {
         <aside className="deck-panel deck-projects">
           <div className="deck-panel-title">
             <span>Project Stream</span>
-            <Link to="/" className="deck-link">classic upload</Link>
+            <Link to="/" className="deck-link">Projects</Link>
           </div>
           {projects.data?.map((project) => (
             <button
@@ -74,11 +81,11 @@ export function DeckDashboard() {
             </div>
             {selectedProject?.status === "ready" && <Link className="deck-open" to={`/projects/${selectedProject.id}`}>Open Detail</Link>}
           </div>
-          <PointCloud points={embeddings.data ?? []} clusters={clusters.data ?? []} highlightedClusterId={highlightedClusterId} />
+          <PointCloud points={embeddings.data ?? []} total={totalPoints} clusters={clusters.data ?? []} highlightedClusterId={highlightedClusterId} simulated={simulated} />
           {selectedProject && selectedProject.status !== "ready" && (
             <div className="deck-map-empty">
               <strong>{selectedProject.status}</strong>
-              <span>The spatial canvas unlocks when the simulated pipeline marks this project ready.</span>
+              <span>The spatial canvas unlocks when the {simulated ? "simulated " : ""}pipeline marks this project ready.</span>
             </div>
           )}
         </section>
@@ -91,12 +98,21 @@ export function DeckDashboard() {
           {clusters.data?.map((cluster) => (
             <ClusterLayer
               cluster={cluster}
-              color={clusterLookup.get(cluster.id)?.color ?? PALETTE[0]}
+              color={clusterLookup.get(cluster.id)?.color ?? clusterColor(0)}
               key={cluster.id}
               onHover={setHighlightedClusterId}
               selectedProjectId={selectedProject?.id}
             />
           ))}
+          {selectedProject?.status === "ready" && noiseCount > 0 && (
+            <div className="deck-layer deck-layer-noise" style={{ "--layer-color": NOISE_COLOR } as React.CSSProperties}>
+              <span className="deck-layer-swatch" />
+              <span>
+                <strong>Noise</strong>
+                <small>{noiseCount.toLocaleString()} unclustered docs</small>
+              </span>
+            </div>
+          )}
           {selectedProject?.status === "ready" && clusters.isLoading && <p className="deck-muted">Loading layers...</p>}
         </aside>
       </section>
@@ -113,34 +129,37 @@ function Metric({ label, value }: { label: string; value: number }) {
   );
 }
 
-function PointCloud({ points, clusters, highlightedClusterId }: { points: EmbeddingPoint[]; clusters: Cluster[]; highlightedClusterId: string | null }) {
+function PointCloud({ points, total, clusters, highlightedClusterId, simulated }: { points: EmbeddingPoint[]; total: number; clusters: Cluster[]; highlightedClusterId: string | null; simulated: boolean }) {
+  // Cap the rendered DOM nodes. `points` is already a server-side sample of the
+  // `total` units; we further downsample for the DOM and report against `total`.
   const bounds = getBounds(points);
+  const displayPoints = samplePoints(points);
+  const capped = total > displayPoints.length;
   const clusterIndex = new Map(clusters.map((cluster, index) => [cluster.id, index]));
 
   return (
     <div className="deck-map">
       <div className="deck-gridlines" />
       <div className="deck-vignette" />
-      {points.map((point) => {
-        const index = point.cluster_id ? clusterIndex.get(point.cluster_id) ?? 0 : 0;
-        const color = PALETTE[index % PALETTE.length];
+      {displayPoints.map((point) => {
+        const color = pointColor(point.cluster_id, clusterIndex);
         const muted = highlightedClusterId && point.cluster_id !== highlightedClusterId;
         return (
           <span
             className={`deck-point ${muted ? "muted" : ""}`}
-            key={point.document_id}
+            key={point.segment_id ?? point.document_id}
             style={{
               "--point-color": color,
               left: `${scale(point.x, bounds.minX, bounds.maxX)}%`,
               top: `${100 - scale(point.y, bounds.minY, bounds.maxY)}%`,
             } as React.CSSProperties}
-            title={point.document_id}
+            title={hoverTitle(point)}
           />
         );
       })}
       <div className="deck-map-caption">
-        <span>{points.length.toLocaleString()} projected documents</span>
-        <span>UMAP x/y · simulated layer data</span>
+        <span>{capped ? `Overview: ${displayPoints.length.toLocaleString()} of ${total.toLocaleString()} · small clusters may be under-sampled` : `${total.toLocaleString()} projected documents`}</span>
+        <span>UMAP x/y · distances aren't metric{simulated ? " · simulated layer data" : ""}</span>
       </div>
     </div>
   );
@@ -158,7 +177,7 @@ function ClusterLayer({ cluster, color, onHover, selectedProjectId }: { cluster:
       <span className="deck-layer-swatch" />
       <span>
         <strong>{cluster.label}</strong>
-        <small>{cluster.size} docs · sentiment {cluster.sentiment_avg ?? "n/a"}</small>
+        <small>{cluster.size} docs · {sentimentSummary(cluster.sentiment_avg, cluster.sentiment_count, cluster.size)}</small>
       </span>
     </Link>
   );

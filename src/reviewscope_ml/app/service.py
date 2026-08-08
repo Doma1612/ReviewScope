@@ -77,12 +77,6 @@ def run_project_pipeline(
     """Run the frozen pipeline on an already-ingested corpus -> persistence DTOs."""
     progress = progress or NullProgress()
     spec = spec or app_default_spec()
-    if spec.variant == "sentence_level":
-        raise ValueError(
-            "sentence_level clusters mentions, not documents, and does not map "
-            "onto the spec's one-cluster-per-document schema; see "
-            "docs/integration-guide.md (Phase-2 extension)."
-        )
     if corpus.n_documents == 0:
         raise ValueError("no documents to cluster after preprocessing")
 
@@ -107,7 +101,13 @@ def run_project_pipeline(
         on_stage=on_stage,
     )
 
-    embeddings = load_run_embeddings(cfg, spec, corpus.n_documents)
+    # Reload the clustered-unit embeddings the embed stage cached. For sentence
+    # runs the units are segments (not reviews), so key on the unit count and the
+    # sent__ namespace — matching embed_with_cache — not corpus.n_documents.
+    unit = str(artifacts.manifest.get("unit", "document"))
+    embeddings = load_run_embeddings(
+        cfg, spec, len(artifacts.doc_ids), sentence=(unit == "sentence")
+    )
 
     progress.step("Finalize", "running", index=TOTAL_STEPS, total=TOTAL_STEPS)
     result = to_records(project_id, corpus, artifacts, embeddings)
@@ -148,17 +148,19 @@ def project_config(
 
 
 def load_run_embeddings(
-    cfg: PipelineConfig, spec: PipelineSpec, n_docs: int
+    cfg: PipelineConfig, spec: PipelineSpec, n_units: int, *, sentence: bool = False
 ) -> np.ndarray:
     """Reload the embedding matrix the run just cached (no recompute, no model load).
 
-    Mirrors ``embed.embed_with_cache``'s key for document-level units, so this
-    hits the file ``run_pipeline`` wrote during its embed stage.
+    Mirrors ``embed.embed_with_cache``'s key exactly: sentence-unit runs namespace
+    with ``sent__`` and key on the SEGMENT count, document runs use the bare prefix
+    and the review count. ``n_units`` is therefore the number of clustered units
+    (``len(artifacts.doc_ids)``) — segments for sentence, reviews for document.
     """
     corpus = cfg.corpus_slug
-    prefix = "" if corpus == "hotels" else f"{corpus}__"
+    prefix = ("" if corpus == "hotels" else f"{corpus}__") + ("sent__" if sentence else "")
     path = embedding_path(
-        cfg.cache_dir, spec.embedding_model, n_docs,
+        cfg.cache_dir, spec.embedding_model, n_units,
         instruction=spec.instruction, prefix=prefix,
     )
     return load_array(path)

@@ -1,0 +1,17 @@
+# The api/worker build context is the repo root (docker-compose.yml: context: .),
+# which otherwise ships ~14 GB (data/, .venv/, .git/) to the daemon every build.
+# The backend Dockerfile only needs pyproject.toml, src/reviewscope_ml, src/backend.
+.git
+.venv
+data
+notebooks
+docs
+tests
+scripts
+.pytest_cache
+.vscode
+.claude
+**/__pycache__
+**/*.pyc
+**/*.pyo
+src/frontend/node_modules

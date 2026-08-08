@@ -5,28 +5,28 @@ The experiment harness *compares* five variants; the application *runs one*.
 This module is the single source of truth for which one — change it here and
 every uploaded project picks up the new default.
 
-Why a document-level variant (not the better-scoring sentence_level)
---------------------------------------------------------------------
-The app spec's database is one-cluster-per-document and one-point-per-document.
-``sentence_level`` clusters *mentions* (sentence segments), so a document maps
-to several clusters via ``doc_membership.json`` and the scatter shows segments,
-not documents — that needs a ``segments`` table the spec does not have. For a
-clean 1:1 mapping to the spec's tables the application defaults to
-``custom_hdbscan`` (embed → UMAP → HDBSCAN, mpnet, notebook-decided params).
+Why the sentence-level variant
+------------------------------
+``sentence_level`` clusters *mentions* (sentence segments), so a review maps to
+several clusters and multi-aspect reviews stop averaging their aspects into one
+muddy vector — materially better cluster quality. The backend now persists this
+shape: segments land in the ``segments`` table, each review keeps a derived
+"primary" cluster, and the scatter plots one point per mention (Phase-2, see
+docs/integration-guide.md).
 
-Sentence-level support is a documented Phase-2 extension (add a segments table
-+ per-segment scatter); :func:`reviewscope_ml.app.service.run_project_pipeline`
-rejects it explicitly until then.
-
-Swapping the winner later (after the doc-level sweep / human sign-off, see
-docs/quality-roadmap.md) is a one-line change to ``APP_DEFAULT_VARIANT``.
+Set this back to ``custom_hdbscan`` for the legacy one-cluster-per-document
+shape (embed → UMAP → HDBSCAN, mpnet). Existing document-unit projects are
+preserved and served read-only; only new runs pick up this default.
 """
 from __future__ import annotations
 
 from ..pipelines.spec import PipelineSpec, default_specs
 
-# Document-unit variant whose artifacts map 1:1 onto the spec's DB tables.
-APP_DEFAULT_VARIANT = "custom_hdbscan"
+# Sentence-unit variant: reviews are split into mentions, so a review maps to
+# several clusters. The backend persists these to the ``segments`` table and the
+# per-review membership fan-out (see docs/integration-guide.md Phase-2). Set back
+# to ``custom_hdbscan`` for the legacy one-cluster-per-document shape.
+APP_DEFAULT_VARIANT = "sentence_level"
 
 
 def app_default_spec() -> PipelineSpec:

@@ -29,7 +29,7 @@ See ``docs/integration-guide.md`` for the full contract.
 from __future__ import annotations
 
 from .defaults import APP_DEFAULT_VARIANT, app_default_spec
-from .dto import ClusterRecord, DocumentRecord, EmbeddingRecord, RunResult
+from .dto import ClusterRecord, DocumentRecord, EmbeddingRecord, RunResult, SegmentRecord
 from .ingest_upload import IngestError, UploadedCorpus, reviewset_from_upload
 from .persistence import to_records
 from .ports import (
@@ -55,7 +55,7 @@ __all__ = [
     "UploadSchema", "ColumnSpec", "ColumnType", "SchemaError",
     "reviewset_from_upload", "UploadedCorpus", "IngestError",
     # output
-    "RunResult", "DocumentRecord", "EmbeddingRecord", "ClusterRecord", "to_records",
+    "RunResult", "DocumentRecord", "EmbeddingRecord", "SegmentRecord", "ClusterRecord", "to_records",
     # ports
     "ProgressSink", "ResultRepository", "NullProgress",
     "PIPELINE_STEPS", "STAGE_TO_STEP", "TOTAL_STEPS",

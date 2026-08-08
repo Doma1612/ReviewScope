@@ -30,7 +30,7 @@ export function AuthPage({ mode }: { mode: "login" | "register" }) {
       </button>
       <form className="auth-card" onSubmit={submit}>
         <h1>{mode === "login" ? "Welcome back" : "Create account"}</h1>
-        <p>Analyze document collections with simulated clustering while the app services are built.</p>
+        <p>Analyze document collections by clustering and exploring their themes.</p>
         <label>Email<input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required /></label>
         <label>Password<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" required minLength={6} /></label>
         {error && <div className="error">{error}</div>}

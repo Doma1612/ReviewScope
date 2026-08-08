@@ -1,6 +1,14 @@
 services:
   db:
     image: pgvector/pgvector:pg16
+    # This box's Docker (20.10.7) ships a seccomp profile that blocks clone3.
+    # The pgvector image is bookworm-based (glibc >=2.34 uses clone3), so initdb
+    # can't fork postgres ("popen failure: Cannot allocate memory"). Relaxing
+    # seccomp for just this container is a runtime option — no sudo, no daemon
+    # change. (redis is Alpine/musl and api/worker are bullseye, so none of them
+    # hit this.)
+    security_opt:
+      - seccomp=unconfined
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -38,7 +46,9 @@ services:
       # fabricated pipeline). The api only reads this to decide which task to
       # enqueue and to answer GET /api/models.
       SIMULATE_ML: "false"
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # Apply DB migrations before serving so a fresh/rebuilt postgres volume always
+    # has its schema (the app has no create_all on startup — schema is Alembic-only).
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     ports:
       - "8000:8000"
     volumes:
@@ -60,14 +70,35 @@ services:
       POSTGRES_PORT: 5432
       REDIS_URL: redis://redis:6379/0
       SIMULATE_ML: "false"
-      ML_DEVICE: cpu
+      ML_DEVICE: cuda
       # The ML pipeline derives its cache/run dir from REVIEWSCOPE_ROOT; point it
       # at the mounted data volume so embeddings/clusters caches persist.
       REVIEWSCOPE_ROOT: /workspace
     command: celery -A app.worker.celery_app worker --loglevel=info
+    # GPU WITHOUT nvidia-container-toolkit: it is not installed on this box and we
+    # have no sudo, so `runtime: nvidia` / `--gpus` do not work. Instead pass the
+    # driver device nodes through directly and bind-mount the host's userspace
+    # driver libs. All 4 GPUs are exposed; the embed stage's claim_gpu() shells
+    # out to nvidia-smi (mounted below) and picks only idle cards (shared-box
+    # etiquette). See src/backend/Dockerfile for the matching torch pin.
+    devices:
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidia1:/dev/nvidia1
+      - /dev/nvidia2:/dev/nvidia2
+      - /dev/nvidia3:/dev/nvidia3
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
     volumes:
       - ./src/backend:/app
       - ./data:/workspace/data
+      # Host driver libs: mount the .so.1 SONAME symlinks — Docker resolves each
+      # to the versioned file, so these survive driver minor-version bumps.
+      - /lib/x86_64-linux-gnu/libcuda.so.1:/lib/x86_64-linux-gnu/libcuda.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-ml.so.1:/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:ro
+      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
     # Share the ollama container's network namespace so the ML labeler's
     # hard-coded http://localhost:11434 reaches Ollama (reviewscope_ml is frozen
     # and exposes no base_url override yet — see docs/ml-integration-changelog.md).
@@ -79,17 +110,50 @@ services:
       redis:
         condition: service_healthy
       ollama:
-        condition: service_started
+        condition: service_healthy
 
   ollama:
-    image: ollama/ollama:latest
+    # Custom image: the entrypoint pulls the label model on boot so the stack
+    # "just works" with no manual `ollama pull` step (see src/ollama/).
+    build:
+      context: ./src/ollama
+    # Ollama's Go runtime uses syscalls this box's old Docker seccomp profile
+    # blocks (SIGSYS → runtime crash). Same relaxation as db; runtime-only, no sudo.
+    security_opt:
+      - seccomp=unconfined
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    # Pull the spec's label model once after first start:
-    #   docker compose exec ollama ollama pull llama3.2
-    # Until then, labeling fails soft to term-fallback (label_source records it).
+      # Host driver libs (see the worker service for why manual passthrough).
+      - /lib/x86_64-linux-gnu/libcuda.so.1:/lib/x86_64-linux-gnu/libcuda.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-ml.so.1:/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:ro
+    # Healthy only once the label model is actually pulled, so the worker (which
+    # waits for service_healthy) never starts before labeling can succeed. First
+    # boot must download ~2 GB: retries * interval = 30 * 10s = 5 min budget.
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q llama3.2"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    # GPU via manual passthrough (no nvidia-container-toolkit — see the worker
+    # service). Exposing ONLY /dev/nvidia3 hard-pins Ollama to GPU 3: it cannot
+    # see or spread across the other cards (unpinned it spread a small model over
+    # every GPU, ~26 GB, and blocked the box). Change the 3s below if a neighbour
+    # is on it.
+    devices:
+      - /dev/nvidia3:/dev/nvidia3
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "8192"
+      OLLAMA_KEEP_ALIVE: 10m
+      # Override the model the entrypoint pulls (default llama3.2, the
+      # reviewscope_ml PipelineSpec default). Keep the healthcheck grep in sync.
+      OLLAMA_LABEL_MODEL: llama3.2
 
   frontend:
     build:

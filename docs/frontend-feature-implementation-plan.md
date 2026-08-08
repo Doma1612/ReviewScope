@@ -1,0 +1,1177 @@
+# ReviewScope — Implementation Plan (standalone work packages)
+
+This plan turns `docs/frontend-feature-gap-analysis.md` into **self-contained work
+packages (WPs)**. Each WP is written so you can paste it into a fresh Claude Code
+session and implement it without the others in context.
+
+## How to use this file
+1. Copy the **Shared Preamble** below.
+2. Copy the **one WP** you want to build (e.g. `B1`).
+3. Paste both into a new session (preamble first). That's all the context the
+   session needs.
+
+Before starting a WP, check its **Prereqs** are `✅ Done` in the Progress Tracker.
+WPs are grouped and ordered by dependency: backend WPs (B*) generally come before
+the frontend WPs (F*) that consume them.
+
+---
+
+## Progress Tracker
+Single source of truth for status. Update the box here **and** the WP's own
+`**Status:**` line together. `☐` not started · `▶` in progress · `✅` done.
+
+- ✅ **B1** — cluster_edits audit table + model + migration
+- ✅ **B2** — recompute service for cluster aggregates
+- ✅ **B3** — document reassignment endpoints
+- ✅ **B4** — cluster CRUD + merge + from-selection + rename/junk
+- ✅ **B5** — GET/POST project schema endpoint
+- ✅ **B6** — re-run survival (replay edits) + label_source protection
+- ✅ **B7** — rich hover payload on embeddings
+- ✅ **F0** — API client + types (`api.ts`)
+- ✅ **F1** — scatter real hover
+- ✅ **F2** — scatter 2D/3D toggle + click→highlight
+- ✅ **F3** — cluster word cloud + star rating + distribution chart
+- ✅ **F4** — "show all documents" paginated table
+- ✅ **F5** — editing UX (selection toolbar, card actions, edit-mode)
+- ✅ **F6** — optimistic updates + invalidation + WebGL cap
+- ✅ **F7** — undo / edit-history panel
+- ✅ **F8** — upload step 2 real schema confirm
+- ✅ **F9** — owner email + member role-change + models/health
+- ☐ **T1** — provenance badge + confirm/sign-off
+- ☐ **T2** — export (CSV/JSON/PNG/report)
+- ☐ **T3** — search / filter / noise triage
+- ☐ **T4** — re-run / re-cluster controls + append data
+
+**Group R — review fixes (UX honesty pass).** P0 = actively misleading; P1 =
+high-leverage UX; P2 = polish.
+- ✅ **R1** (P0) — reserved grey for noise + count + card
+- ✅ **R2** (P0) — cluster-stratified point sampling + overview caveat
+- ✅ **R3** (P0) — scope/disable lasso-reassign when capped
+- ✅ **R4** (P0) — per-cluster cohesion metric + confidence chip
+- ✅ **R5** (P0) — label_source provenance badge
+- ✅ **R6** (P0) — gate/remove "simulated" UI copy behind `models.simulated`
+- ✅ **R7** (P1) — sentiment honesty (round + "sentiment on n of N")
+- ✅ **R8** (P1) — facet filters from the typed schema
+- ✅ **R9** (P1) — cluster list sort + text filter + jump-to
+- ✅ **R10** (P1) — junk "cannot be undone" + inline undo toast
+- ✅ **R11** (P1) — UMAP caveat on both maps
+- ✅ **R12** (P1) — document-row → cluster link + total "of N" pager
+- ✅ **R13** (P2) — resolve Atlas vs Projects two-home ambiguity
+- ✅ **R14** (P2) — cluster legend + colorblind-safe palette + focus states
+- ✅ **R15** (P2) — clamp sample_docs + word-cloud with "show more"
+- ✅ **R16** (P2) — fix phantom empty "Next" page
+- ✅ **R17** (P1) — project-level clustering-quality panel (capture `RunResult.metrics`)
+
+---
+
+## Shared Preamble (prepend to every WP)
+
+> **Repo:** ReviewScope — an NLP qualitative-text-analysis platform (masters
+> course project). Ports-and-adapters architecture. A React/Vite frontend talks
+> to a FastAPI backend (async SQLAlchemy + Postgres, Celery worker), which wraps a
+> separate `reviewscope_ml` Python package via an integration seam.
+>
+> **Key paths:**
+> - Backend app: `src/backend/app/` — API routers in `api/` (`projects.py`,
+>   `system.py`, `auth.py`, `deps.py`), ORM in `models.py`, Pydantic DTOs in
+>   `schemas.py`, ML→ORM adapters in `ml_mapping.py`, Celery ML task in
+>   `ml_pipeline.py`, simulated task in `tasks.py`.
+> - Alembic migrations: `src/backend/alembic/versions/` (latest is
+>   `0002_cluster_fields`).
+> - Frontend: `src/frontend/src/` — API client `api.ts`, views in `views/`
+>   (`Dashboard.tsx`, `ProjectView.tsx`, `ClusterDetail.tsx`, `DeckDashboard.tsx`,
+>   `SettingsView.tsx`, `PipelineView.tsx`), routes in `main.tsx`. Uses
+>   `@tanstack/react-query` + `react-plotly.js` + `react-router-dom`.
+> - ML reference (DO NOT import into the backend casually — heavy deps; import
+>   lazily): HITL editing semantics in `src/reviewscope_ml/hitl/feedback.py` and
+>   `hitl/apply_feedback.py`; term/word-freq recompute in
+>   `src/reviewscope_ml/represent/terms.py` (`ctfidf_terms`, `tfidf_top_terms`,
+>   `word_frequencies`). The Streamlit prototype `hitl/app.py` is the UX
+>   reference only — reuse the semantics, not the code.
+>
+> **Conventions:**
+> - Routers are mounted under `/api/projects` (see `main.py`). Mutations must call
+>   `require_project_role(db, project_id, current_user.id, {ProjectRole.owner})`
+>   from `api/deps.py` — viewers are read-only per spec.
+> - Python venv: use `.venv/bin/python` (not conda/system). Backend has its own
+>   `src/backend/.venv`.
+> - Frontend mutations use react-query `useMutation` + `queryClient.invalidateQueries`.
+> - Cluster ids are row UUIDs in the DB; the ML package uses int ids. "Noise" =
+>   `Document.cluster_id IS NULL`.
+> - Add a matching Alembic migration for any model change; keep `models.py` and
+>   the migration in sync.
+>
+> **House rules:** match surrounding code style, keep adapters free of heavy ML
+> imports, add/update tests under `src/backend/tests/` where one exists for the
+> area, and run the backend test suite after backend changes.
+>
+> **When you finish this WP:** update `docs/frontend-feature-implementation-plan.md`
+> — set this WP to `✅` in the **Progress Tracker** list AND on the WP's own
+> `**Status:**` line (add the date and a one-line note of anything that deviated
+> from the plan, e.g. a renamed endpoint). If you discover a new prerequisite or a
+> follow-up, note it on the relevant WP so the next session sees it. Keep the two
+> status locations in sync.
+
+---
+
+# Group B — Backend mutation layer (do first)
+
+## B1 — `cluster_edits` audit table + model + migration
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Notes:** Implemented as planned. `action` is a `String(50)` column constrained by
+a DB `CheckConstraint` (`ck_cluster_edits_action`) over `EDIT_ACTIONS` in
+`models.py` (kept in sync with the migration's `ACTIONS` tuple) — not a Postgres
+ENUM. Subject columns (`cluster_id`/`target_cluster_id`/`document_id`) are plain
+UUIDs **without** FKs by design: cluster ids are regenerated on re-run and rows are
+deleted, so the audit trail must outlive them (needed for B6 replay / F7 undo).
+`actor_id` is a FK→users (no `ondelete`). Helper `record_edit` lives in
+`app/services/edits.py` (new `services` package) and only stages the row — callers
+commit it inside their own transaction. Endpoint `GET /api/projects/{id}/edits`
+(owner+viewer) returns edits newest-first. Tests in
+`tests/test_cluster_edits.py` (no-DB, like the existing suite). Migration verified
+live against the dev Postgres (docker, port 5533): `upgrade head` →
+`downgrade -1` → `upgrade head` all clean; table/index/FKs/CheckConstraint present
+and the constraint rejects unknown actions (`frobnicate` → CHECK violation).
+
+**Goal:** an append-only audit log of every cluster/document edit, mirroring the
+ML package's `FeedbackRecord` (`src/reviewscope_ml/hitl/feedback.py`). This is the
+backbone for re-run survival (B6) and the undo/history UI (F7).
+
+**Do:**
+1. Add a `ClusterEdit` model to `src/backend/app/models.py`:
+   - `id` UUID PK; `project_id` FK→projects (CASCADE, indexed); `actor_id`
+     FK→users; `created_at` timestamptz server_default now.
+   - `action` String — constrain to the same vocabulary as `feedback.ACTIONS`
+     plus the app-only actions: `reassign_doc`, `bulk_reassign`,
+     `merge_clusters`, `create_cluster`, `create_from_selection`, `rename_label`,
+     `approve_label`, `mark_junk`, `split_cluster`, `confirm_run`.
+   - Nullable subject columns: `cluster_id` UUID, `target_cluster_id` UUID,
+     `document_id` UUID, `new_label` Text, `note` Text.
+   - `payload` JSONB (default `{}`) for action-specific extras (e.g.
+     `{document_ids: [...]}` for bulk, `before`/`after` snapshots).
+2. Add an Alembic migration `0003_cluster_edits` (down_revision
+   `0002_cluster_fields`) creating the table + the `project_id` index.
+3. Add a `ClusterEditRead` Pydantic schema in `schemas.py`
+   (`from_attributes = True`).
+4. Add a small helper `record_edit(db, *, project_id, actor_id, action, **fields)`
+   (e.g. in a new `src/backend/app/services/edits.py`) that constructs and adds a
+   `ClusterEdit`. Other WPs will call it inside their mutation transactions.
+5. Add `GET /api/projects/{id}/edits` (owner+viewer) returning the project's
+   edits newest-first; wire it into the router in `api/projects.py`.
+
+**Acceptance:** migration applies cleanly up/down; `GET /edits` returns `[]` for a
+fresh project; creating an edit row via the helper shows up in the list.
+
+---
+
+## B2 — Recompute service for cluster aggregates
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none (B3/B4 call it)
+
+**Done notes:** `app/services/recompute.py` with `recompute_cluster` /
+`recompute_clusters` (async, caller owns the commit) + a `delete_if_empty` flag.
+The numeric aggregates (`size`/`sentiment_avg`/`mean_stars`) are factored into a
+pure `numeric_aggregates` helper plus `_parse_rating` so they unit-test without a
+DB or sklearn (the backend venv has **no** sklearn — heavy ML imports must stay
+lazy). `top_terms`/`word_frequencies` go through `reviewscope_ml.represent.terms`
+(lazy import, all docs labelled `0`), shapes matching `ml_mapping.result_to_orm`.
+Rating column resolved via `derive_roles(project_schema.columns)`. Tests in
+`tests/test_recompute.py` (move-a-doc, None/empty means, rating coercion).
+
+**Goal:** after any structural edit, recompute a cluster's `size`, `top_terms`,
+`word_frequencies`, `sentiment_avg`, `mean_stars` from current membership —
+"append + derive, don't patch" (gap doc §3/§4a). Reuses the same functions the ML
+package uses so the app and notebook agree.
+
+**Do:**
+1. Create `src/backend/app/services/recompute.py` with:
+   - `recompute_cluster(db, project_id, cluster_id)` — load that cluster's
+     `Document.text` + per-doc `sentiment_score` + the rating value from
+     `raw_data` (the rating column comes from `project_schema`; reuse
+     `ml_mapping.derive_roles` to find the rating column name). Recompute:
+     - `size` = count of member docs.
+     - `sentiment_avg` = mean of non-null `sentiment_score`.
+     - `mean_stars` = mean of the rating column parsed from `raw_data` (None if no
+       rating column / no numeric values).
+     - `top_terms` + `word_frequencies` via
+       `reviewscope_ml.represent.terms.ctfidf_terms` and `word_frequencies`
+       (import lazily). Build the `labels` array as all docs in this cluster
+       labelled `0`; store `top_terms` as `[{"term","score"}]` and
+       `word_frequencies` as `{word: count}` to match the existing JSONB shapes
+       used in `ml_mapping.result_to_orm`.
+   - `recompute_clusters(db, project_id, cluster_ids)` — loop helper.
+   - If a cluster ends up empty after an edit, delete it (caller decides; expose a
+     `delete_if_empty` flag).
+2. Keep this module importable without heavy ML deps at import time (lazy-import
+   `reviewscope_ml.represent` inside the function).
+3. Add a unit test in `src/backend/tests/` that seeds a couple of docs and asserts
+   `size`/`sentiment_avg` update after moving a doc.
+
+**Acceptance:** calling `recompute_cluster` after a membership change yields
+correct `size`, non-null terms/word_frequencies when texts exist, and correct
+`sentiment_avg`/`mean_stars`.
+
+---
+
+## B3 — Document reassignment endpoints
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B1, B2
+
+**Done notes:** Implemented as planned in `api/projects.py`:
+`PATCH /{project_id}/documents/{document_id}` (single) and
+`POST /{project_id}/documents/reassign` (bulk), both owner-only, both validate the
+doc + target cluster belong to the project (404 otherwise), write a `ClusterEdit`
+via `record_edit`, then `recompute_clusters` over the affected set (union of old +
+new, `None`/noise skipped) before a single commit. Deviations: (a) added a small
+`BulkReassignResult` schema (`{moved:int}`) for the bulk `response_model` alongside
+the planned `DocumentReassign`/`BulkReassign` request schemas; (b) the
+`bulk_reassign` edit's `payload.document_ids` records the docs **actually moved**
+(those found in the project), not the raw requested ids, and sets
+`target_cluster_id` on the edit. Tests in `tests/test_document_reassign.py` —
+no-DB fake `AsyncSession` driving the route fns with `recompute_clusters`
+monkeypatched (backend venv has no sklearn/pytest-asyncio; coroutine tests run via
+an `asyncio.run` decorator). Full backend suite: 21 passed. Note for later WPs:
+importing `app.api.projects` runs `get_settings()` which `mkdir`s `upload_dir`, so
+DB-touching tests must set `UPLOAD_DIR` to a writable temp dir.
+
+**Goal:** move documents between clusters (single + bulk), the most-used edit.
+
+**Do (in `api/projects.py`):**
+1. `PATCH /{project_id}/documents/{document_id}` — body `{cluster_id: UUID|null}`
+   (null = noise). Owner-only. Validate the doc + target cluster belong to the
+   project. Capture `old_cluster_id`, set `cluster_id`, call
+   `record_edit(... action="reassign_doc", document_id, cluster_id=old,
+   target_cluster_id=new ...)`, then `recompute_clusters` for `{old, new}` (skip
+   None), commit. Return the updated `DocumentRead`.
+2. `POST /{project_id}/documents/reassign` — body
+   `{document_ids: [UUID...], cluster_id: UUID|null}`. Owner-only. Bulk update,
+   record one `bulk_reassign` edit with `payload={"document_ids":[...]}`,
+   recompute every affected cluster (union of old + new), commit. Return
+   `{moved: <count>}`.
+3. Add Pydantic request schemas (`DocumentReassign`, `BulkReassign`) to
+   `schemas.py`.
+
+**Acceptance:** moving a doc changes its `cluster_id`; both source and target
+cluster `size` update; a viewer gets 403; an audit row is written.
+
+---
+
+## B4 — Cluster CRUD + merge + from-selection + rename/approve/junk
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B1, B2
+
+Implemented in `api/projects.py` (schemas in `schemas.py`), tests in
+`tests/test_cluster_crud.py` (16 cases, all green). Notes on what deviated:
+- `merge` writes **one `ClusterEdit` per source** (`cluster_id=source`,
+  `target_cluster_id=target`) — more faithful to the ml feedback semantics and
+  easier for B6 replay than a single payload row.
+- `PATCH` returns `ClusterRead | None`: for `mark_junk` the cluster is deleted so
+  it returns `None` (200, null body); rename/approve return the updated
+  `ClusterRead`. A `PATCH` with no field set is a 400.
+- `mark_junk` is shared with `DELETE` via a private `_junk_cluster` helper.
+- `create`/`from-selection` generate the cluster id eagerly (`id=uuid.uuid4()`)
+  so docs can be reassigned without a pre-flush round-trip.
+
+**Goal:** create/merge/relabel/delete clusters from the app, mirroring the HITL
+actions in `apply_feedback.py`.
+
+**Do (in `api/projects.py`, all owner-only, all write a `ClusterEdit`):**
+1. `POST /{project_id}/clusters` — body `{label: str}` → create an empty cluster
+   (`summary=""`, `label_source="hitl_override"`, empty terms/freqs, size 0).
+   Return `ClusterRead`. Action `create_cluster`.
+2. `POST /{project_id}/clusters/merge` — body `{source_ids: [UUID...],
+   target_id: UUID}`. Reassign all docs of each source to target, delete the
+   source clusters, `recompute_cluster(target)`. Action `merge_clusters` (one row
+   per source, or one row with `payload={"source_ids":[...]}`). Validate all ids
+   belong to the project and `target_id ∉ source_ids`.
+3. `POST /{project_id}/clusters/from-selection` — body
+   `{document_ids: [UUID...], label: str}`. Create a new cluster, reassign those
+   docs into it, recompute the new cluster + every previously-owning cluster.
+   Action `create_from_selection`. (Lasso → new cluster.)
+4. `PATCH /{project_id}/clusters/{cluster_id}` — body
+   `{label?: str, approve?: bool, mark_junk?: bool}`:
+   - rename → set `label`, `label_source="hitl_override"`, action `rename_label`.
+   - approve → set `label_source="hitl_approved"`, action `approve_label`.
+   - mark_junk → docs → noise (`cluster_id=NULL`), delete cluster, action
+     `mark_junk`. (Same effect as DELETE below; keep one implementation.)
+5. `DELETE /{project_id}/clusters/{cluster_id}` — junk: member docs → noise,
+   remove cluster. Action `mark_junk`. 204.
+6. Add request schemas (`ClusterCreate`, `ClusterMerge`, `ClusterFromSelection`,
+   `ClusterUpdate`) to `schemas.py`.
+
+**Acceptance:** merge moves all docs and removes sources; from-selection produces a
+cluster with the right size and recomputed terms; rename sets
+`label_source="hitl_override"`; delete/junk nulls the docs' `cluster_id`; viewer
+gets 403 everywhere; each call writes an audit row.
+
+---
+
+## B5 — `GET/POST /api/projects/{id}/schema`
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done note:** `GET/POST /{project_id}/schema` in `api/projects.py` (handlers
+`get_schema`/`set_schema`). Added `SchemaColumn` (with the `text|integer|float|
+date|boolean` type validator), `ProjectSchemaWrite` (model_validator enforcing
+exactly one PK), and `ProjectSchemaRead` (tolerant `list[dict]`, reflects stored
+columns verbatim) to `schemas.py`. The PK/type rules live on the Pydantic request
+model, so FastAPI surfaces violations as 422 automatically. Tests in
+`tests/test_project_schema.py`; full backend suite green (46 passed).
+
+**Goal:** the column schema is only submitted inside the multipart upload today and
+never re-fetched/edited (gap doc §1 backend gaps). Expose it.
+
+**Do (in `api/projects.py`):**
+1. `GET /{project_id}/schema` (owner+viewer) → return the stored
+   `ProjectSchema.columns` (404 if none). Add a `ProjectSchemaRead` schema.
+2. `POST /{project_id}/schema` (owner-only) → upsert
+   `ProjectSchema.columns` from body `{columns: [{name, type, is_primary_key}]}`.
+   Validate exactly one PK and that types are in the allowed set
+   (`text|integer|float|date|boolean`). Do **not** auto-fix — return inline
+   validation errors (422). This is the editable counterpart to upload step 2.
+
+**Acceptance:** GET returns the columns saved at upload; POST with two PKs returns
+422; POST with valid columns persists and GET reflects it.
+
+---
+
+## B6 — Re-run survival (replay edits) + label_source protection
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B1, B2, B3, B4
+
+**Deviations from plan:**
+- `replay_edits(session, project_id, snapshot)` takes a third arg: a
+  `MembershipSnapshot` captured by `snapshot_membership(session, project_id)`
+  **before** `persist_run_result` wipes the old rows. It's required because the
+  edit log stores *old* document/cluster UUIDs that the re-run regenerates — the
+  snapshot bridges old doc UUID → `primary_key_value` → new doc, and resolves an
+  old cluster UUID to the new cluster holding the **plurality** of its old members
+  (against the fresh run's base assignment). Human-created clusters are recreated
+  and tracked in a `remap` so reassignments/merges can target them.
+- Replay order: **creates** → merges → junk → splits → label actions → doc
+  reassignments → confirm. Creates run first (app-only actions with no notebook
+  analogue) because later merges/reassignments may target a recreated cluster.
+- `split_cluster` and `confirm_run` are logged and **skipped** — neither has an
+  app-side artifact yet (no micro-labels / re-cluster manifest, no
+  `human_confirmed` field). Revisit when those land.
+- Recompute (B2) is async-only; added a sync `_recompute_clusters_sync` in
+  `services/replay.py` for the Celery worker, reusing the pure helpers from
+  `services/recompute.py`.
+- label_source protection: replay runs *after* persist, so a re-applied human
+  rename (`hitl_override`) always wins over the run's machine label. No separate
+  relabel pass exists today; any future one must skip `hitl_override` clusters.
+- Tests: `tests/test_replay.py` (no DB / no ML stack, fake sync session) covers
+  the acceptance scenario plus create-from-selection / merge / junk / approve /
+  unresolvable-skip and `snapshot_membership`.
+
+**Goal:** re-processing a project (`persist_run_result` wipes & rewrites
+clusters/documents in `ml_mapping.py`) must not destroy manual edits. This is the
+app analogue of `apply_feedback.apply_run_feedback`.
+
+**Do:**
+1. After `persist_run_result` rebuilds rows in `ml_pipeline.run_ml_pipeline`, load
+   the project's `ClusterEdit` rows (B1) in `created_at` order and **replay** them
+   over the fresh rows, in the order `apply_feedback` uses: merges → junk → splits
+   → label actions → doc reassignments → confirm.
+   - Map replayed edits onto new rows by stable identity: documents by
+     `primary_key_value` (cluster ids are regenerated each run, so match clusters
+     by replaying doc membership / by stored `new_label` for renames).
+   - Implement this as `src/backend/app/services/replay.py:replay_edits(session,
+     project_id)` and call it from `run_ml_pipeline` after persist, before the
+     `status=ready` commit. Recompute affected clusters (B2) afterward.
+2. Ensure a future LLM relabel pass never clobbers human labels: when persisting /
+   relabeling, skip clusters whose `label_source == "hitl_override"` (column
+   already exists; renames in B4 set it).
+
+**Acceptance:** seed a project, reassign a doc + rename a cluster, trigger a
+re-run, and confirm the doc lands in the right place and the human label survives.
+
+Reference: `src/reviewscope_ml/hitl/apply_feedback.py`.
+
+---
+
+## B7 — Rich hover payload on embeddings (backend half of gap §2)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+Implemented as planned: `EmbeddingPoint` gained `snippet`/`primary_key_value`/
+`sentiment_score`/`cluster_label` (all optional); `GET /embeddings` now LEFT JOINs
+`Cluster` (so noise points get `cluster_label = null`), caps snippet to 120 chars
+server-side, and accepts optional `?limit=`. No "stars" field was added — there is
+no per-document stars column on `Document` (mean_stars lives only on `Cluster`), so
+that part of the goal was dropped. Covered by new `tests/test_embeddings.py`.
+
+**Goal:** the scatter only gets `document_id` today. Provide snippet + sentiment +
+label + PK + stars per point so the frontend hover (F1) can be rich, **built only
+for displayed points** (perf).
+
+**Do (in `api/projects.py`):**
+1. Extend `EmbeddingPoint` in `schemas.py` with optional
+   `snippet: str | None`, `primary_key_value: str | None`,
+   `sentiment_score: float | None`, `cluster_label: str | None`.
+2. Update `GET /{project_id}/embeddings` to join `Document` (text→snippet[:120],
+   `primary_key_value`, `sentiment_score`) and the cluster `label`. Keep the
+   query a single join; cap snippet length server-side.
+3. (Optional, for very large projects) add `?limit=` so the frontend can request
+   only the capped set of points.
+
+**Acceptance:** `GET /embeddings` returns the new fields populated; noise points
+have `cluster_label = null`.
+
+---
+
+# Group F — Frontend
+
+## F0 — API client + types (`api.ts`)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B3, B4, B5, B7 (to function; can be written speculatively)
+Implemented all 10 methods + types; `tsc --noEmit` clean. Deviations from the
+plan: also added a `SchemaColumn` type (used by `getSchema`/`saveSchema`).
+`saveSchema` POSTs to `/schema` (there is no PUT). `updateCluster` returns
+`Cluster | void` since the backend returns null/204-style on `mark_junk`.
+
+**Goal:** expose all new endpoints + fix the frontend `Cluster`/`EmbeddingPoint`
+types. (NB: backend `ClusterRead` already has `mean_stars` and `label_source`; the
+frontend `Cluster` type just omits them.)
+
+**Do (in `src/frontend/src/api.ts`):**
+1. Add to the `Cluster` type: `label_source: string`, `mean_stars: number | null`.
+2. Add to `EmbeddingPoint`: `snippet`, `primary_key_value`, `sentiment_score`,
+   `cluster_label` (all nullable) — matches B7.
+3. Add `ClusterEdit` type matching `ClusterEditRead`.
+4. Add API methods:
+   `reassignDocument(projectId, documentId, clusterId|null)`,
+   `bulkReassign(projectId, documentIds, clusterId|null)`,
+   `createCluster(projectId, label)`,
+   `mergeClusters(projectId, sourceIds, targetId)`,
+   `createClusterFromSelection(projectId, documentIds, label)`,
+   `updateCluster(projectId, clusterId, {label?, approve?, markJunk?})`,
+   `deleteCluster(projectId, clusterId)`,
+   `getSchema(projectId)`, `saveSchema(projectId, columns)`,
+   `edits(projectId)`.
+
+**Acceptance:** types compile; methods hit the right paths/verbs. (Pure client
+layer — no UI yet.)
+
+---
+
+## F1 — Scatter: real hover (gap §2)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B7, F0
+
+**Done notes:** Added a shared `src/frontend/src/hover.ts` with `sentimentLabel`,
+`hoverHtml` (Plotly, HTML-escaped, `<b>label</b><br>snippet<br><i>pk</i> · senti`),
+and `hoverTitle` (plain-text for the DOM `title` attr). `ProjectView.tsx` now feeds
+`hoverHtml` into the scatter `text` array + `hovertemplate: "%{text}<extra></extra>"`
+(replacing the bare `document_id`). Deviations: (a) `DeckDashboard`'s `PointCloud` is
+a **CSS/div** scatter, not Plotly, so "apply identically" = a rich `title={hoverTitle(p)}`
+tooltip rather than a hovertemplate. (b) No per-point **star rating** exists (B7 dropped
+it — `mean_stars` lives only on `Cluster`), so the star part of the goal is omitted. (c)
+Cluster label comes straight from `point.cluster_label` (B7), so no clusters lookup is
+needed; noise → "noise". F6's plot cap isn't built yet, so all points are still plotted.
+`tsc --noEmit` clean.
+
+**Goal:** replace the bare-UUID hover with a rich `hovertemplate` in both
+`ProjectView.tsx` and `DeckDashboard.tsx`.
+
+**Reference:** the prototype hover string in
+`src/reviewscope_ml/hitl/app.py` (~line 286–307): `"<b>{cluster}</b><br>{snippet}
+<br><i>{doc_id}</i> · {sentiment}"` with `hovertemplate="%{text}<extra></extra>"`.
+
+**Do:**
+1. After F0/B7, build a per-point `text[]` array: cluster label, text snippet,
+   primary-key value, sentiment label (derive from `sentiment_score` sign, or show
+   the score), star rating if present.
+2. Set Plotly `text` to that array and `hovertemplate: "%{text}<extra></extra>"`
+   (drop the raw `document_id` text). Build payloads only for the points actually
+   plotted (respect the cap from F6).
+3. Apply identically in `DeckDashboard.tsx`.
+
+**Acceptance:** hovering a dot shows label + snippet + PK + sentiment, not a UUID,
+in both views.
+
+---
+
+## F2 — Scatter: 2D/3D toggle + click→highlight cluster
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none (pairs with F0 for types)
+**Notes:** Switched the marker colouring from the Viridis `colorscale` to the
+shared `PALETTE` (same as `DeckDashboard`) so per-point dimming works across both
+`scatter3d`/`scattergl` — non-highlighted points get an alpha-suffixed colour
+(`${base}22`) instead of Plotly `opacity` (which is scalar-only on 3d traces).
+2D/3D toggle is an absolutely-positioned `.plot-toolbar` overlay; click reads
+`event.points[0].pointNumber` to index back into `embeddings.data`, and clicking
+the already-highlighted cluster toggles it off. Highlighted card gets `.highlighted`
++ `scrollIntoView`.
+
+**Goal:** `ProjectView.tsx` hardcodes `scatter3d` and the click→cluster
+interaction is unwired (only `DeckDashboard` highlights today).
+
+**Do (in `ProjectView.tsx`):**
+1. Add a 2D/3D toggle (state). 3D → `scatter3d` with `z`; 2D → `scattergl` with
+   `x`/`y` only. Keep the colour-by-cluster mapping.
+2. Add a `highlightedClusterId` state. On Plotly `onClick`, read the clicked
+   point's cluster and set it; visually emphasise that cluster's card in the right
+   panel (scroll-to / outline) and de-emphasise others' points (opacity).
+3. Mirror the pattern already in `DeckDashboard.tsx` (`highlightedClusterId`).
+
+**Acceptance:** toggling switches trace type without reload; clicking a point
+highlights its cluster card and dims other points.
+
+---
+
+## F3 — Cluster cards & detail: word cloud + star rating + distribution chart
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** F0
+
+**Done notes:** Two dependency-free components in `src/frontend/src/ui/`:
+`WordCloud.tsx` (CSS `font-size`/opacity scaling over the top-N `word_frequencies`,
+`compact` variant for cards) and `StarRating.tsx` (five-star gold overlay clipped
+to `mean_stars`, **assumes a 5-point scale** + numeric label; renders `null` when
+no rating). On the `ProjectView` cards the word cloud **replaces** the old
+`.terms` chip row (the card already conveyed top terms; the cloud is the richer
+F3 view) and `mean_stars` shows next to the sentiment line via the compact star
+rating. `ClusterDetail` keeps both the full word cloud and the `.terms` chips
+(terms there carry their scores), shows the full star rating in the header, and
+adds a Plotly **bar** distribution of documents bucketed negative/neutral/positive
+by `sentiment_score` (same ±0.05 thresholds as `hover.sentimentLabel`); the
+section is hidden when no document has a sentiment score. Deviation from the plan:
+the distribution is a **sentiment** bar chart only — a per-document star/rating
+column isn't exposed to the frontend yet (no schema-driven rating field on
+`DocumentItem`; `mean_stars` lives only on `Cluster`), so a star histogram is
+deferred until F4/B5 surface the rating column. `tsc --noEmit` clean.
+
+**Goal:** fill the card/detail depth gaps (§1): word cloud (`word_frequencies`
+already provided), star rating (`mean_stars`), and a sentiment/star distribution
+chart on the detail page.
+
+**Do:**
+1. Add a small word-cloud component (term size ∝ frequency) fed by
+   `cluster.word_frequencies`. Use on both the cluster card (compact) and
+   ClusterDetail (full-width). Pick a lightweight approach (CSS font-size scaling
+   or a tiny lib); no heavy dependency.
+2. Show `mean_stars` (e.g. ★ 4.2) on the card + detail when non-null (needs F0
+   type addition).
+3. On `ClusterDetail.tsx`, add a sentiment/star distribution chart (Plotly bar /
+   histogram) from the cluster's documents.
+
+**Acceptance:** cards render a word cloud sized by frequency and a star rating when
+present; detail shows a distribution chart.
+
+---
+
+## F4 — "Show all documents" paginated table (all schema columns)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B5
+
+**Done notes:** New `src/frontend/src/ui/DocumentsTable.tsx` — columns from
+`api.getSchema` (B5), each cell renders `raw_data[col.name]` (objects → JSON), PK
+column flagged with 🔑. Server-side pagination via `GET /documents`' `limit`/
+`offset` (PAGE_SIZE 50) with Previous/Next + a "Showing a–b" range; "Next"
+disables when a page returns < PAGE_SIZE rows. Uses react-query `keepPreviousData`
+so paging doesn't flash. Deviations: (a) `api.documents` signature changed to
+`documents(projectId, { clusterId?, limit?, offset? })` (was `(projectId,
+clusterId?)`) — no other callers existed. (b) Graceful fallback when **no** schema
+is saved (GET /schema 404, `retry:false`): columns are derived from the first
+row's `raw_data` keys so the table still renders. ProjectView gained a "Show all
+documents" toggle (full-width card, project-wide); ClusterDetail's bottom
+load-all Documents list was replaced by `<DocumentsTable clusterId=…>` (its F3
+sentiment-distribution query is untouched). CSS under `.documents-table*` in
+`styles.css`. `tsc --noEmit` clean.
+
+**Goal:** the spec's full document table with **all schema columns** doesn't exist
+anywhere (§1). Build it, paginated, reusing `GET /documents` (already supports
+`limit`/`offset`) and `GET /schema` (B5) for column headers.
+
+**Do:**
+1. Add a reusable `DocumentsTable` component: columns come from the project schema
+   (`api.getSchema`); each row renders `raw_data[col.name]` (PK + text +
+   everything). Server-side pagination via `limit`/`offset` with prev/next.
+2. Add a "Show all documents" toggle on `ProjectView.tsx` (project-wide) and use
+   the same table in `ClusterDetail.tsx` (cluster-scoped via `cluster_id`),
+   replacing its current load-all behaviour.
+
+**Acceptance:** table shows every schema column; pagination fetches pages; works
+both project-wide and per-cluster.
+
+---
+
+## F5 — Editing UX: selection toolbar, card actions, edit-mode toggle
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** F0, B3, B4
+
+**Done notes:** Owner-only "Edit clusters" toggle on `ProjectView` (gated on
+`project.role === "owner"` + `status === "ready"`) and "Edit documents" on
+`ClusterDetail`; viewers never see edit controls. In edit mode:
+- **Scatter lasso:** Plotly `dragmode: "lasso"` + `onSelected`/`onDeselect` (2D
+  `scattergl` only — a "Switch to 2D to lasso-select" hint shows in 3D). Selected
+  point `document_id`s feed a floating `.scatter-selection` toolbar → bulk
+  **Reassign to…** (`bulkReassign`, with a "Noise" sentinel = `cluster_id null`)
+  and **New cluster** from an inline label input (`createClusterFromSelection`).
+- **Per-cluster card actions** (`ClusterCard`): inline **Rename** (`updateCluster
+  {label}`), **Merge into…** select (`mergeClusters [self] → target`), **Mark
+  junk** (`deleteCluster`, `window.confirm` first), plus a checkbox for
+  **multi-select → Merge N→1** (`.merge-toolbar`, target chosen among the
+  selected; sources = the rest).
+- **ClusterDetail / DocumentsTable:** `DocumentsTable` gained `editable`/`clusters`
+  props — per-row "Move to…" select (single `reassignDocument`) and row checkboxes
+  → bulk-reassign toolbar (`bulkReassign`). The same editable table is also wired
+  into `ProjectView`'s project-wide "All documents" panel when editing.
+
+All mutations are react-query `useMutation` + broad `invalidateQueries`
+(`clusters`/`embeddings`/`documents`/`cluster`/`cluster-docs`/`edits`) — optimistic
+updates + the WebGL cap are deferred to **F6** as planned.
+
+**Deviations:** (a) **Split is omitted** — there is no split endpoint (B4 didn't
+add one; `split_cluster` is logged-and-skipped in B6 replay), and split isn't in
+F5's acceptance. Wire it when a backend split path exists. (b) Label entry for
+"New cluster" uses an inline text input (not a modal); junk uses `window.confirm`.
+(c) `tsc --noEmit` clean.
+
+**Goal:** the core "edit clusters from the app" UX (gap §4b/§4c), owner-only.
+
+**Do (in `ProjectView.tsx` + `ClusterDetail.tsx`):**
+1. **Edit-mode toggle** (owner only, hidden for viewers) so the read-only
+   experience stays clean.
+2. **Scatter lasso/box select** (Plotly `dragmode: "lasso"/"select"`, capture
+   `onSelected` point ids) → a selection toolbar: "N points selected →
+   Reassign to… / New cluster…". Wire to `bulkReassign` /
+   `createClusterFromSelection`.
+3. **Per-cluster card actions:** rename (inline), "merge into…" dropdown
+   (`mergeClusters`), mark junk (`deleteCluster`/`updateCluster markJunk`), split
+   (call the split path / flag).
+4. **Multi-select clusters → "Merge selected"** (N→1) via `mergeClusters`.
+5. **ClusterDetail:** row-level "move to cluster…" (single `reassignDocument`) and
+   bulk-select rows → reassign (`bulkReassign`).
+
+**Acceptance:** as owner you can lasso points and reassign/create a cluster, rename
+a cluster, merge N→1, mark junk, and move single/bulk docs; viewers see no edit
+controls.
+
+---
+
+## F6 — Cross-cutting: optimistic updates, invalidation, WebGL cap
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** F5
+
+**Done notes:** Two new dependency-free modules in `src/frontend/src/`:
+- `optimistic.ts` — shared cache helpers. `beginOptimistic` cancels + snapshots the
+  six project-scoped query prefixes (`clusters`/`embeddings`/`documents`/`cluster`/
+  `cluster-docs`/`edits`), `rollback` restores from the snapshot, `invalidateAll`
+  reconciles on settle. Per-action mutators (`applyReassign`, `applyRename`,
+  `applyMerge`, `applyJunk`, `applyCreateFromSelection`) write membership/label/size
+  changes straight into the cache via `setQueriesData` (prefix filters so every
+  paginated `documents` page updates at once). Cluster **size deltas** are derived
+  from the embeddings cache so card counts shift instantly.
+- `plot.ts` — `POINT_CAP = 12000` + `samplePoints` (deterministic stride sample,
+  order-preserving so plot indices still map back to a stable document).
+
+Wiring: every F5 mutation in `ProjectView.tsx` (bulk reassign, create-from-
+selection, rename, merge, junk) and `DocumentsTable.tsx` (single + bulk reassign)
+now uses `onMutate` (snapshot + optimistic apply) → `onError` (rollback) →
+`onSettled` (`invalidateAll`). The old broad `invalidate()` helpers were removed.
+`ProjectView` scatter: when `embeddings.length > POINT_CAP` it samples down, **forces
+2D `scattergl`** (hides the 2D/3D toggle), and shows a "Showing N of M points (2D)"
+note; click/lasso handlers index into the sampled array. `DeckDashboard`'s CSS/DOM
+`PointCloud` is also sampled (bounds still computed from the full set) with a
+"Showing N of M" caption.
+
+**Deviations:** (a) `create-from-selection` is optimistic via a `temp-…` cluster id
+that the `onSettled` invalidation replaces with the server's real row (the id is
+server-assigned). (b) The WebGL cap **locks to 2D** when capped rather than leaving
+3D selectable — `scatter3d` doesn't render smoothly at 12k+ points; this also keeps
+lasso-select available. (c) `tsc --noEmit` clean; repo has no `lint` script.
+
+**Goal:** make edits feel instant and keep large projects performant (§4d).
+
+**Do:**
+1. For every mutation in F5, use react-query optimistic update + rollback, then
+   `invalidateQueries` for `["clusters", projectId]`, `["embeddings", projectId]`,
+   `["cluster-docs", ...]`, and `["edits", projectId]`.
+2. Apply a **~12k-point WebGL cap**: when `embeddings.length > 12000`, sample down
+   for display and use `scattergl` (2D) — mirror the cap rationale in the gap doc
+   §3 / prototype. Show a "showing N of M points" note.
+
+**Acceptance:** an edit updates the UI before the server responds and rolls back on
+error; a >12k-point project renders smoothly with a capped/WebGL scatter.
+
+---
+
+## F7 — Undo / edit-history panel
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B1, F0
+
+**Done notes:** Collapsible `src/frontend/src/ui/EditHistory.tsx` panel on
+`ProjectView` (visible to all roles; lazy — only fetches `GET /edits` + members
+when opened). Lists edits newest-first with a human-readable description, the
+actor email (resolved via the members list — the owner is a `ProjectMember` too),
+and a localized timestamp. Undo (owner-only) is wired for the three reversible
+actions — `reassign_doc`, `bulk_reassign`, `rename_label` — via the existing API
+endpoints, so each undo is itself recorded as a fresh edit, and reuses the F6
+optimistic apply (`applyReassign`/`applyRename`) + rollback/invalidate. Merges,
+junk, creates, approve, split, confirm are shown but non-undoable in v1.
+
+**Deviation / required backend tweak:** undo needs "before" state the audit rows
+didn't carry, so two `record_edit` calls in `api/projects.py` were extended (kept
+backward-compatible): `rename_label` now stores `payload={"before": <old label>}`,
+and `bulk_reassign` stores `payload.before = {doc_id: old_cluster_id|null}` so a
+bulk move can be inverted per original cluster (grouped via `beforeGroups` in
+`ProjectView`). `reassign_doc` already carried the old cluster in `cluster_id`.
+Tests `tests/test_document_reassign.py` + `tests/test_cluster_crud.py` updated for
+the new payloads; backend suite green. `tsc --noEmit` clean.
+
+**Goal:** surface the audit log (`GET /edits`, B1) as a history panel; support undo
+where feasible (e.g. re-apply the inverse reassign).
+
+**Do:**
+1. Add a collapsible "Edit history" panel on `ProjectView.tsx` listing edits
+   newest-first (actor, action, when, subject).
+2. Implement undo for reversible actions (single/bulk reassign → move back;
+   rename → restore previous label from the edit's `before` payload). Merges/junk
+   can be "not undoable" for v1 with a clear note.
+
+**Acceptance:** history lists recent edits; undo on a reassign moves the doc back
+and records a new edit.
+
+---
+
+## F8 — Upload Step 2: real schema confirm
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none (B5 optional, for server-side validation)
+
+**Done notes:** Rewrote `Dashboard.tsx`'s detection + `UploadModal`. New helpers:
+`sampleColumns` (parses up to 50 head rows of CSV/JSONL into per-column value
+samples), `inferType` (boolean → integer → float → date → text, value-driven, not
+positional), `detectPrimaryKey` (prefers a unique non-null + id-like column, then
+any all-unique column, then id-named, then first), `buildColumns`, and
+`validateSchema`. The modal now shows a one-radio-per-row **PK selector** (enforces
+exactly one) and a per-column type `<select>`; submit runs `validateSchema` and
+blocks with inline `.error` messages (no auto-fixing) when there's no non-key text
+column, zero/duplicate PK, or duplicate names. "Text column" matches the backend's
+`derive_roles` rule (a non-PK `type=="text"` column).
+
+**Deviations:** (a) Kept the single-modal layout (the spec's optional two-step split
+was not done — the confirm step is one panel). (b) Step 5 (server-side re-validation
+via B5 `POST /schema`) was skipped at upload time: B5's endpoint is project-scoped
+and no project exists yet during upload; the upload seam still rejects a bad schema
+server-side. (c) CSV parsing stays line-based (quoted newlines unsupported, as
+before). `tsc --noEmit` clean.
+
+**Goal:** fix the broken type selector in `Dashboard.tsx`'s `UploadModal` (§1).
+
+**Current bugs (`Dashboard.tsx` `detectColumns`):** type default is
+`index === 0 ? "text" : "text"` (always `text`); PK detection is just
+`id`/first-column.
+
+**Do:**
+1. **Real per-column type inference** from sampled rows (parse a handful of CSV/
+   JSONL rows): classify each column as integer/float/date/boolean/text.
+2. **Better PK detection:** prefer a column with unique, non-null values and an
+   id-like name; fall back to first column. Allow the user to change the PK
+   (radio), enforcing exactly one.
+3. **Submit-time validation with inline errors, no auto-fixing** (spec
+   requirement): block submit if no text column, no/duplicate PK, etc.
+4. (Optional) split into the spec's two-step modal flow.
+5. Reuse the same validation server-side via B5's `POST /schema` if available.
+
+**Acceptance:** numeric/date columns are inferred (not all `text`); the PK is
+selectable and validated; invalid schemas show inline errors and block submit.
+
+---
+
+## F9 — Smaller spec fills: owner email, members role-change, models/health
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** Frontend-only — both `/api/models` and `/api/health` already
+existed server-side. Added `updateMember`, `models`, `health` (+ `Models`/`Health`
+types) to `api.ts`. (1) `Dashboard.tsx` `ProjectCard` now shows "Shared by
+&lt;owner_email&gt;" on viewer-role cards. (2) `SettingsView.tsx` member rows render
+a role `<select>` (owner-only, non-owner members) wired to `PATCH /members/{uid}`
+via `updateMember`, with inline error surfacing. (3) A new "Models" card in Settings
+shows the embedding/label model + variant from `GET /api/models`.
+
+**Deviation:** the role model is only `owner|viewer` and the backend forbids
+promoting/demoting owners (`update_member` → 400), so the role select's only valid
+non-owner target is `viewer`; picking `owner` surfaces the backend error. The
+control is wired as specified, but a meaningful role change needs a richer role
+vocabulary (future). `GET /api/health` is exposed in `api.ts` but not yet rendered
+(no obvious surface; left for a status indicator later). `tsc --noEmit` clean.
+
+**Goal:** quick wins from §1.
+
+**Do:**
+1. **`Dashboard.tsx` `ProjectCard`:** render `project.owner_email` on shared
+   projects (already on the `Project` type, just unused).
+2. **`SettingsView.tsx`:** add a member **role-change** control calling the
+   existing `PATCH /members/{uid}` (currently unused). Add `updateMember` to
+   `api.ts`.
+3. **Surface system info:** call `GET /api/models` (and add `GET /api/health` if
+   missing) and show available models / health in Settings or the upload modal.
+   Add `models()`/`health()` to `api.ts`.
+
+**Acceptance:** shared-project cards show the owner email; an owner can change a
+viewer's role from Settings; available models are visible in the UI.
+
+---
+
+# Group T — Trust, export & scale (lower priority, §5)
+
+These are "worth planning for" items. Each is standalone; build after Groups B/F.
+
+## T1 — Label-provenance badge + confirm/sign-off
+**Status:** ☐ Not started · **Prereqs:** F0, B1
+
+Badge on each cluster (LLM `ollama:*` vs `terms_fallback` vs `hitl_override`/
+`hitl_approved`) from `label_source` (already on `ClusterRead`; add to frontend
+`Cluster` type via F0). Add a per-project "confirmed" state: a `confirm_run`-style
+edit (B1) + a project-level flag/badge. Reference `confirm_run` semantics in
+`apply_feedback.py`.
+
+## T2 — Export
+**Status:** ☐ Not started · **Prereqs:** B5
+
+`GET /{project_id}/export?format=csv|json` → documents with (edited) cluster
+assignments + all schema columns. Frontend "Export" button. Optionally scatter
+PNG (Plotly `toImage`) and a cluster-summary report.
+
+## T3 — Search / filter / noise triage
+**Status:** ☐ Not started · **Prereqs:** B3, F4
+
+Global text search across documents; filter scatter/cluster list by sentiment /
+stars / date / schema column; a dedicated **noise triage view** for
+`cluster_id IS NULL` docs to reassign in bulk (reuses B3 bulk reassign + F4
+table).
+
+## T4 — Re-run / re-cluster controls + append data
+**Status:** ☐ Not started · **Prereqs:** B6
+
+In-app controls (# clusters, embedding model, min cluster size) tied to
+`GET /api/models`, triggering a re-run (which now survives edits via B6).
+"Append data to existing project" is the spec's own future extension.
+
+---
+
+# Group R — Review fixes (UX-honesty pass)
+
+A prioritized list from a design/UX review of the shipped F-series. **P0** items
+are actively misleading — they can lead a user to a wrong conclusion about their
+data — so they come first. **P1** is high-leverage UX, **P2** is polish.
+
+## R1 — Reserved grey for noise + count + card (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** New shared `src/frontend/src/colors.ts` is the single source of
+truth: `PALETTE` (Okabe–Ito colorblind-safe set — also covers R14's palette half),
+`NOISE_COLOR` reserved grey, `clusterColor(i)`, and `pointColor(clusterId,
+clusterIndex)` (noise/orphan → grey). Both scatters now color via `pointColor`
+(`ProjectView`/`DeckDashboard`) so noise no longer borrows `PALETTE[0]`. Noise
+**count** is computed from the full embeddings set (not the sampled display set) and
+shown as a dashed **noise card** in `ProjectView`'s cluster list and a noise
+**layer** in `DeckDashboard`. CSS: `.noise-card`/`.noise-swatch`/
+`.deck-layer-noise`. `tsc --noEmit` clean.
+
+Today `cluster_id = null` (noise) is colored `PALETTE[0]` in both scatters
+(`ProjectView.tsx:198`, `DeckDashboard.tsx:131`), so noise is indistinguishable
+from the first real cluster. Give noise a dedicated reserved grey, exclude it from
+the cluster color cycle, and surface a noise **count** + a noise **card/row** so
+users can see (and triage) how much was left unclustered.
+
+## R2 — Cluster-stratified point sampling + overview caveat (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** `samplePoints` (`plot.ts`) now groups by `cluster_id` (noise = `""`
+stratum) and stride-samples *within each cluster* to its proportional share but
+never below `STRATUM_FLOOR = 4` (capped at the cluster's real size), so a small
+cluster can't be sampled to zero. Still deterministic + order-stable per stratum, so
+the display index still maps to a stable document for click/lasso. Total may slightly
+exceed `POINT_CAP` (≈floor × #small clusters) — acceptable for an overview. Capped
+captions on both maps now read "Overview … small clusters may be under-sampled".
+
+`samplePoints` (`plot.ts:11`) takes a uniform stride, so a small cluster can be
+sampled to zero points and silently vanish from the map. Make the sample
+**cluster-stratified** (guarantee ≥1 point — ideally a small floor — per cluster)
+and label the capped map "overview — small clusters may be under-sampled."
+
+## R3 — Scope/disable lasso-reassign when capped (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** R2
+
+**Done notes:** `lassoEnabled` now also requires `!capped`, so the lasso is off on
+the sampled overview (no `dragmode: lasso` → no partial-region selection). An
+edit-mode hint tells the user to use the exact document table for bulk reassignment
+when capped. Chose **disable** over scope because the document table reassigns over
+real filtered sets, not a sample — no misleading partial edits.
+
+When the scatter is capped (F6) the lasso only sees sampled points, so a
+region-reassign edits **only the sample** while implying it edited the whole
+region. Disable lasso-reassign when capped, or explicitly scope it ("reassigns the
+N selected sampled points, not the full region") so the action matches its effect.
+
+## R4 — Per-cluster cohesion metric + confidence chip (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** Cohesion = mean cosine similarity of member embeddings to the
+cluster centroid (0–1, higher = tighter). Pure, dependency-free helper
+`cohesion_score` in new `app/services/metrics.py` (zero-norm / malformed vectors
+dropped; `None` for <2 usable vectors) — a cheap stand-in for silhouette since the
+backend venv has no numpy/sklearn. New nullable `Cluster.cohesion` column +
+migration `0004_cluster_cohesion` (verified live on the dev DB: up/down/up clean,
+column present). Seeded at the initial run in `ml_mapping.result_to_orm` (builds
+per-cluster vector lists from the run's docs+embeddings) and re-derived on every
+edit in `recompute.recompute_cluster` and `replay._recompute_clusters_sync` (both
+now `outerjoin` `Embedding.vector`). Exposed on `ClusterRead`. Frontend:
+`cohesion` on the `Cluster` type + a reusable `ui/CohesionChip.tsx` (High/Medium/Low
+buckets at 0.5/0.25 + raw value + explanatory tooltip) on the cluster card and
+detail header. Tests: `tests/test_metrics.py` (5 cases). Full backend suite: 60
+passed; `tsc --noEmit` clean.
+
+There is no signal for how tight/trustworthy a cluster is. Compute a cohesion
+metric server-side (mean intra-cluster cosine distance to centroid, or silhouette)
+in the recompute path (`models.py:74` Cluster), persist it, expose on `ClusterRead`,
+and render a confidence chip on the card/detail.
+
+## R5 — label_source provenance badge (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** New `ui/LabelSourceBadge.tsx` maps `label_source` to a tier: AI
+(`ollama:*`, blue), Human (`hitl_override` "Edited" / `hitl_approved` "Approved",
+green), Keywords (`terms_fallback`, grey) — each with an explanatory `title`. Shown
+on the cluster card head (`ProjectView`, hidden while renaming) and the
+`ClusterDetail` title. CSS `.label-source-badge.{ai,human,fallback}`. `tsc` clean.
+(T1 still owns the confirm/sign-off flow; this is just the badge.)
+
+`label_source` is already on `ClusterRead` (data at `models.py:83`) but unused in
+the UI. Render it as a badge so an AI label (`ollama:*`) ≠ a keyword fallback
+(`terms_fallback`) ≠ a human edit (`hitl_override`/`hitl_approved`). (Overlaps T1;
+do the badge here, leave confirm/sign-off to T1.)
+
+## R6 — Gate/remove "simulated" UI copy (P0)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** New `src/frontend/src/useSimulated.ts` hook reads `GET /api/models`
+(no auth; cached under `["models"]`, defaults `false` until loaded so real
+deployments never flash the simulated note) and returns `models.simulated`. Dynamic
+view copy is now gated behind it: `Dashboard` subtitle, `DeckDashboard`'s map-empty
+note + the `PointCloud` caption ("UMAP x/y · simulated layer data" only when
+simulated, passed as a `simulated` prop). Static constant copy was reworded to drop
+"simulated" instead of gating: `AuthPage` tagline and `PipelineView`'s ingest risk
+string. `SettingsView` already gated its "(simulated)" variant suffix behind
+`models.simulated` — left as is. Audit: no ungated "simulat" copy remains. `tsc`
+clean.
+
+"Simulated" copy is sprinkled across the UI (`Dashboard.tsx:16`, `AuthPage.tsx:33`,
+`DeckDashboard.tsx:83,149`, `PipelineView.tsx:29`, `SettingsView.tsx:33`) even when
+the backend is running real models. Gate every "simulated" string behind
+`models.simulated` (from `GET /api/models`) so it only shows when actually
+simulating.
+
+## R7 — Sentiment honesty: round + coverage (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** Added a non-stored `sentiment_count` to `ClusterRead` (count of the
+cluster's docs with a non-null `sentiment_score`). The `/clusters` list computes it
+with one grouped `func.count()` query (dict keyed by cluster id); `/clusters/{id}`
+uses a `_sentiment_count` helper. Frontend: `sentiment_count` on the `Cluster` type
+(+ optimistic temp cluster) and a shared `hover.sentimentSummary(avg, count, total)`
+→ `"sentiment 0.42 · 8 of 12 scored"` (rounded to 2dp), or `"sentiment n/a"` when
+nothing is scored. Wired into the `ProjectView` card, `ClusterDetail` header, and
+`DeckDashboard` cluster layer. No migration (derived at read time). `tsc` clean; 60
+backend tests pass.
+
+`sentiment_avg` renders raw (`ProjectView.tsx:352`). Round it and show coverage —
+"sentiment on n of N" — so a mean computed over a handful of scored docs isn't read
+as the whole cluster. Needs a per-cluster scored-doc count.
+
+## R8 — Facet filters from the typed schema (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** B5, F4
+
+**Done notes:** Server-side so filtering spans the whole dataset (not just the
+current page). Backend: `/documents` + `/documents/count` take an optional `filters`
+JSON param parsed by `_document_filter_conditions` — `eq` (exact text, for
+booleans/values), `gte`/`lte` numeric via a **regex-guarded CASE cast** (a
+non-numeric cell yields NULL, never an error), and `gte`/`lte` date as ISO-lexical
+text compare. Unknown ops / bad JSON are ignored. Tests in
+`tests/test_document_filters.py` (4). Frontend: `DocumentsTable` derives a facet bar
+from the typed schema columns — numeric min/max, date from/to, boolean any/true/false
+— builds the typed `DocumentFilter[]` (`api.ts`), feeds both the rows and count
+queries, snaps to page 0 on change, and keeps the bar visible on an empty result
+with a "No documents match these filters" message + Clear. Cluster-list-level
+faceting is left to R9's text/sort controls; the typed facets live on the table
+(project-wide and per-cluster). `tsc` clean; backend 64 pass.
+
+Use the typed schema (`api.getSchema`) to add facet filters to the documents table
+(and cluster list): rating range, date range, boolean toggles
+(`Dashboard.tsx:194`-area schema types).
+
+## R9 — Cluster list sort + filter + jump-to (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none (R4 for cohesion sort)
+
+**Done notes:** `ProjectView` cluster list gained a `.cluster-list-controls`
+toolbar: a label text filter, a sort select (Size / Sentiment / Cohesion / Name —
+nulls sort last for sentiment/cohesion), and a "Jump to…" select that sets
+`highlightedClusterId` (reusing the existing scroll-into-view effect). Derived via a
+memoized `visibleClusters`; card colors stay keyed by cluster id so reordering never
+recolors points, and merge-target `otherClusters` still uses the full list.
+
+`ProjectView.tsx:288` renders clusters in a fixed order. Add sort (size /
+sentiment / cohesion), a text filter, and jump-to-card.
+
+## R10 — Junk "cannot be undone" + inline undo toast (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** F7
+
+**Done notes:** Junk confirm now ends with "This cannot be undone." New app-wide
+toast store `src/frontend/src/toast.tsx` (module-level + `useSyncExternalStore`, no
+provider) with `showToast({message, actionLabel, onAction})` + a `<Toaster />`
+mounted at the app root (`main.tsx`), auto-dismiss 7s. Shared `src/frontend/src/
+undo.ts` captures each moved doc's prior cluster (`captureClusters` — `clusterId`
+for a scoped table, else the embeddings cache) and `toastReassign` shows "Moved N
+documents · Undo" that bulk-moves them back per original cluster. Wired into single
++ bulk reassign in `DocumentsTable` and the lasso bulk reassign in `ProjectView`;
+rename shows "Renamed to … · Undo" (restores the previous label). Non-reversible
+edits (merge / junk / create-from-selection) intentionally get no undo. `tsc` clean.
+
+The junk confirm (`ProjectView.tsx:301`) doesn't warn it's irreversible (merge/junk
+aren't undoable in F7). Add "This cannot be undone" to the confirm, and an inline
+**undo** toast after each reversible edit.
+
+## R11 — UMAP caveat on both maps (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** `ProjectView` shows a `.plot-caveat` line under the scatter ("UMAP
+projection — distances and gaps between clusters aren't metric…"); `DeckDashboard`'s
+map caption now reads "UMAP x/y · distances aren't metric".
+
+Add a caveat near both maps (`DeckDashboard.tsx:39`, `ProjectView.tsx:234`) that
+UMAP distances/gaps are not metric — cluster *separation* on the map is not a
+reliable measure of semantic distance.
+
+## R12 — Document-row → cluster link + total "of N" pager (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** R16
+
+**Done notes:** Done together with R16 (shared `DocumentsTable` + the new count
+endpoint). Project-wide view (`!clusterId`) gains a **Cluster** column linking each
+row to `/projects/{id}/clusters/{cluster_id}` (noise rows show an italic "noise");
+hidden in the cluster-scoped view where it'd be redundant. Pager shows "Showing a–b
+of N" from the real total.
+
+In `DocumentsTable.tsx`: link each row to its cluster, and show the total document
+count ("of N") in the pager (`DocumentsTable.tsx:135`) instead of just the current
+range.
+
+## R13 — Resolve Atlas vs Projects two-home ambiguity (P2)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** Chose the low-risk "pick a primary" path over the WebGL rewrite.
+Nav labels disambiguated: "Classic"→**Projects** (primary home), "Spatial"→**Atlas
+overview** (secondary). `DeckDashboard` reframed as a "Read-only overview" whose
+hero + panel link send users to Projects "for the full workspace — editing,
+documents, and the detailed Plotly view", so the Atlas no longer reads as a
+competing home. **Alternative not taken:** porting the Atlas's DOM point cloud to
+WebGL/Plotly to make it a co-equal renderer — larger effort, left as a follow-up if
+the Atlas should become a primary surface.
+
+Two competing homes (Deck "Atlas" vs Projects) with the Atlas as the weaker
+DOM-based renderer (`DeckDashboard.tsx:130`). Either resolve the ambiguity (pick a
+primary) or move the Atlas onto WebGL/Plotly.
+
+## R14 — Cluster legend + colorblind palette + focus states (P2)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** R1
+
+**Done notes:** Colorblind-safe palette already landed in R1 (Okabe–Ito in
+`colors.ts`). Added a `.plot-legend` under the `ProjectView` scatter: one
+keyboard-focusable `<button>` per cluster (swatch via `clusterColor(clusterIndex)` +
+label, `aria-pressed`) that toggles `highlightedClusterId`, plus a static noise
+swatch. `:focus-visible` outline on each item. Note: Plotly canvas points aren't
+individually DOM-focusable, so the legend is the keyboard-accessible path to
+highlight a cluster (color → cluster mapping + focus states in one control).
+
+Add a legend (color → cluster), switch to a colorblind-safe palette
+(`ProjectView.tsx:25`), and add focus/keyboard states on points.
+
+## R15 — Clamp sample_docs + word-cloud with "show more" (P2)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** `ClusterCard` gained an `expanded` toggle: collapsed shows one
+sample quote (CSS `-webkit-line-clamp:3` via `blockquote.clamped`) and a 10-word
+cloud; "Show more" reveals all sample docs and a 24-word cloud. The toggle only
+renders when there's more to show (`>1` sample or `>10` words). `.card-show-more`
+CSS added.
+
+Cards can grow unbounded (`ProjectView.tsx:354`). Clamp `sample_docs` and
+word-cloud length on the card with a "show more" toggle.
+
+## R16 — Fix phantom empty "Next" page (P2)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none
+
+**Done notes:** New `GET /{project_id}/documents/count?cluster_id=` endpoint
+(`DocumentCount{total}`, declared **before** `/documents/{document_id}` so "count"
+isn't matched as a doc id) + `api.documentsCount`. `DocumentsTable` queries it;
+`hasNext = offset + rows.length < total` (falls back to the old page-full heuristic
+only while the count loads), so "Next" no longer offers an empty page when the total
+is an exact multiple of `PAGE_SIZE`.
+
+`hasNext = rows.length === PAGE_SIZE` (`DocumentsTable.tsx:72`) shows a "Next" that
+leads to an empty page when the total is an exact multiple of `PAGE_SIZE`. Use a
+real total count (pairs with R12).
+
+## R17 — Project-level clustering-quality panel (P1)
+**Status:** ✅ Done (2026-06-28) · **Prereqs:** none (real-mode runs only)
+
+**Done notes:** Persisted `Project.metrics` (JSONB) + `Project.metrics_run_at` —
+migration `0005_project_metrics` (verified live up/down/up). `run_ml_pipeline` now
+captures `result.metrics` into the project on the ready commit (`None` when the run
+has no metrics, e.g. simulated). New `GET /{project_id}/metrics` →
+`ProjectMetricsRead{metrics, computed_at, stale}` where `stale` = the latest
+`ClusterEdit` postdates `metrics_run_at`. Frontend: `api.projectMetrics` + types and
+a collapsible `ui/MetricsPanel.tsx` on `ProjectView` (lazy-fetch on open) that
+labels the known keys (silhouette excl/incl noise, Davies–Bouldin,
+Calinski–Harabasz, C_v coherence, rating entropy, n_clusters, noise fraction),
+formats numbers, shows a stale warning, carries the harness honesty caveat
+(instruction-tuned embeddings inflate silhouette; excl-noise = the easy remainder),
+and shows a "only for real, non-simulated runs" message when metrics are null. No
+metrics fabricated in sim mode. Backend 64 pass; `tsc` clean.
+
+**Deviations:** Surfaced via a dedicated `GET /metrics` (not on `ProjectRead`) so the
+project list stays lean; staleness is a computed flag (no recompute of run-level
+metrics on edit, as planned).
+
+**Why:** In real mode (`SIMULATE_ML=false`) the pipeline already computes a rich,
+three-tier quality report — silhouette (noise-incl **and** noise-excl),
+Davies–Bouldin, Calinski–Harabasz, C_v topic coherence, rating entropy,
+`n_clusters`, noise fraction — into `RunResult.metrics` (see
+`reviewscope_ml/core/metrics.py` + `eval/harness.py`). The app **drops it on the
+floor**: `ml_pipeline.run_ml_pipeline` / `ml_mapping` never read `result.metrics`,
+so none of it is persisted or shown. These are already-paid-for signals the user
+never sees. Distinct from R4 cohesion, which is *per-cluster* and incremental; these
+are *whole-partition*, *run-level*, and only meaningful for a real (non-simulated)
+run — and go stale after manual edits.
+
+**Do:**
+1. **Capture + persist.** In `run_ml_pipeline`, after `persist_run_result`, read
+   `result.metrics` and store it. Cheapest: a `Project.metrics` JSONB column (+
+   migration `0005_*`) holding the dict verbatim, plus a `metrics_run_at` timestamp
+   so the UI can flag "computed before your N edits". (A separate `run_metrics`
+   table is overkill until run history exists.) Simulated runs have no real
+   geometry, so persist `null`/`{}` in sim mode — do **not** fabricate numbers.
+2. **Expose.** Add the metrics to the project read schema (`ProjectRead` or a
+   dedicated `GET /{project_id}/metrics`), nullable. Add the type + `api.metrics()`
+   to `api.ts`.
+3. **Surface.** A "Clustering quality" panel on `ProjectView` (collapsible, like
+   `EditHistory`): show silhouette (both variants), coherence, rating entropy,
+   n_clusters, noise %. **Carry the harness's own caveats** as helper text —
+   instruction-tuned embeddings inflate silhouette mechanically, so read it
+   alongside coherence (this is documented verbatim in `embed/models.py` and
+   `eval/model_sweep.py`); silhouette excl-noise is "computed on the easy
+   remainder". Hide the panel (or show "not available for simulated runs") when
+   metrics are null.
+4. **Staleness.** If `metrics_run_at` predates the latest `ClusterEdit`, badge the
+   panel "reflects the original run, not your edits" — these are not recomputed by
+   B2 (whole-partition silhouette would need every point on every edit; out of
+   scope).
+
+**Acceptance:** a real run shows silhouette/coherence/entropy/n_clusters with their
+caveats; a simulated run hides the panel (no fabricated metrics); the panel badges
+itself stale after an edit.
+
+**Reference:** `reviewscope_ml/core/metrics.py` (`compute_metrics`,
+`compute_coherence`, `compute_rating_entropy`), `eval/harness.py`
+(`_silhouette_incl_noise`, three-tier framing), and the honesty notes in
+`embed/models.py` / `eval/model_sweep.py`.
+
+---
+
+## Suggested build order (matches gap-doc §6)
+1. **B1 → B2 → B3 → B4** (backend mutation core), then **B5**, **B7**.
+2. **F0**, then **F5 + F6** (editing MVP), **F4**, **F2**.
+3. **F1** (real hover), **F3** (word cloud / stars / distribution).
+4. **B6** (re-run survival), **F7** (undo/history), **F8/F9** (spec fills).
+5. **Group T** (trust + export + scale) last.
+
+> **Open question for the team (from the gap doc):** should app edits also write
+> the ML `feedback/` JSONL contract, or only the `cluster_edits` table?
+> Recommendation: **DB table for the app (B1), plus a JSONL exporter** so the app
+> and notebook tooling stay reconcilable.
