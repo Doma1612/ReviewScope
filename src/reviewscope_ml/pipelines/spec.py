@@ -31,9 +31,19 @@ VARIANTS = (
     "bertopic", "custom_hdbscan", "flat_agglomerative", "two_stage", "sentence_level",
 )
 
-# Notebook 04 decision (5k hotel benchmark): mpnet without instruction beat the
-# instruction-tuned candidates once coherence/entropy were taken into account.
+# Notebook 04 decision (5k hotel benchmark, DOCUMENT unit): mpnet without
+# instruction beat the instruction-tuned candidates once coherence/entropy were
+# taken into account. This stays the document-unit default — the 2026-08
+# re-selection was run on segments and does not license re-deciding the
+# document variants, which are out of its scope.
 DEFAULT_EMBEDDING = "sentence-transformers/all-mpnet-base-v2"
+
+# 2026-08 sentence/mention-unit decision (docs/technology-selection.md): across
+# 12 contestants on 43,012 segments, MiniLM-L6-v2 won the mean rank across all
+# three tiers AND cost ~10x less than the runner-up (3,413 vs 341 segments/s,
+# 498 vs 2,337 MB peak VRAM). Short single-aspect spans are its regime; the
+# larger models' advantages (long context, general MTEB rank) did not transfer.
+SENTENCE_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
 # Notebook 05 decision: UMAP 10d, nn=15, min_dist=0.0, cosine.
 DEFAULT_REDUCER: dict[str, Any] = {
     "n_components": 10,
@@ -92,6 +102,7 @@ def default_specs() -> dict[str, PipelineSpec]:
         ),
         "sentence_level": PipelineSpec(
             variant="sentence_level",
+            embedding_model=SENTENCE_EMBEDDING,
             cluster={"min_cluster_size": "auto", "min_samples": "auto"},
         ),
     }
