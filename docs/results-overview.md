@@ -118,17 +118,44 @@ runs from caches (used to backfill sentiment).
 
 ## 4. Open items (the honest to-do list)
 
-- [ ] **Document-level model sweep** (`model_sweep --sample-size 5000 --device cuda`)
-- [ ] **Resume the 50k comparison** (command in §2.5)
+Updated 2026-08-08 after the WP5 technology-selection re-run
+(`docs/technology-selection.md`).
+
+- [x] **Sentence-level embedding selection re-run** — 12 contestants,
+      verified constraints, measured cost, multi-seed stability on the
+      finalists. Winner: `all-MiniLM-L6-v2` (no instruction).
+- [x] **GPU tier run** — closes one of methodology §3's three weaknesses.
+- [x] **Ollama up + labeler scored** — nb08's never-completed experiment;
+      5 models x 2 prompts, with a mention-level prompt variant.
+- [x] **Confirm the finalists at 50k** — done 2026-08-08, 454,493 segments,
+      ~48 min on an idle box. **The margin did not reproduce**: MiniLM and
+      arctic tie on mean rank at 50k and the decision now rests on cost, not
+      quality. Some head-to-head geometry margins flipped sign with scale.
+      See technology-selection §6b.
 - [ ] **Human inspection of the sentence finalists** → sign-off in the app
-- [ ] Ollama labeling — all labels are still `terms_fallback`; start
-      `ollama serve` + pull a model before the next big run (or `--force`
-      relabel afterwards)
-- [ ] EmbeddingGemma: `hf auth login` + license, then re-run the sweep
-- [ ] Category-leak decision (hotel-only filter?) before 50k numbers reach
-      any presentation
+      (sidebar → "Model selection"; records a `confirm_model` action).
+- [ ] **Human label scoring** — the oldest open item in the project, inherited
+      from nb08. Blind multi-reviewer scoring now lives in the app (sidebar →
+      "Label scoring"); nothing has been scored yet, so **every labeler claim
+      is an automatic-metric claim**. Needs ≥2 reviewers for the agreement
+      number to exist at all.
+- [ ] **Multi-seed stability at 50k** — `--stability-seeds` was not passed on
+      the 50k run, so every ARI figure remains a 5k figure.
+- [ ] **Document-level model sweep** — still not run. Only needed if the
+      document-unit variants are revived; the application runs sentence unit.
+- [ ] EmbeddingGemma: still **blocked**. Logged in as `Dmnk-Mrtns`, but the
+      repo is `gated: manual` and access is not granted (403, was 401).
+      Accept the licence and wait for approval, then re-run the sweep.
+- [ ] Category-leak decision (hotel-only filter?) — **now due**: the 50k
+      numbers exist. Assessed as *not* changing the model ranking (all
+      candidates see the same corpus), but cluster 3 of the labeled output is
+      a Reno casino cluster, so any *inventory* of themes is wrong until the
+      corpus is filtered — see technology-selection §8.
 - [ ] Per-scale validation of the mcs auto-scaling (currently an anchored
       heuristic, see guide §6)
+- [ ] The DR referee is still calibrated on mpnet, the model it displaced —
+      the last of methodology §3's three weaknesses, and the only one the
+      re-run did not close. Needs a per-model DR sweep.
 
 Beyond these operational items, the gaps between "working pipeline" and
 "really good results" — ground truth, noise rescue, language/dup hygiene,

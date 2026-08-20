@@ -81,13 +81,27 @@ class TestRunProjectPipeline:
         indices = [i for i, _, _ in progress.events]
         assert indices == sorted(indices)
 
-    def test_sentence_level_is_rejected(self, small_run):
+    def test_sentence_level_is_accepted(self, monkeypatch, small_run):
+        # The sentence_level guard was removed deliberately when the segments
+        # table landed: mention-unit runs are the application's default shape,
+        # not an unsupported experiment. This test guards the removal so the
+        # guard cannot creep back in.
         corpus = corpus_for(small_run.doc_ids)
-        with pytest.raises(ValueError, match="sentence_level"):
-            service_mod.run_project_pipeline(
-                corpus=corpus, project_id="p1",
-                spec=PipelineSpec(variant="sentence_level"),
-            )
+        emb = np.arange(len(small_run.doc_ids) * 4, dtype=float).reshape(-1, 4)
+        seen_spec = {}
+
+        def fake_run_pipeline(cfg, spec, **kwargs):
+            seen_spec["variant"] = spec.variant
+            return small_run
+
+        monkeypatch.setattr(service_mod, "run_pipeline", fake_run_pipeline)
+        monkeypatch.setattr(service_mod, "load_run_embeddings", lambda *a, **k: emb)
+
+        service_mod.run_project_pipeline(
+            corpus=corpus, project_id="p1", label_clusters=False,
+            spec=PipelineSpec(variant="sentence_level"),
+        )
+        assert seen_spec["variant"] == "sentence_level"
 
     def test_empty_corpus_rejected(self):
         corpus = corpus_for([])
@@ -95,6 +109,26 @@ class TestRunProjectPipeline:
             service_mod.run_project_pipeline(corpus=corpus, project_id="p1")
 
 
-def test_default_spec_is_document_level():
+def test_default_spec_is_sentence_level():
+    # The application runs the mention-unit pipeline: a review maps to several
+    # clusters via its sentence mentions. Changing this changes the shape of
+    # every new project's data, so it is asserted rather than assumed.
     spec = app_default_spec()
-    assert spec.variant == "custom_hdbscan"
+    assert spec.variant == "sentence_level"
+
+
+def test_sentence_default_embedding_is_the_selected_model():
+    # docs/technology-selection.md: MiniLM-L6-v2 won the segment-unit sweep on
+    # both quality (mean rank) and cost (~10x throughput of the runner-up).
+    assert app_default_spec().embedding_model == "sentence-transformers/all-MiniLM-L6-v2"
+
+
+def test_document_variants_keep_their_own_selection():
+    # The segment-unit re-selection is scoped to the segment unit. The
+    # document-unit variants were decided separately (notebook 04) and must not
+    # be silently re-decided by a sweep that never evaluated them on documents.
+    from reviewscope_ml.pipelines.spec import default_specs
+
+    specs = default_specs()
+    for variant in ("custom_hdbscan", "flat_agglomerative", "two_stage"):
+        assert specs[variant].embedding_model == "sentence-transformers/all-mpnet-base-v2"

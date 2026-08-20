@@ -69,6 +69,19 @@ phantom "topics" — a known, unmitigated gap.
 
 ## 3. Embeddings
 
+> **Superseded for the sentence/mention unit (2026-08-08).** The application
+> runs `sentence_level`, and its embedding model was re-selected on the segment
+> unit against 12 contestants with verified constraints and measured cost:
+> **`all-MiniLM-L6-v2`, no instruction**. See `docs/technology-selection.md`
+> for the evidence, the trade-offs and an explicit statement of what the
+> evidence does not support. The section below records the original
+> *document-unit* decision and the weaknesses that motivated the re-run; the
+> first two are now closed, the third is closed for the segment unit only.
+>
+> Closed: the GPU tier has been run, and the cost column is now measured rather
+> than read off a cache hit. Still open: the referee (UMAP/HDBSCAN parameters)
+> is still the one calibrated on mpnet, so the circularity below persists.
+
 **Decision.** `all-mpnet-base-v2`, no instruction (notebook 04's comparison
 on the 5k benchmark; instruction variants and larger models cached and
 re-checkable).
@@ -89,9 +102,15 @@ the geometry improves, the topics don't.
   across the sweep grid; but a model that only shines under very different
   DR parameters would have been missed.
 - English-only model on an English-only benchmark; the multilingual question
-  (bge-m3, multilingual-e5) is deferred to WP9 with no evidence either way.
+  (bge-m3, multilingual-e5, arctic-embed-l-v2.0) is deferred to WP9. The
+  2026-08 sweep evaluated the multilingual candidates *on English mentions
+  only*, so it still provides no evidence either way on multilingual capacity.
 - GPU-tier models (instructor-xl, e5-mistral-7b) were never run — the
   comparison is honest only within the CPU tier until the GPU sweep happens.
+  **Closed for the segment unit**: the 2026-08 sweep ran on GPU across the
+  whole admissible registry up to 600M parameters. The 4B/7B instruction
+  embedders remain excluded by the 6 GB fp32 VRAM slice, which is a hardware
+  constraint rather than an untested gap.
 
 ## 4. Dimensionality reduction
 

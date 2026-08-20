@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -45,10 +46,50 @@ Representative reviews:
 Write a 2-3 sentence summary of what customers in this cluster are saying.
 Be specific and factual. Do not repeat the label."""
 
+# ── Mention-level variants (v2) ───────────────────────────────────────────────
+# The sentence_level pipeline hands the labeler *mentions*, not whole reviews:
+# single sentences about one aspect, so a cluster is far tighter and more
+# single-topic than a document cluster. v1 says "reviews" and asks what they
+# "have in common", which invites the model to hedge toward a generic theme that
+# covers a diverse document cluster — the wrong instinct when every member is
+# already one aspect. v2 names the unit, asks for the aspect itself, and forbids
+# the sentiment-only labels ("Great Experience") that short evaluative mentions
+# tempt a model into.
+LABEL_PROMPT_MENTION = """The following sentences are all taken from customer reviews of hotels. They were grouped together because they discuss the same specific aspect.
 
-def prompt_hash() -> str:
-    """Identifies the exact prompt pair used — stored next to every label."""
-    return hashlib.sha256((LABEL_PROMPT + SUMMARY_PROMPT).encode()).hexdigest()[:8]
+Sentences:
+{docs}
+
+Name the aspect these sentences are about, as a short noun phrase of 3-6 words.
+Describe the topic, not the opinion: write "Breakfast Buffet Quality", never "Guests Were Happy".
+Output the label only, with no explanation, quotes or trailing punctuation."""
+
+SUMMARY_PROMPT_MENTION = """The following sentences are customer review excerpts about: "{label}".
+
+Sentences:
+{docs}
+
+Write 2-3 sentences summarising what customers say about this aspect, including
+where they disagree. Be specific and factual. Do not repeat the label."""
+
+PROMPT_VARIANTS: dict[str, tuple[str, str]] = {
+    "v1": (LABEL_PROMPT, SUMMARY_PROMPT),
+    "v2_mention": (LABEL_PROMPT_MENTION, SUMMARY_PROMPT_MENTION),
+}
+
+
+def prompt_hash(
+    label_prompt: Optional[str] = None, summary_prompt: Optional[str] = None
+) -> str:
+    """Identifies the exact prompt pair used — stored next to every label.
+
+    Defaults to the v1 pair so existing artifacts keep their historical hash;
+    pass the prompts explicitly when using a variant, or the hash would claim a
+    provenance the text does not have.
+    """
+    label_prompt = LABEL_PROMPT if label_prompt is None else label_prompt
+    summary_prompt = SUMMARY_PROMPT if summary_prompt is None else summary_prompt
+    return hashlib.sha256((label_prompt + summary_prompt).encode()).hexdigest()[:8]
 
 
 @dataclass
@@ -82,10 +123,31 @@ def centroid_docs(
 @dataclass
 class OllamaLabeler:
     model: str = "llama3.2"
-    base_url: str = "http://localhost:11434"
+    base_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "OLLAMA_BASE_URL", "http://localhost:11434"
+        )
+    )
     n_docs: int = 5
     timeout_s: int = 120
+    # Prompt pair to use. "v1" is notebook 08's document-level pair (the
+    # historical default); "v2_mention" is the sentence/mention-level pair.
+    prompt_variant: str = "v1"
+    # None = leave the model's default (thinking models think); False = ask the
+    # server to disable reasoning. Labeling is a short structured-output task,
+    # so reasoning buys little and costs a lot of latency.
+    think: Optional[bool] = None
     _available: Optional[bool] = field(default=None, repr=False)
+
+    @property
+    def prompts(self) -> tuple[str, str]:
+        try:
+            return PROMPT_VARIANTS[self.prompt_variant]
+        except KeyError:
+            raise ValueError(
+                f"Unknown prompt_variant {self.prompt_variant!r}; "
+                f"known: {list(PROMPT_VARIANTS)}"
+            ) from None
 
     def available(self) -> bool:
         if self._available is None:
@@ -108,13 +170,25 @@ class OllamaLabeler:
     def _generate(self, prompt: str) -> str:
         import requests
 
+        payload: dict = {"model": self.model, "prompt": prompt, "stream": False}
+        if self.think is not None:
+            # Reasoning models (qwen3 and friends) think by default. For a
+            # 3-6 word label the reasoning is pure cost — it multiplies latency
+            # and its tokens can leak into the answer — so the labeler must be
+            # able to turn it off. Servers that do not know the field ignore it.
+            payload["think"] = self.think
         r = requests.post(
-            f"{self.base_url}/api/generate",
-            json={"model": self.model, "prompt": prompt, "stream": False},
-            timeout=self.timeout_s,
+            f"{self.base_url}/api/generate", json=payload, timeout=self.timeout_s,
         )
         r.raise_for_status()
-        return r.json()["response"].strip().strip('"')
+        body = r.json()
+        # When thinking is on, ollama returns reasoning in a separate field —
+        # but some builds inline it in <think> tags, which would otherwise be
+        # scored as part of the label.
+        text = body.get("response", "")
+        if "</think>" in text:
+            text = text.rsplit("</think>", 1)[1]
+        return text.strip().strip('"')
 
     def label_clusters(
         self,
@@ -133,22 +207,24 @@ class OllamaLabeler:
         if not use_llm:
             logger.warning("labeling %d clusters with term fallback (no LLM)", len(cluster_ids))
 
+        label_prompt, summary_prompt = self.prompts
+        phash = prompt_hash(label_prompt, summary_prompt)
         out: dict[int, ClusterLabel] = {}
         for cid in cluster_ids:
             if use_llm:
                 try:
                     docs = centroid_docs(cid, labels, texts, embeddings, n=self.n_docs)
                     doc_block = "\n\n".join(f"- {d}" for d in docs)
-                    label = self._generate(LABEL_PROMPT.format(docs=doc_block))
+                    label = self._generate(label_prompt.format(docs=doc_block))
                     summary = self._generate(
-                        SUMMARY_PROMPT.format(label=label, docs=doc_block)
+                        summary_prompt.format(label=label, docs=doc_block)
                     )
                     out[cid] = ClusterLabel(
                         cluster_id=cid,
                         label=label,
                         summary=summary,
                         source=f"ollama:{self.model}",
-                        prompt_hash=prompt_hash(),
+                        prompt_hash=phash,
                     )
                     continue
                 except Exception as e:
