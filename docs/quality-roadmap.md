@@ -57,9 +57,48 @@ Copy-paste reviews and multi-posts artificially densify regions and create
 phantom topics. PK-dedup (app spec) only catches exact re-uploads.
 **Fix:** MinHash/SimHash near-dup pass at ingest. **Effort:** small.
 
-### B7. Category leak (known, undecided)
-Hotels-tagged businesses include restaurants/bars. Decide hotel-only filter
-vs. documented acceptance **before** 50k numbers reach a presentation.
+### B7. Category leak (measured 2026-08-09, decision due)
+Yelp businesses carry several categories, so "tagged `Hotels`" is not "is a
+hotel". Measured against `business.json` (2,977 Hotels-tagged businesses):
+
+| co-tag | businesses | share |
+|---|---|---|
+| Restaurants | 287 | 9.6% |
+| Nightlife | 144 | 4.8% |
+| Bars | 118 | 4.0% |
+| Arts & Entertainment | 73 | 2.5% |
+| Casinos | 38 | **1.3%** |
+
+Business counts understate it badly, because the co-tagged venues are the big
+ones. By **review** volume: **40.2% of the 5k benchmark and 34.2% of the 50k
+benchmark** come from a business co-tagged with one of the above, and casinos
+alone — 1.3% of businesses — contribute **14.3% / 10.1% of reviews**. It shows
+in the output: cluster 3 of the labeled 5k run is a Reno casino cluster that 9
+of 10 labeler configurations named correctly.
+
+**Do not simply filter these businesses out.** A review of a casino hotel is
+usually still a hotel review — it talks about the room *and* the casino floor.
+Business-level exclusion would discard a third of the corpus along with a lot of
+legitimate lodging content, and it would silently change the corpus the whole
+selection was run on. The leak is at **mention** level; the filter available is
+at **business** level, and they do not line up.
+
+**Recommended, in order:**
+1. **Fix the claim, not the corpus** (free). The benchmark is "reviews of Yelp
+   businesses tagged Hotels", not "hotel reviews" — say so on every slide.
+   Nothing needs re-running and nothing measured becomes wrong.
+2. **Triage off-topic clusters in HITL** (already built). A casino cluster is a
+   correctly-found theme that is out of scope; `mark_junk` in the review app
+   records exactly that and `apply_feedback` drops it on the next run. This is
+   the mention-level fix, done by the people who are reviewing anyway.
+3. **Sensitivity check, then stop** (~20 min at 5k). Re-run the ranking on a
+   corpus with the leak categories excluded and confirm the model ordering is
+   unchanged. That converts technology-selection §8's *argument* that the leak
+   cannot bias a comparison every candidate faces identically into a
+   *measurement*. If the ordering does move, that is a finding worth more than
+   the filter was.
+
+Only build a filtered corpus as the default if step 3 shows the ranking moves.
 
 ## C. Method upgrades — where real quality jumps live
 
@@ -83,12 +122,20 @@ is user feedback the app will never show.
 instead of "discarded". **Effort:** moderate. **Best product-value per
 hour on this list.**
 
-### C11. The LLM labeling path is factually untested
-Every label so far is `terms_fallback`; not a single Ollama label has been
-generated, let alone evaluated. Named clusters are the product promise —
-this part is entirely outstanding. **Fix:** run Ollama labeling, then A2's
-structured scoring. Watch for near-identical labels on near-duplicate
-clusters (known LLM failure).
+### C11. The LLM labeling path — generated and auto-scored, not yet judged
+**Half closed (2026-08-08).** Ollama ran, 5 models × 2 prompts were scored on
+format compliance, discrimination@1 and hallucination over the 20 largest
+mention clusters (technology-selection §7); `terms_fallback` is no longer the
+only label the project has produced.
+
+**What remains is the half that matters:** all three metrics measure form, none
+measures usefulness, so no labeler has yet been shown to produce a label a
+*reader* benefits from. Blind multi-reviewer scoring is built (app → "Label
+scoring", `score_label` records, Krippendorff α over reviewers) and **nothing
+has been scored**. Until at least two people complete a pass, every labeler
+claim in the project is an automatic-metric claim.
+Still open from the original entry: watch for near-identical labels on
+near-duplicate clusters (known LLM failure) — B6 would reduce the cause.
 
 ## D. Stability — WP9b, honestly
 
