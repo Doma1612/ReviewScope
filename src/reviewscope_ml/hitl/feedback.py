@@ -21,6 +21,22 @@ Where humans are needed (and the action that captures each decision):
   boilerplate) rather than content.
 - **Run confirmation** (``confirm_run``): the recorded human sign-off that
   the winning pipeline's clusters are thematically coherent.
+- **Model confirmation** (``confirm_model``): the recorded human sign-off on a
+  *technology-selection* candidate — that a reviewer read the clusters a given
+  embedding model produces and not merely its metrics. Kept in the same
+  append-only trail as everything else so the selection rationale can cite a
+  reviewer and a timestamp rather than an assertion. Unlike the other actions
+  this one describes a candidate rather than a cluster, so ``apply_feedback``
+  ignores it — it is evidence, not a mutation.
+- **Label scoring** (``score_label``): one reviewer's 1-5 usefulness rating of
+  one candidate label for one cluster. The automatic labeler metrics measure
+  form (parses, discriminates, grounded in member text); none of them measures
+  whether the label *tells a reader what the cluster is about*. That judgement
+  only exists in a person, so it has to be recorded like any other human
+  decision. Like ``confirm_model`` this is evidence rather than a mutation and
+  ``apply_feedback`` ignores it — but unlike it, several reviewers are expected
+  to score the same labels independently, which is what makes disagreement
+  measurable instead of invisible.
 
 Application semantics on re-run live in ``apply_feedback.py``.
 """
@@ -40,6 +56,8 @@ ACTIONS = (
     "reassign_doc",
     "mark_junk",
     "confirm_run",
+    "confirm_model",
+    "score_label",
 )
 
 
@@ -57,10 +75,26 @@ class FeedbackRecord:
     doc_id: Optional[str] = None              # reassign_doc
     target_cluster_id: Optional[int] = None   # reassign_doc destination (-1 = noise)
     note: Optional[str] = None
+    # score_label. `label` is the scored string itself rather than a labeler
+    # name because identical labels from different models are one judgement:
+    # scoring the string keeps a reviewer from grading the same words twice and
+    # (more importantly) from grading them differently.
+    label: Optional[str] = None
+    score: Optional[int] = None               # 1-5 usefulness
 
     def __post_init__(self) -> None:
         if self.action not in ACTIONS:
             raise ValueError(f"Unknown action {self.action!r}; known: {ACTIONS}")
+        if self.action == "score_label":
+            # An out-of-range score would average into the per-labeler means
+            # silently, so it is rejected at the point of writing rather than
+            # discovered later in an aggregate nobody can reproduce.
+            if self.score is None or not 1 <= int(self.score) <= 5:
+                raise ValueError(
+                    f"score_label needs a score in 1-5, got {self.score!r}"
+                )
+            if not self.label:
+                raise ValueError("score_label needs the label it scored")
 
     def to_json(self) -> str:
         return json.dumps({k: v for k, v in asdict(self).items() if v is not None})
