@@ -16,6 +16,7 @@ app's eight-step progress vocabulary.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -43,8 +44,16 @@ def run_from_upload(
     seed: int = 42,
     label_clusters: bool = True,
     min_text_len: int = 50,
+    label_prompt: str | None = None,
+    summary_prompt: str | None = None,
+    corpus_profile: str | None = None,
 ) -> RunResult:
     """Ingest an uploaded file and run the full pipeline -> persistence DTOs.
+
+    ``label_prompt`` / ``summary_prompt`` are the per-project prompt override:
+    supply both to replace the corpus profile's prompt for this project only.
+    The text is hashed into every cluster label (``ClusterInfo.prompt_hash``),
+    so a run stays traceable to the exact prompt that produced it.
 
     Raises :class:`~reviewscope_ml.app.ingest_upload.IngestError` if the file
     fails schema validation (the backend maps that to a 4xx + failed status).
@@ -61,6 +70,8 @@ def run_from_upload(
     return run_project_pipeline(
         corpus=corpus, project_id=project_id, progress=progress, spec=spec,
         device=device, seed=seed, label_clusters=label_clusters,
+        label_prompt=label_prompt, summary_prompt=summary_prompt,
+        corpus_profile=corpus_profile,
     )
 
 
@@ -73,10 +84,24 @@ def run_project_pipeline(
     device: str = "cpu",
     seed: int = 42,
     label_clusters: bool = True,
+    label_prompt: str | None = None,
+    summary_prompt: str | None = None,
+    corpus_profile: str | None = None,
 ) -> RunResult:
     """Run the frozen pipeline on an already-ingested corpus -> persistence DTOs."""
     progress = progress or NullProgress()
     spec = spec or app_default_spec()
+    # Per-project prompt override. Only applied when BOTH texts are supplied:
+    # a label prompt paired with a mismatched summary prompt is worse than the
+    # profile default, so a half-filled override is ignored rather than merged.
+    if label_prompt and summary_prompt:
+        spec = replace(spec, label_prompt=label_prompt, summary_prompt=summary_prompt)
+    # Which corpus the prompts and embedding instruction should describe. A
+    # project's own slug is ``proj-<id>``, which resolves to NEUTRAL ("documents"),
+    # so without this every upload is described to the LLM as a generic document
+    # set regardless of what it holds.
+    if corpus_profile:
+        spec = replace(spec, corpus_profile=corpus_profile)
     if corpus.n_documents == 0:
         raise ValueError("no documents to cluster after preprocessing")
 

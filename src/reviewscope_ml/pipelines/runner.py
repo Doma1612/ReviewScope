@@ -108,6 +108,7 @@ def run_pipeline(
         units = reviews
 
     monitor = StageMonitor(on_stage=on_stage)
+    profile = run_profile(cfg, spec)
 
     # ── Embed (cached; model released immediately after) ──────────────────
     with monitor.stage("embed"):
@@ -118,6 +119,7 @@ def run_pipeline(
             device=cfg.apply_runtime_limits(),
             batch_size=batch,
             max_seq=seq_cap,
+            instructions=profile.instructions,
         )
         try:
             embeddings, embed_s = embed_with_cache(
@@ -175,7 +177,18 @@ def run_pipeline(
     # ── Label ─────────────────────────────────────────────────────────────
     with monitor.stage("label"):
         if label_clusters:
-            labeler = OllamaLabeler(model=spec.label_model)
+            # The corpus profile picks the prompt unless the spec pins one.
+            # Before this, OllamaLabeler was constructed without a variant and
+            # silently fell back to "v1" — the DOCUMENT prompt — even for
+            # sentence-level runs, making "v2_mention" unreachable from the
+            # pipeline. The unit and the prompt must agree.
+            labeler = OllamaLabeler(
+                model=spec.label_model,
+                prompt_variant=spec.prompt_variant or profile.label_prompt_variant,
+                domain_description=profile.domain_description,
+                label_prompt_override=spec.label_prompt,
+                summary_prompt_override=spec.summary_prompt,
+            )
             cluster_labels = labeler.label_clusters(
                 units.texts, labels, embeddings, top_terms
             )
@@ -329,6 +342,7 @@ def cluster_labels_only(
         device=cfg.apply_runtime_limits(),
         batch_size=batch,
         max_seq=seq_cap,
+        instructions=run_profile(cfg, spec).instructions,
     )
     try:
         embeddings, _ = embed_with_cache(
@@ -357,6 +371,22 @@ def cluster_labels_only(
 
 
 # ── Variant internals ─────────────────────────────────────────────────────────
+
+def run_profile(cfg: PipelineConfig, spec: PipelineSpec):
+    """The :class:`~reviewscope_ml.core.corpus.CorpusProfile` governing a run.
+
+    ``spec.corpus_profile`` wins because the application cannot express its
+    corpus in ``cfg``: a project's slug is its own ``proj-<id>``. Falling back
+    to the slug keeps the research harness — whose filenames *are* the corpus
+    identity — behaving exactly as before.
+
+    This is the only place the profile is resolved, so the embedding
+    instruction and the label prompt can never come from different corpora.
+    """
+    from ..core.corpus import profile_for
+
+    return profile_for(spec.corpus_profile or cfg.corpus_slug)
+
 
 def _corpus_prefix(cfg: PipelineConfig) -> str:
     """Cache namespace per corpus; hotels (the original benchmark) stays bare."""

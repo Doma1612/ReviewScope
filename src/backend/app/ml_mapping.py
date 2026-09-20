@@ -72,6 +72,31 @@ def _first_named(cols: list[dict[str, Any]], hints: tuple[str, ...]) -> str | No
     return None
 
 
+def corpus_profile_for(source_filename: str | None) -> str | None:
+    """Registered corpus profile named by an uploaded file's name, if any.
+
+    The ML seam keys its corpus-facing texts — the embedding instruction table
+    and the LLM label prompt's domain description — on a profile slug. A project
+    cannot supply one: its cache slug is its own ``proj-<id>``, which resolves to
+    the neutral profile and describes any upload as "documents".
+
+    Until ``projects`` carries an explicit column, the uploaded filename is the
+    only corpus identity the backend holds, so a benchmark file named after a
+    registered corpus (``sample_europarl-en_26391.jsonl``) is matched against the
+    registry. Longest slug first, so a more specific corpus wins over a prefix of
+    it. An ordinary user upload matches nothing and returns None, which leaves
+    the neutral profile in place — the correct answer for an unknown corpus.
+    """
+    if not source_filename:
+        return None
+    from reviewscope_ml.core.corpus import PROFILES
+
+    for slug in sorted((s for s in PROFILES if s), key=len, reverse=True):
+        if slug in source_filename:
+            return slug
+    return None
+
+
 def build_upload_schema(columns: list[dict[str, Any]]):
     """Build the seam's ``UploadSchema`` from stored ``project_schema.columns``.
 

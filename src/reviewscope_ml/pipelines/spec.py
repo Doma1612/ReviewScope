@@ -25,7 +25,7 @@ e. ``sentence_level``     — reviews are split into sentences before embedding;
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 VARIANTS = (
     "bertopic", "custom_hdbscan", "flat_agglomerative", "two_stage", "sentence_level",
@@ -61,6 +61,22 @@ class PipelineSpec:
     reducer: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_REDUCER))
     cluster: dict[str, Any] = field(default_factory=dict)
     label_model: str = "llama3.2"
+    # Which label prompt to use. None = take the corpus profile's choice
+    # (core.corpus), which is the normal path; set it explicitly only to pin a
+    # variant, as eval.label_sweep does when A/B-ing prompts.
+    prompt_variant: Optional[str] = None
+    # Per-project free-text prompts from the application layer. Both must be
+    # set together and they override prompt_variant entirely.
+    label_prompt: Optional[str] = None
+    summary_prompt: Optional[str] = None
+    # Which corpus profile (core.corpus) supplies the corpus-facing texts: the
+    # embedding-instruction table, the label prompt variant and the domain
+    # description. None = derive it from the benchmark filename
+    # (``cfg.corpus_slug``), which is correct for the research harness.
+    # The application must set it explicitly: every project's slug is its own
+    # ``proj-<id>``, which resolves to NEUTRAL and so describes a corpus of
+    # "documents" no matter what was uploaded.
+    corpus_profile: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.variant not in VARIANTS:

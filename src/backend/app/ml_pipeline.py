@@ -16,7 +16,13 @@ from sqlalchemy import select, update
 
 from app.core.config import get_settings
 from app.db.session import SyncSessionLocal
-from app.ml_mapping import STEP_ORDER, DbProgressSink, build_upload_schema, persist_run_result
+from app.ml_mapping import (
+    STEP_ORDER,
+    DbProgressSink,
+    build_upload_schema,
+    corpus_profile_for,
+    persist_run_result,
+)
 from app.models import PipelineJob, PipelineStepStatus, Project, ProjectSchema, ProjectStatus
 from app.services.replay import replay_edits, snapshot_membership
 from app.worker import celery_app
@@ -32,6 +38,7 @@ def run_ml_pipeline(project_id: str) -> None:
         if not project or not project.upload_path:
             return
         upload_path = project.upload_path
+        source_filename = project.source_filename
         schema_row = session.get(ProjectSchema, pid)
         columns = list(schema_row.columns) if schema_row else []
         _ensure_jobs(session, pid)
@@ -52,6 +59,7 @@ def run_ml_pipeline(project_id: str) -> None:
                 progress=sink,
                 device=settings.ml_device,
                 label_clusters=True,
+                corpus_profile=corpus_profile_for(source_filename),
             )
         except IngestError as exc:
             _fail(pid, "; ".join(exc.errors) if getattr(exc, "errors", None) else str(exc))
