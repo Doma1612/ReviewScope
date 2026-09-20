@@ -72,10 +72,73 @@ Sentences:
 Write 2-3 sentences summarising what customers say about this aspect, including
 where they disagree. Be specific and factual. Do not repeat the label."""
 
+# ── Domain-neutral variant ────────────────────────────────────────────────────
+# v1 and v2_mention hard-code "customer reviews" and "customers"; applied to a
+# parliamentary debate they ask the model to frame legislation as consumer
+# feedback. This pair keeps v2's proven structure — name the unit, ask for the
+# aspect, forbid sentiment-only labels — and takes the domain as a parameter
+# instead of baking one in. ``{domain}`` is substituted from the corpus
+# profile's ``domain_description`` BEFORE the ``{docs}`` substitution; see
+# ``resolve_prompts``.
+LABEL_PROMPT_NEUTRAL = """The following excerpts are all taken from {domain}. They were grouped together because they discuss the same specific topic.
+
+Excerpts:
+{docs}
+
+Name the topic these excerpts are about, as a short noun phrase of 3-6 words.
+Describe the subject matter, not the stance: write "Fisheries Quota Enforcement", never "Speakers Were Critical".
+Output the label only, with no explanation, quotes or trailing punctuation."""
+
+SUMMARY_PROMPT_NEUTRAL = """The following excerpts are taken from {domain}, on the topic: "{label}".
+
+Excerpts:
+{docs}
+
+Write 2-3 sentences summarising what is said about this topic, including where
+the excerpts disagree. Be specific and factual. Do not repeat the label."""
+
 PROMPT_VARIANTS: dict[str, tuple[str, str]] = {
     "v1": (LABEL_PROMPT, SUMMARY_PROMPT),
     "v2_mention": (LABEL_PROMPT_MENTION, SUMMARY_PROMPT_MENTION),
+    "neutral": (LABEL_PROMPT_NEUTRAL, SUMMARY_PROMPT_NEUTRAL),
 }
+
+
+def resolve_prompts(
+    variant: str = "v1",
+    domain_description: str = "documents",
+    label_prompt: Optional[str] = None,
+    summary_prompt: Optional[str] = None,
+) -> tuple[str, str]:
+    """Return the (label, summary) prompt pair actually to be used.
+
+    Resolution order, narrowest first:
+
+    1. ``label_prompt`` / ``summary_prompt`` — a free-text override supplied per
+       project by the application. Always wins; it is what "configurable from
+       the backend" means. Passed through ``prompt_hash`` like any other pair,
+       so an artifact still records exactly which text produced it.
+    2. ``variant`` — a named entry in :data:`PROMPT_VARIANTS`. This is the path
+       the research harness sweeps over (``eval.label_sweep``), which only works
+       because the variants are a closed, named set.
+
+    ``{domain}`` in a template is filled from *domain_description* here, so the
+    caller's later ``.format(docs=...)`` sees a template with only the
+    placeholders it supplies.
+    """
+    if label_prompt is not None and summary_prompt is not None:
+        pair = (label_prompt, summary_prompt)
+    else:
+        try:
+            pair = PROMPT_VARIANTS[variant]
+        except KeyError:
+            raise ValueError(
+                f"Unknown prompt_variant {variant!r}; "
+                f"known: {list(PROMPT_VARIANTS)}"
+            ) from None
+    # str.replace, not str.format: the templates also contain {docs} and
+    # {label}, which must survive untouched for the caller to substitute.
+    return tuple(t.replace("{domain}", domain_description) for t in pair)
 
 
 def prompt_hash(
@@ -131,8 +194,18 @@ class OllamaLabeler:
     n_docs: int = 5
     timeout_s: int = 120
     # Prompt pair to use. "v1" is notebook 08's document-level pair (the
-    # historical default); "v2_mention" is the sentence/mention-level pair.
+    # historical default); "v2_mention" is the hotel sentence/mention pair;
+    # "neutral" is the domain-parameterised pair used by every other corpus.
     prompt_variant: str = "v1"
+    # Corpus description substituted into a {domain} placeholder, from
+    # CorpusProfile.domain_description. Ignored by variants without one.
+    domain_description: str = "documents"
+    # Free-text override supplied per project by the application layer. Both
+    # must be set together; they win over prompt_variant entirely. This is the
+    # "configurable from the backend" path — provenance is preserved because
+    # the resulting text is hashed into every label like any other pair.
+    label_prompt_override: Optional[str] = None
+    summary_prompt_override: Optional[str] = None
     # None = leave the model's default (thinking models think); False = ask the
     # server to disable reasoning. Labeling is a short structured-output task,
     # so reasoning buys little and costs a lot of latency.
@@ -141,13 +214,12 @@ class OllamaLabeler:
 
     @property
     def prompts(self) -> tuple[str, str]:
-        try:
-            return PROMPT_VARIANTS[self.prompt_variant]
-        except KeyError:
-            raise ValueError(
-                f"Unknown prompt_variant {self.prompt_variant!r}; "
-                f"known: {list(PROMPT_VARIANTS)}"
-            ) from None
+        return resolve_prompts(
+            variant=self.prompt_variant,
+            domain_description=self.domain_description,
+            label_prompt=self.label_prompt_override,
+            summary_prompt=self.summary_prompt_override,
+        )
 
     def available(self) -> bool:
         if self._available is None:

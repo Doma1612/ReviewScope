@@ -69,6 +69,7 @@ def probe_model(
     batch_size: int = 64,
     max_seq: Optional[int] = None,
     vram_fraction: Optional[float] = None,
+    instructions: Optional[dict[str, Optional[str]]] = None,
 ) -> ProbeResult:
     """
     Load *model_name* under the hard constraints and measure one encode.
@@ -98,6 +99,7 @@ def probe_model(
     embedder = SentenceTransformerEmbedder(
         model_name, instruction=instruction, device=device,
         batch_size=batch_size, show_progress=False, max_seq=max_seq,
+        instructions=instructions,
     )
     # Pin to one device: the embedder fans out across every visible CUDA device,
     # which would make throughput depend on how many GPUs were idle, not on the

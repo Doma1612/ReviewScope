@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..core.config import PipelineConfig
+from ..core.corpus import profile_for
 from ..data.ingest import load_benchmark
 from ..embed import SentenceTransformerEmbedder, embed_with_cache
 from ..embed.models import CANDIDATES, EmbeddingCandidate, candidates
@@ -132,6 +133,9 @@ def _evaluate_one(
 ) -> dict:
     """One (candidate, instruction) contestant end to end."""
     logger.info("=== %s (%dM, instr=%s) ===", cand.model, cand.params_m, instr)
+    # Instruction TEXT is corpus-specific ("Represent the hotel review…" would
+    # actively mislead on a parliamentary corpus); the slug that names it is not.
+    profile = profile_for(cfg.corpus_slug)
     spec = PipelineSpec(
         variant="sentence_level" if sentence_level else "custom_hdbscan",
         embedding_model=cand.model,
@@ -148,6 +152,7 @@ def _evaluate_one(
         probe = probe_model(
             cand.model, probe_set, instruction=instr, device=device,
             batch_size=cand.batch_hint, max_seq=cand.encode_seq,
+            instructions=profile.instructions,
         )
         if not probe.admissible:
             logger.warning("SKIPPING %s (%s): failed cost probe", cand.model, instr)
@@ -158,6 +163,7 @@ def _evaluate_one(
         cand.model, instruction=instr, device=device,
         batch_size=min(cfg.batch_size, cand.batch_hint),
         max_seq=cand.encode_seq,
+        instructions=profile.instructions,
     )
     try:
         embeddings, embed_s = embed_with_cache(
@@ -250,20 +256,30 @@ def _log_row(cfg, cand, instr, dim, embed_s, metrics) -> None:
     })
 
 
-def _mean_ranks(scored: list[dict]) -> None:
+def _mean_ranks(scored: list[dict]) -> list[str]:
     """Attach ``_mean_rank`` to each row: mean position across RANK_METRICS.
 
-    Ranked by identity, not equality — two contestants can produce identical
-    metric dicts, and ``list.index`` would then score both as the first one.
+    Returns the metrics that actually contributed, so the report can state
+    what the ranking was computed from instead of implying all four.
+
+    A metric **no** contestant has is skipped entirely rather than scored as a
+    tie at last place. Rating entropy is None for every row on a corpus with no
+    ratings (Europarl); ranking every row equally last on it would add the same
+    constant to every mean and dilute the three metrics that do discriminate,
+    while leaving a `mean rank` column that is not comparable to a sweep where
+    Tier 3 was available.
     """
-    for metric in RANK_METRICS:
+    used = [m for m in RANK_METRICS if any(r.get(m) is not None for r in scored)]
+    for metric in used:
         have = [r for r in scored if r.get(metric) is not None]
         order = sorted(have, key=lambda r: r[metric], reverse=True)
         position = {id(r): i + 1 for i, r in enumerate(order)}
         for r in scored:
             r.setdefault("_ranks", []).append(position.get(id(r), len(scored)))
     for r in scored:
-        r["_mean_rank"] = round(sum(r["_ranks"]) / len(r["_ranks"]), 2)
+        ranks = r.get("_ranks") or []
+        r["_mean_rank"] = round(sum(ranks) / len(ranks), 2) if ranks else None
+    return used
 
 
 def _render(
@@ -276,8 +292,9 @@ def _render(
         return f"{v:.{nd}f}" if isinstance(v, float) else str(v)
 
     scored = [r for r in rows if "error" not in r]
-    _mean_ranks(scored)
-    scored.sort(key=lambda r: r["_mean_rank"])
+    ranked_on = _mean_ranks(scored)
+    has_entropy = "rating_entropy" in ranked_on
+    scored.sort(key=lambda r: (r["_mean_rank"] is None, r["_mean_rank"]))
 
     from ..data.segment import MAX_CHARS, MIN_CHARS
 
@@ -286,12 +303,12 @@ def _render(
         if sentence_level else " · unit: whole reviews"
     )
     lines = [
-        f"# Embedding model sweep — {cfg.sample_size:,} reviews (`{cfg.data_file}`){unit_note}",
+        f"# Embedding model sweep — {cfg.sample_size:,} documents (`{cfg.data_file}`){unit_note}",
         "",
         "## Provenance",
         "",
         f"- commit `{_git_commit()}` · generated {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
-        f"- corpus `{cfg.corpus_slug}` · {n_reviews:,} reviews"
+        f"- corpus `{cfg.corpus_slug}` · {n_reviews:,} documents"
         + (f" → {n_units:,} segments" if sentence_level else "")
         + f" · seed {cfg.seed} · device {cfg.device}",
     ]
@@ -314,7 +331,17 @@ def _render(
         "",
         "## Ranking",
         "",
-        "Mean rank across silhouette (excl./incl. noise), C_v, rating entropy.",
+        "Mean rank across " + ", ".join(f"`{m}`" for m in ranked_on) + ".",
+        "",
+        *(([] if has_entropy else [
+            "> **Tier 3 unavailable on this corpus.** It carries no rating column, so",
+            "> rating entropy is undefined and the ranking rests on Tier 1 + Tier 2",
+            "> alone. The sentiment-blob failure mode Tier 3 exists to detect is",
+            "> therefore NOT screened for here — read the qualitative inspection",
+            "> before trusting a winner, and do not compare these mean ranks with a",
+            "> sweep that had four metrics.",
+            "",
+        ])),
         "Shortlist only — confirm the winner with the full pipeline comparison and",
         "human inspection; instruction-tuned silhouette gains without coherence gains",
         "are geometry reshaping, not better topics.",
@@ -322,7 +349,8 @@ def _render(
     ]
 
     columns = ["#", "model", "params M", "instr", "mean rank", "clusters", "noise",
-               "sil (excl)", "sil (incl)", "C_v", "entropy", "texts/s",
+               "sil (excl)", "sil (incl)", "C_v",
+               *(["entropy"] if has_entropy else []), "texts/s",
                "peak VRAM MB"]
     if stability_seeds > 1:
         columns.append(f"ARI mean ({stability_seeds} seeds)")
@@ -337,8 +365,9 @@ def _render(
             f"| {fmt(r.get('_mean_rank'), 2)} "
             f"| {fmt(r.get('n_clusters'))} | {fmt(r.get('noise_ratio'))} "
             f"| {fmt(r.get('silhouette'))} | {fmt(r.get('silhouette_incl_noise'))} "
-            f"| {fmt(r.get('coherence_cv'))} | {fmt(r.get('rating_entropy'))} "
-            f"| {fmt(r.get('texts_per_s'), 1)} | {fmt(r.get('vram_peak_mb'), 0)} |"
+            f"| {fmt(r.get('coherence_cv'))} "
+            + (f"| {fmt(r.get('rating_entropy'))} " if has_entropy else "")
+            + f"| {fmt(r.get('texts_per_s'), 1)} | {fmt(r.get('vram_peak_mb'), 0)} |"
         )
         if stability_seeds > 1:
             cells += f" {fmt(r.get('ari_mean'))} |"

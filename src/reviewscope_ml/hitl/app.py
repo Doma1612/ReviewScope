@@ -16,6 +16,7 @@ is an entry point — never imported by pipeline code.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -29,6 +30,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from reviewscope_ml.core.config import load_config
+from reviewscope_ml.core.corpus import profile_for
 from reviewscope_ml.data.ingest import load_benchmark
 from reviewscope_ml.hitl.feedback import FeedbackRecord, append_record, session_file
 from reviewscope_ml.pipelines.artifacts import load_run, run_is_complete
@@ -58,20 +60,139 @@ def _load_unit_data(sample_size: int, data_file: str, unit: str):
 
 
 @st.cache_resource
-def _candidate_clusters(sample_size: int, model: str, instruction: str, sentence_level: bool):
+def _candidate_clusters(
+    sample_size: int,
+    model: str,
+    instruction: str,
+    sentence_level: bool,
+    data_file: str | None = None,
+):
     """Rebuild one candidate's clustering from the sweep's caches.
 
     Cheap because everything is cached by the sweep — no model is loaded and
     nothing is re-embedded; this reads the same arrays the ranking was computed
     from, so what the reviewer inspects IS what the table scored.
+
+    ``data_file`` chooses the corpus; omitting it keeps the hotels benchmark
+    that ``sample_size`` implies. It has to be passed whenever the report being
+    read is not a hotels report: ``build_clusters`` keys the embedding cache on
+    ``cfg.corpus_slug``, which is derived from this filename, so the default
+    quietly rebuilds *hotel* clusters underneath a Europarl ranking rather than
+    failing.
     """
     from reviewscope_ml.eval.label_sweep import build_clusters
     from reviewscope_ml.represent.terms import ctfidf_terms
 
-    cfg = load_config(sample_size=sample_size)
+    overrides: dict = {"sample_size": sample_size}
+    if data_file:
+        overrides["data_file"] = data_file
+    cfg = load_config(**overrides)
     units, embeddings, labels = build_clusters(cfg, model, instruction, sentence_level)
     terms = ctfidf_terms(units.texts, labels, top_n=10)
     return units, labels, terms
+
+
+def _benchmarks(cfg) -> list[tuple[str, str, int]]:
+    """Every benchmark sample on disk, as ``(data_file, corpus_slug, size)``.
+
+    Discovered rather than read off the corpus registry: a profile says how to
+    talk about a corpus, not which samples were actually built, and offering a
+    file that is not there costs the reviewer a stack trace.
+    """
+    found: list[tuple[str, str, int]] = []
+    for path in sorted(cfg.cache_dir.glob("sample_*.jsonl")):
+        stem = path.stem[len("sample_"):]
+        if "_" not in stem:
+            continue
+        # Same split as PipelineConfig.corpus_slug, so the slug shown here is
+        # the one the cache keys will actually use.
+        slug, size_token = stem.rsplit("_", 1)
+        try:
+            size = (
+                int(size_token[:-1]) * 1_000
+                if size_token.endswith("k")
+                else int(size_token)
+            )
+        except ValueError:
+            continue
+        found.append((path.name, slug, size))
+    return sorted(found, key=lambda b: (b[1], b[2]))
+
+
+def _preferred_benchmark(
+    benchmarks: list[tuple[str, str, int]],
+    report: Path,
+    default_size: int | None = None,
+) -> int:
+    """Index of the benchmark whose corpus and size a report's name states.
+
+    Report names are ``model_sweep_<size>[_<corpus>][_sent][_<tag>].md`` with
+    the corpus tag omitted for hotels, the historical default — so "no slug
+    matched" means hotels rather than "no idea". Names that carry no size at
+    all (``label_quality_sent.json``) fall back to *default_size*.
+    """
+    name = report.name
+    # Longest slug first: "europarl-en" and a future "europarl" would both
+    # match the same report name, and the more specific one is the right read.
+    by_slug = sorted(
+        (i for i, (_, slug, _) in enumerate(benchmarks) if f"_{slug}" in name),
+        key=lambda i: -len(benchmarks[i][1]),
+    )
+    if not by_slug:
+        by_slug = [i for i, (_, slug, _) in enumerate(benchmarks) if slug == "hotels"]
+    if not by_slug:
+        return 0
+    m = re.search(r"_(\d+)", name)
+    size = int(m.group(1)) if m else default_size
+    if size is not None:
+        exact = [i for i in by_slug if benchmarks[i][2] == size]
+        if exact:
+            return exact[0]
+    return by_slug[0]
+
+
+def _benchmark_picker(
+    cfg, key: str, prefer: Path | None = None, default_size: int | None = None
+) -> tuple[str, int]:
+    """Corpus + sample the inspection rebuilds from, as ``(data_file, size)``.
+
+    One control for both, because the pair is what identifies a cached
+    artifact: a size that has no sample under the chosen corpus is not a
+    narrower search, it is a cache miss. *prefer* preselects the benchmark the
+    report on screen was produced from — reading a Europarl ranking while
+    inspecting hotel clusters is the mistake this picker exists to prevent.
+    """
+    benchmarks = _benchmarks(cfg)
+    if not benchmarks:
+        st.error(
+            f"No benchmark samples in {cfg.cache_dir}. Build one with "
+            "`python -m reviewscope_ml.data.sources.europarl --sample-size 5000` "
+            "or the Yelp equivalent."
+        )
+        st.stop()
+
+    index = (
+        _preferred_benchmark(benchmarks, prefer, default_size)
+        if prefer is not None
+        else 0
+    )
+    data_file, slug, size = st.selectbox(
+        "Benchmark",
+        benchmarks,
+        index=index,
+        format_func=lambda b: f"{b[1]} · {b[2]:,}",
+        key=f"{key}_benchmark",
+    )
+    profile = profile_for(slug)
+    st.caption(
+        f"`{data_file}` · unit: {profile.unit_noun} · "
+        + (
+            "ratings present — Tier 3 available"
+            if profile.has_ratings
+            else "**no ratings — Tier 3 unavailable, sentiment blobs unscreened**"
+        )
+    )
+    return data_file, size
 
 
 # Report families in data/runs, in the order the selection argument is made:
@@ -86,8 +207,11 @@ _REPORT_KINDS = {
 }
 
 
-def _report_browser(cfg, key: str) -> None:
+def _report_browser(cfg, key: str) -> Path | None:
     """Every generated report, browsable in the app that acts on them.
+
+    Returns the selected report so a caller can default the rest of the page to
+    the corpus it was produced from.
 
     These are the documents the technology-selection decision cites. Reading
     them next to the clusters they describe is the whole point — a reviewer who
@@ -105,7 +229,7 @@ def _report_browser(cfg, key: str) -> None:
             "`python -m reviewscope_ml.eval.model_sweep --sentence-level` and "
             "`python -m reviewscope_ml.eval.label_sweep`."
         )
-        return
+        return None
 
     kind = st.selectbox("Report family", list(found), key=f"{key}_kind")
     report = st.selectbox(
@@ -113,6 +237,7 @@ def _report_browser(cfg, key: str) -> None:
     )
     st.caption(f"`{report.relative_to(cfg.project_root)}`")
     st.markdown(report.read_text())
+    return report
 
 
 def _model_selection_view(cfg) -> None:
@@ -126,7 +251,7 @@ def _model_selection_view(cfg) -> None:
     """
     st.title("Embedding model selection")
 
-    _report_browser(cfg, key="modelsel")
+    report = _report_browser(cfg, key="modelsel")
 
     st.markdown("---")
     st.subheader("Qualitative inspection")
@@ -142,14 +267,14 @@ def _model_selection_view(cfg) -> None:
     choice = st.selectbox(
         "Candidate", pairs, format_func=lambda p: f"{p[0]}  ({p[1]})"
     )
-    sample_size = st.number_input("Sample size", value=5_000, step=1_000, min_value=1_000)
+    data_file, sample_size = _benchmark_picker(cfg, key="modelsel", prefer=report)
     sentence_level = st.checkbox("Sentence/mention unit", value=True)
 
     if not st.button("Load clusters"):
         return
     try:
         units, labels, terms = _candidate_clusters(
-            int(sample_size), choice[0], choice[1], sentence_level
+            int(sample_size), choice[0], choice[1], sentence_level, data_file
         )
     except SystemExit as e:
         st.error(str(e))
@@ -160,10 +285,11 @@ def _model_selection_view(cfg) -> None:
 
     cluster_ids = sorted(int(c) for c in set(labels.tolist()) if c != -1)
     noise = float((labels == -1).mean())
-    unit_word = "mentions" if sentence_level else "reviews"
+    profile = profile_for(load_config(data_file=data_file).corpus_slug)
+    unit_word = "mentions" if sentence_level else f"{profile.unit_noun}s"
     st.write(
         f"**{len(cluster_ids)} clusters** over {len(units.texts):,} {unit_word} · "
-        f"noise {noise:.1%}"
+        f"noise {noise:.1%} · `{profile.slug or 'unregistered corpus'}`"
     )
 
     rng = np.random.default_rng(42)
@@ -187,22 +313,33 @@ def _model_selection_view(cfg) -> None:
     if st.button("Record this candidate as the reviewed choice"):
         _record(
             "confirm_model",
-            note=f"{choice[0]} ({choice[1]}) reviewed qualitatively at "
-                 f"{sample_size} {'segments' if sentence_level else 'documents'}",
+            note=f"{choice[0]} ({choice[1]}) reviewed qualitatively on "
+                 f"{data_file} at {sample_size} "
+                 f"{'segments' if sentence_level else 'documents'}",
         )
 
 
 @st.cache_resource
-def _labeler_clustering(sample_size: int, model: str, instruction: str):
+def _labeler_clustering(
+    sample_size: int, model: str, instruction: str, data_file: str | None = None
+):
     """The fixed clustering the labelers were judged on, with terms.
 
     Same cached arrays the labeler sweep used, so the clusters a reviewer reads
-    here are byte-for-byte the ones the labels were generated for.
+    here are byte-for-byte the ones the labels were generated for — which only
+    holds if the corpus matches too, hence ``data_file``.
     """
-    return _candidate_clusters(sample_size, model, instruction, True)
+    return _candidate_clusters(sample_size, model, instruction, True, data_file)
 
 
-def _scoring_context(cfg, report: Path, sample_size: int, model: str, instruction: str):
+def _scoring_context(
+    cfg,
+    report: Path,
+    sample_size: int,
+    model: str,
+    instruction: str,
+    data_file: str | None = None,
+):
     """Everything the scoring page needs: items, exemplars, terms, sizes."""
     from reviewscope_ml.eval.label_scoring import (
         build_scoring_items,
@@ -212,7 +349,9 @@ def _scoring_context(cfg, report: Path, sample_size: int, model: str, instructio
 
     records = load_label_records(report)
     items = build_scoring_items(records, seed=cfg.seed)
-    units, labels, terms = _labeler_clustering(sample_size, model, instruction)
+    units, labels, terms = _labeler_clustering(
+        sample_size, model, instruction, data_file
+    )
 
     sizes = {int(c): int((labels == c).sum()) for c in set(labels.tolist()) if c != -1}
     # The sheet's exemplar RNG is advanced once per cluster in size-descending
@@ -262,8 +401,12 @@ def _labeler_scoring_view(cfg) -> None:
     with st.sidebar:
         report = st.selectbox("Labeler run", reports, format_func=lambda p: p.name)
         st.caption("Clustering the labels were generated for:")
-        sample_size = st.number_input(
-            "Sample size", value=5_000, step=1_000, min_value=1_000
+        # 5,000 is the size every labeler sweep has run at; a scoring campaign
+        # aggregates across reviewers, so silently defaulting to a different
+        # clustering would make two reviewers score different exemplars under
+        # one campaign name.
+        data_file, sample_size = _benchmark_picker(
+            cfg, key="labelsel", prefer=report, default_size=5_000
         )
         model = st.text_input("Embedding model", value=SENTENCE_EMBEDDING)
         instruction = st.text_input("Instruction", value="no_inst")
@@ -278,7 +421,7 @@ def _labeler_scoring_view(cfg) -> None:
 
     try:
         items, chosen, sizes, terms, exemplars, units, labels = _scoring_context(
-            cfg, report, int(sample_size), model, instruction
+            cfg, report, int(sample_size), model, instruction, data_file
         )
     except SystemExit as e:
         st.error(str(e))

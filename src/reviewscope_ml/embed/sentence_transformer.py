@@ -20,21 +20,17 @@ import numpy as np
 
 from ..core.cache import embedding_path, load_array, save_array
 from ..core.config import PipelineConfig
+from ..core.corpus import HOTELS
 from ..runtime.gpu import release_cuda_memory
 
 logger = logging.getLogger("reviewscope.embed")
 
 # Instruction variants decided in notebook 04 — do not edit without re-running
-# the embedding comparison, the slugs are baked into cache filenames.
-INSTRUCTIONS: dict[str, Optional[str]] = {
-    "no_inst": None,
-    "generic": "Represent the hotel review for topic clustering:",
-    "domain": (
-        "Represent the hotel review for clustering by theme "
-        "(room quality, staff, location, breakfast, cleanliness, value):"
-    ),
-    "sentiment": "Represent the hotel review to capture the main sentiment and opinion:",
-}
+# the embedding comparison, the slugs are baked into cache filenames. The texts
+# now live on the hotel corpus profile so a second corpus can define its own
+# under the same slug names (see core.corpus); this alias keeps the historical
+# import path and IS the hotel table, not a copy of it.
+INSTRUCTIONS: dict[str, Optional[str]] = HOTELS.instructions
 
 
 def _is_cuda_oom(e: Exception) -> bool:
@@ -61,9 +57,17 @@ class SentenceTransformerEmbedder:
         batch_size: int = 64,
         show_progress: bool = True,
         max_seq: Optional[int] = None,
+        instructions: Optional[dict[str, Optional[str]]] = None,
     ):
-        if instruction not in INSTRUCTIONS:
-            raise ValueError(f"Unknown instruction slug {instruction!r}; known: {list(INSTRUCTIONS)}")
+        # `instructions` is the corpus's instruction table (core.corpus). It
+        # defaults to the hotel benchmark's so every existing caller — the
+        # notebooks, the WP5 sweep — behaves exactly as before.
+        self.instructions = INSTRUCTIONS if instructions is None else instructions
+        if instruction not in self.instructions:
+            raise ValueError(
+                f"Unknown instruction slug {instruction!r}; "
+                f"known: {list(self.instructions)}"
+            )
         self.model_name = model_name
         self.instruction = instruction
         self.device = device
@@ -165,7 +169,7 @@ class SentenceTransformerEmbedder:
 
     def _encode_on(self, device: str, texts: list[str], batch: int, progress: bool) -> np.ndarray:
         model = self._load(device)
-        instr_text = INSTRUCTIONS[self.instruction]
+        instr_text = self.instructions[self.instruction]
         if self._is_instructor and instr_text:
             pairs = [[instr_text, t] for t in texts]
             return np.asarray(
