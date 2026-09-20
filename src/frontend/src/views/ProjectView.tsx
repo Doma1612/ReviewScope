@@ -23,6 +23,7 @@ import { EditHistory } from "../ui/EditHistory";
 import { MetricsPanel } from "../ui/MetricsPanel";
 import { StarRating } from "../ui/StarRating";
 import { WordCloud } from "../ui/WordCloud";
+import { ProjectChat } from "../ui/ProjectChat";
 
 // Sentinel select value for "noise" (cluster_id = null); the API takes null.
 const NOISE = "__noise__";
@@ -427,6 +428,7 @@ export function ProjectView() {
           undoingId={undoM.isPending ? undoM.variables?.id ?? null : null}
         />
       </>}
+      {project.data?.status === "ready" && <ProjectChat projectId={projectId} available={project.data.retrieval_ready} clusters={clusters.data ?? []} />}
     </main>
   );
 }
@@ -466,7 +468,7 @@ function ClusterRow({ cluster, projectId, color, highlighted, rowRef, editMode, 
         <td className="col-label">
           <span className="cluster-swatch" style={{ background: color }} aria-hidden />
           <span className="cluster-label-text">
-            <strong>{cluster.label}</strong>
+            <Link to={`/projects/${projectId}/clusters/${cluster.id}`} onClick={(event) => event.stopPropagation()}><strong>{cluster.label}</strong></Link>
           </span>
         </td>
         <td className="col-num">
@@ -504,10 +506,10 @@ function ClusterRow({ cluster, projectId, color, highlighted, rowRef, editMode, 
                       {otherClusters.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
                     </select>
                     <button className="button secondary danger" type="button" onClick={onJunk}>Mark junk</button>
-                    <Link className="button" to={`/projects/${projectId}/clusters/${cluster.id}`}>View all</Link>
+                    <Link className="button" to={`/projects/${projectId}/clusters/${cluster.id}`}>Open chat</Link>
                   </>
                 ) : (
-                  <Link className="button" to={`/projects/${projectId}/clusters/${cluster.id}`}>View all</Link>
+                  <Link className="button" to={`/projects/${projectId}/clusters/${cluster.id}`}>Open chat</Link>
                 )}
               </div>
             </div>

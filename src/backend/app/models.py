@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy import CheckConstraint, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
 
 from app.db.base import Base
 
@@ -59,6 +60,12 @@ class Project(Base):
     # UI flag the report as stale once manual edits change the membership.
     metrics: Mapped[dict | None] = mapped_column(JSONB)
     metrics_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Query embeddings must match the vectors persisted by the pipeline. Existing
+    # projects lack this provenance and are deliberately not RAG-ready until re-run.
+    embedding_model: Mapped[str | None] = mapped_column(Text)
+    embedding_instruction: Mapped[str | None] = mapped_column(Text)
+    embedding_dimension: Mapped[int | None] = mapped_column(Integer)
+    retrieval_ready: Mapped[bool] = mapped_column(default=False, server_default="false", nullable=False)
 
     owner: Mapped[User] = relationship()
 
@@ -122,6 +129,7 @@ class Embedding(Base):
 
     document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
     vector: Mapped[list[float]] = mapped_column(JSONB, default=list, nullable=False)
+    vector_pg: Mapped[list[float] | None] = mapped_column(Vector(768))
     umap_x: Mapped[float] = mapped_column(Float, nullable=False)
     umap_y: Mapped[float] = mapped_column(Float, nullable=False)
     umap_z: Mapped[float | None] = mapped_column(Float)
@@ -149,6 +157,7 @@ class Segment(Base):
     cluster_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("clusters.id", ondelete="SET NULL"), index=True)
     sentiment_score: Mapped[float | None] = mapped_column(Float)
     vector: Mapped[list[float]] = mapped_column(JSONB, default=list, nullable=False)
+    vector_pg: Mapped[list[float] | None] = mapped_column(Vector(768))
     umap_x: Mapped[float] = mapped_column(Float, nullable=False)
     umap_y: Mapped[float] = mapped_column(Float, nullable=False)
     umap_z: Mapped[float | None] = mapped_column(Float)

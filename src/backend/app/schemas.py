@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, EmailStr, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 from app.models import PipelineStepStatus, ProjectRole, ProjectStatus
 
@@ -38,6 +38,7 @@ class ProjectRead(BaseModel):
     # "document" (one cluster per review; frozen/read-only) or "sentence"
     # (segment-level; a review maps to several clusters; editable).
     unit: str = "document"
+    retrieval_ready: bool = False
 
 
 class ProjectUpdate(BaseModel):
@@ -133,6 +134,44 @@ class ClusterRead(BaseModel):
     sample_docs: list[dict[str, Any]] = []
 
     model_config = {"from_attributes": True}
+
+
+class ClusterChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ClusterChatSource(BaseModel):
+    document_id: uuid.UUID
+    primary_key_value: str
+    matched_field: str | None = None
+    matched_value: str | None = None
+    rating: float | None = None
+    snippet: str
+    full_text: str | None = None
+    raw_data: dict[str, Any]
+
+
+class ClusterChatResult(BaseModel):
+    document_id: uuid.UUID
+    primary_key_value: str
+    rating: float | None = None
+    snippet: str
+
+
+class ClusterChatRequest(BaseModel):
+    message: str
+    history: list[ClusterChatMessage] = Field(default_factory=list)
+    active_source_ids: list[uuid.UUID] = Field(default_factory=list)
+    last_tool_state: dict[str, Any] | None = None
+
+
+class ClusterChatResponse(BaseModel):
+    message: ClusterChatMessage
+    model: str
+    sources: list[ClusterChatSource] = Field(default_factory=list)
+    results: list[ClusterChatResult] = Field(default_factory=list)
+    tool_state: dict[str, Any] | None = None
 
 
 class ModelsRead(BaseModel):
