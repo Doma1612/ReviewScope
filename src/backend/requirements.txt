@@ -6,6 +6,7 @@ fastapi>=0.111
 passlib[bcrypt]>=1.7
 psycopg[binary]>=3.2
 pydantic-settings>=2.3
+pgvector>=0.3
 python-jose[cryptography]>=3.3
 python-multipart>=0.0.9
 redis>=5.0
