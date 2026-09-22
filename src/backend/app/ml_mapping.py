@@ -245,7 +245,7 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
         embeddings.append(Embedding(
             document_id=did,
             vector=list(rec.vector),
-            vector_pg=list(rec.vector) if len(rec.vector) == 768 else None,
+            vector_pg=list(rec.vector) if rec.vector else None,
             umap_x=rec.umap_x,
             umap_y=rec.umap_y,
             umap_z=rec.umap_z,
@@ -266,7 +266,7 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
             cluster_id=to_uuid(rec.cluster_id),
             sentiment_score=rec.sentiment_score,
             vector=list(rec.vector),
-            vector_pg=list(rec.vector) if len(rec.vector) == 768 else None,
+            vector_pg=list(rec.vector) if rec.vector else None,
             umap_x=rec.umap_x,
             umap_y=rec.umap_y,
             umap_z=rec.umap_z,
@@ -306,12 +306,17 @@ def persist_run_result(session, result) -> int:
     spec = (getattr(result, "manifest", {}) or {}).get("spec", {})
     vectors = segments if unit == "sentence" else embeddings
     dimension = len(vectors[0].vector) if vectors else None
-    # RAG only becomes available after a real, known 768-D pipeline run. This
-    # intentionally leaves simulated and legacy projects disabled until re-run.
+    # RAG only becomes available after a real pipeline run whose vectors are
+    # all present and all the same width — the query embedder is chosen from
+    # the recorded model, so a mixed-dimension project could not be searched.
+    # Simulated and legacy projects stay disabled until re-run.
     ready = bool(
-        dimension == 768
+        dimension
         and spec.get("embedding_model")
-        and all(row.vector_pg is not None for row in vectors)
+        and all(
+            row.vector_pg is not None and len(row.vector_pg) == dimension
+            for row in vectors
+        )
     )
     session.execute(
         update(Project).where(Project.id == project_id).values(

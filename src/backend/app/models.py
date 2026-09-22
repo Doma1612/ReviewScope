@@ -129,7 +129,9 @@ class Embedding(Base):
 
     document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
     vector: Mapped[list[float]] = mapped_column(JSONB, default=list, nullable=False)
-    vector_pg: Mapped[list[float] | None] = mapped_column(Vector(768))
+    # Unconstrained: a project records its own embedding_dimension, and models
+    # differ (MiniLM 384, mpnet 768). See migration 0008.
+    vector_pg: Mapped[list[float] | None] = mapped_column(Vector())
     umap_x: Mapped[float] = mapped_column(Float, nullable=False)
     umap_y: Mapped[float] = mapped_column(Float, nullable=False)
     umap_z: Mapped[float | None] = mapped_column(Float)
@@ -157,7 +159,9 @@ class Segment(Base):
     cluster_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("clusters.id", ondelete="SET NULL"), index=True)
     sentiment_score: Mapped[float | None] = mapped_column(Float)
     vector: Mapped[list[float]] = mapped_column(JSONB, default=list, nullable=False)
-    vector_pg: Mapped[list[float] | None] = mapped_column(Vector(768))
+    # Unconstrained: a project records its own embedding_dimension, and models
+    # differ (MiniLM 384, mpnet 768). See migration 0008.
+    vector_pg: Mapped[list[float] | None] = mapped_column(Vector())
     umap_x: Mapped[float] = mapped_column(Float, nullable=False)
     umap_y: Mapped[float] = mapped_column(Float, nullable=False)
     umap_z: Mapped[float | None] = mapped_column(Float)

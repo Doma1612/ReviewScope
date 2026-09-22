@@ -12,7 +12,7 @@ _lock = Lock()
 
 def embed_project_query(project: Project, text: str) -> list[float]:
     """Embed one question with the exact model recorded by the project run."""
-    if not project.retrieval_ready or not project.embedding_model or project.embedding_dimension != 768:
+    if not project.retrieval_ready or not project.embedding_model or not project.embedding_dimension:
         raise ValueError("Semantic search is unavailable until this project is reprocessed.")
 
     instruction = project.embedding_instruction or "no_inst"
