@@ -84,6 +84,7 @@ export function DocumentsTable({ projectId, clusterId, editable = false, cluster
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkTarget, setBulkTarget] = useState("");
+  const [showIds, setShowIds] = useState(false);
   // Facet filter values keyed by `${column}:${bound}` (bound = min/max/from/to/eq).
   const [facetValues, setFacetValues] = useState<Record<string, string>>({});
   const offset = page * PAGE_SIZE;
@@ -128,9 +129,17 @@ export function DocumentsTable({ projectId, clusterId, editable = false, cluster
 
   const rows = documents.data ?? [];
   // Prefer the saved schema; if none exists yet, derive columns from the first row.
-  const columns = schema.data?.columns?.length
+  const allColumns = schema.data?.columns?.length
     ? schema.data.columns
     : Object.keys(rows[0]?.raw_data ?? {}).map((name) => ({ name, type: "text", is_primary_key: false }));
+  // Identifier columns (the primary key, anything named id or *_id) are hidden
+  // by default: they carry no meaning for a reader working through documents,
+  // and on wide schemas they push the text column off screen. Kept behind a
+  // toggle rather than dropped, since reassignment and bug reports need them.
+  const idColumns = allColumns.filter((col) => col.is_primary_key || /^id$|_id$/i.test(col.name));
+  const columns = showIds || idColumns.length === allColumns.length
+    ? allColumns
+    : allColumns.filter((col) => !idColumns.includes(col));
   const total = count.data?.total;
   // With a known total, "Next" is enabled only while more rows remain; fall back to
   // the page-full heuristic while the count is still loading.
@@ -158,11 +167,19 @@ export function DocumentsTable({ projectId, clusterId, editable = false, cluster
     });
   const hasActiveFilters = filters.length > 0;
 
-  const facetsBar = facetColumns.length > 0 && (
+  const idToggle = idColumns.length > 0 && idColumns.length < allColumns.length && (
+    <label className="documents-facets-ids">
+      <input type="checkbox" checked={showIds} onChange={(event) => setShowIds(event.target.checked)} />
+      Show IDs
+    </label>
+  );
+
+  const facetsBar = (facetColumns.length > 0 || idToggle) && (
     <div className="documents-facets">
       {facetColumns.map((col) => (
         <DocumentFacet key={col.name} column={col} values={facetValues} onChange={setFacet} />
       ))}
+      {idToggle}
       {hasActiveFilters && <button className="documents-facets-clear" type="button" onClick={() => setFacetValues({})}>Clear filters</button>}
     </div>
   );
