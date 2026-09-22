@@ -47,6 +47,7 @@ def run_from_upload(
     label_prompt: str | None = None,
     summary_prompt: str | None = None,
     corpus_profile: str | None = None,
+    force: bool = False,
 ) -> RunResult:
     """Ingest an uploaded file and run the full pipeline -> persistence DTOs.
 
@@ -71,7 +72,7 @@ def run_from_upload(
         corpus=corpus, project_id=project_id, progress=progress, spec=spec,
         device=device, seed=seed, label_clusters=label_clusters,
         label_prompt=label_prompt, summary_prompt=summary_prompt,
-        corpus_profile=corpus_profile,
+        corpus_profile=corpus_profile, force=force,
     )
 
 
@@ -87,8 +88,16 @@ def run_project_pipeline(
     label_prompt: str | None = None,
     summary_prompt: str | None = None,
     corpus_profile: str | None = None,
+    force: bool = False,
 ) -> RunResult:
-    """Run the frozen pipeline on an already-ingested corpus -> persistence DTOs."""
+    """Run the frozen pipeline on an already-ingested corpus -> persistence DTOs.
+
+    ``force`` recomputes even when the project's run directory is already
+    complete. A project's run name is fixed (``proj-<id>__<variant>``), so
+    without it a re-run reloads the previous artifacts and silently ignores
+    any changed parameters — which is never what an application re-run means.
+    Stage caches (embeddings, UMAP, sentiment) still hit, so forcing is cheap.
+    """
     progress = progress or NullProgress()
     spec = spec or app_default_spec()
     # Per-project prompt override. Only applied when BOTH texts are supplied:
@@ -124,6 +133,7 @@ def run_project_pipeline(
         run_name=f"{project_corpus_token(project_id)}__{spec.variant}",
         label_clusters=label_clusters,
         on_stage=on_stage,
+        force=force,
     )
 
     # Reload the clustered-unit embeddings the embed stage cached. For sentence

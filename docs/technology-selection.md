@@ -138,8 +138,10 @@ a Phase-2 criterion only; it earns no credit on this corpus.
 Every contestant saw an identical corpus, an identical segmentation (regex
 splitter, segments < 20 chars dropped, > 600 chars hard-wrapped), identical
 DR and identical clustering configuration — UMAP(10d, nn=15, min_dist=0.0,
-cosine) → HDBSCAN(mcs = 0.3% of units, floor 15; ms = mcs/3). **The embedding
-model is the only manipulated variable.**
+cosine) → HDBSCAN(mcs = 0.3% of units, floor 15; ms = mcs/3 — this sweep
+predates the ms cap of 50 added 2026-09-22, but at 58,230 segments the rule
+gave ms=58, below the cliff, and every contestant saw the same value).
+**The embedding model is the only manipulated variable.**
 
 Instruction and no-instruction runs are **separate contestants**, never
 averaged: an instruction mechanically reshapes the space, and collapsing the

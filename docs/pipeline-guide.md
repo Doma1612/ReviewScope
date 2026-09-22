@@ -143,10 +143,13 @@ with mpnet embeddings.
 is an absolute count whose meaning is relative. mcs=15 was decided at 5k
 (0.3% of the corpus); reused at 50k it calls 15 documents a topic and
 produces blob-and-crumbs. Default specs now use `"auto"`:
-`mcs = max(15, 0.3% × units)`, `ms = mcs/3` (micro pass: 0.1%, floor 5) —
-**anchored to the notebook decision**, so behaviour at 5k is unchanged and
-extrapolated linearly elsewhere. Know what this is: an anchor + a linearity
-assumption, not a validated optimum. k for KMeans/agglomerative deliberately
+`mcs = max(15, 0.3% × units)`, `ms = min(50, mcs/3)` (micro pass: 0.1%,
+floor 5, same ms cap) — **anchored to the notebook decision**, so behaviour
+at 5k is unchanged and extrapolated linearly elsewhere. Know what this is:
+an anchor + a linearity assumption, not a validated optimum. The `ms` cap
+was added after the uncapped ratio collapsed the EuroParl 26k sentence run
+to 2 clusters (methodology §5, europarl-phase2 §4b): `ms` is a smoothing
+parameter, so it must not scale with a size parameter. k for KMeans/agglomerative deliberately
 does *not* scale — more reviews mean bigger topics, not more topics.
 
 **What proper tuning would look like (proposed, not built):** Optuna

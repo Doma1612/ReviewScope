@@ -492,15 +492,18 @@ def _make_backend(spec: PipelineSpec, seed: int, n_units: int):
     count, not a density parameter — more documents mean bigger topics, not
     more topics — so it deliberately does not scale.
     """
-    from ..cluster import scaled_min_cluster_size
+    from ..cluster import scaled_min_cluster_size, scaled_min_samples
 
     c = dict(spec.cluster)
     if spec.variant in ("custom_hdbscan", "sentence_level"):
         if c.get("min_cluster_size") == "auto":
             c["min_cluster_size"] = scaled_min_cluster_size(n_units)
         if c.get("min_samples") == "auto":
-            # 3:1 mcs:ms — the ratio notebook 06 selected (15:5).
-            c["min_samples"] = max(5, c["min_cluster_size"] // 3)
+            # 3:1 mcs:ms — the ratio notebook 06 selected (15:5) — but capped:
+            # ms is a smoothing knob, and letting it follow a corpus-scaled mcs
+            # collapsed the EuroParl 26k run to 2 clusters. See
+            # ``cluster.scaled_min_samples``.
+            c["min_samples"] = scaled_min_samples(c["min_cluster_size"])
         return HDBSCANBackend(**c)
     if spec.variant == "flat_agglomerative":
         return AgglomerativeBackend(**c)
@@ -512,7 +515,12 @@ def _make_backend(spec: PipelineSpec, seed: int, n_units: int):
                 n_units, fraction=0.001, floor=5
             )
         if c.get("micro_min_samples") == "auto":
-            c["micro_min_samples"] = max(3, round(c["micro_min_cluster_size"] * 0.6))
+            # Same smoothing cap as the flat path (the micro pass wants fine,
+            # pure clusters, so an unbounded ms defeats its whole purpose);
+            # ratio and floor stay the two-stage design's own 0.6 / 3.
+            c["micro_min_samples"] = scaled_min_samples(
+                round(c["micro_min_cluster_size"] * 0.6), ratio=1, floor=3
+            )
         return TwoStageBackend(**c)
     raise ValueError(f"no clustering backend for variant {spec.variant!r}")
 

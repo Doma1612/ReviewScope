@@ -1,6 +1,10 @@
 import numpy as np
 
-from reviewscope_ml.cluster import TwoStageBackend, scaled_min_cluster_size
+from reviewscope_ml.cluster import (
+    TwoStageBackend,
+    scaled_min_cluster_size,
+    scaled_min_samples,
+)
 from reviewscope_ml.pipelines.runner import _make_backend
 from reviewscope_ml.pipelines.spec import PipelineSpec
 
@@ -21,6 +25,21 @@ class TestScaledMinClusterSize:
         assert scaled_min_cluster_size(50_000, fraction=0.001, floor=5) == 50
 
 
+class TestScaledMinSamples:
+    def test_keeps_the_notebook_ratio_while_small(self):
+        assert scaled_min_samples(15) == 5
+        assert scaled_min_samples(150) == 50
+
+    def test_caps_the_smoothing_parameter(self):
+        # EuroParl 26k sentence run: 352,924 segments -> mcs 1059. Uncapped
+        # this was ms=353, which collapsed the run to 2 clusters holding 98%
+        # of all segments.
+        assert scaled_min_samples(1_059) == 50
+
+    def test_floor_protects_smoke_runs(self):
+        assert scaled_min_samples(3) == 5
+
+
 class TestAutoBackendResolution:
     def test_auto_resolves_against_unit_count(self):
         spec = PipelineSpec(
@@ -29,7 +48,7 @@ class TestAutoBackendResolution:
         )
         b = _make_backend(spec, seed=42, n_units=50_000)
         assert b.min_cluster_size == 150
-        assert b.min_samples == 50
+        assert b.min_samples == 50  # at the cap, so unchanged by it
 
     def test_explicit_values_respected(self):
         spec = PipelineSpec(
@@ -40,6 +59,16 @@ class TestAutoBackendResolution:
         assert b.min_cluster_size == 30
         assert b.min_samples == 7
 
+    def test_min_samples_is_capped_at_sentence_scale(self):
+        # The shape that produced the 2-cluster EuroParl run.
+        spec = PipelineSpec(
+            variant="sentence_level",
+            cluster={"min_cluster_size": "auto", "min_samples": "auto"},
+        )
+        b = _make_backend(spec, seed=42, n_units=352_924)
+        assert b.min_cluster_size == 1_059
+        assert b.min_samples == 50
+
     def test_two_stage_micro_scaling(self):
         spec = PipelineSpec(
             variant="two_stage",
@@ -48,7 +77,17 @@ class TestAutoBackendResolution:
         )
         b = _make_backend(spec, seed=42, n_units=50_000)
         assert b.micro_min_cluster_size == 50
-        assert b.micro_min_samples == 30
+        assert b.micro_min_samples == 30  # 0.6 ratio, below the cap
+
+    def test_two_stage_micro_samples_capped(self):
+        spec = PipelineSpec(
+            variant="two_stage",
+            cluster={"micro_min_cluster_size": "auto",
+                     "micro_min_samples": "auto", "n_macro": None},
+        )
+        b = _make_backend(spec, seed=42, n_units=352_924)
+        assert b.micro_min_cluster_size == 353
+        assert b.micro_min_samples == 50  # would be 212 uncapped
 
     def test_benchmark_scale_matches_notebook_defaults(self):
         spec = PipelineSpec(

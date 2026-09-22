@@ -126,6 +126,16 @@ read — the pipeline receives its data in memory. Re-running the same project w
 same data + seed is almost free (cache hits); a crash mid-run resumes from the last
 cached stage.
 
+One consequence needs care. A project's run name is fixed
+(`proj-<id>__<variant>`), and `run_pipeline` returns a *complete* run directory
+untouched. For a notebook or a sweep that is the point; for an application
+re-run it means the previous artifacts are reloaded and any changed parameter
+is silently ignored — which is exactly what happened on 2026-09-22 when a
+clustering fix appeared to change nothing (europarl-phase2 §4b). The app seam
+therefore takes `force`, and `ml_pipeline.run_ml_pipeline` passes `force=True`:
+a project re-run always recomputes. The per-stage caches still hit, so the cost
+is the stages whose parameters actually changed.
+
 Embeddings for pgvector are reloaded from that cache by `service.load_run_embeddings`
 (no recompute, no model reload) immediately after the run.
 

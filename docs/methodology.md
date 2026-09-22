@@ -167,13 +167,49 @@ artifacts and adds stability + noise-fairness, which the notebooks lacked.
   HDBSCAN's mcs is an absolute count whose meaning is relative: mcs=15 on the
   5k benchmark (0.3% of the corpus) is a topic threshold; the same 15 at 50k
   (0.03%) produces blob-and-crumbs. Default specs therefore use
-  ``"auto"``: mcs = 0.3% of the clustered units (floor 15), ms = mcs/3 —
+  ``"auto"``: mcs = 0.3% of the clustered units (floor 15) —
   *anchored to* notebook 06's decision, which means it reproduces the decided
   behaviour at 5k and extrapolates linearly elsewhere. The linearity is an
   assumption, not a finding; the proper validation is a per-scale sweep (see
   the tuning roadmap in docs/pipeline-guide.md). BERTopic deliberately keeps
   its stock min_topic_size=10 — it is the "off-the-shelf, no thinking"
   baseline, scale problems included.
+- **min_samples must NOT scale with it — the mistake that cost a run.**
+  Notebook 06 chose the pair (15, 5), and the auto rule originally carried
+  the 3:1 ratio into the extrapolation: ms = mcs/3. That is a category
+  error. mcs is a *size* threshold ("a theme smaller than this is not a
+  theme"), but ms is the *smoothing* parameter — it sets each point's core
+  distance as the distance to its ms-th neighbour, so a large ms flattens
+  precisely the local density variation HDBSCAN needs to separate modes.
+  Scaled together, the two eventually erase all structure.
+
+  Measured on the EuroParl 26k sentence-level run (352,924 segments, so
+  mcs = 1059), re-clustering the *same* cached 10-d UMAP output:
+
+  | ms | clusters | noise | largest cluster | silhouette (excl.) |
+  |---|---|---|---|---|
+  | 25 | 62 | 0.401 | 7.3% | 0.492 |
+  | 50 | 62 | 0.426 | 7.1% | 0.505 |
+  | 100 | 55 | 0.404 | 7.1% | 0.477 |
+  | **353** (= mcs/3) | **2** | **0.013** | **98.1%** | 0.375 |
+
+  The collapse fingerprint is the noise ratio, not the cluster count: a
+  stricter clustering should label *more* points as noise, and this one
+  dropped from ~40% to 1.3% because it stopped seeing outliers at all.
+  ``cluster.scaled_min_samples`` therefore caps ms at 50 — the largest value
+  that leaves every validated configuration unchanged (5k docs -> 5, 50k
+  docs -> 50). The cliff between 100 and 353 is unmapped; the cap sits clear
+  of it rather than on a measured optimum. The same cap now applies to the
+  two-stage micro pass, which had the identical unbounded ratio (0.6·mcs).
+
+  Two lessons generalise beyond this parameter. First, a ratio observed at
+  one scale is not a scaling law — only the parameter the anchor was
+  *about* may be extrapolated. Second, the failure was fully visible in the
+  run's own ``metrics`` (``max_cluster_share`` 0.98, the two
+  ``failure_flags``) yet the pipeline still wrote clusters, labelled them
+  with an LLM, and marked the project ``ready``: the flags are recorded,
+  not enforced. Gating a run on its own failure flags — or at least
+  surfacing them in the project card — is an open item.
 - **The two-stage clusterer's macro count heuristic** (≈√n_micro, clamped to
   [5, 30]) is a readability heuristic, not an optimum; it has no validation
   beyond "produces human-reviewable counts". Treated as a reviewable

@@ -60,6 +60,11 @@ def run_ml_pipeline(project_id: str) -> None:
                 device=settings.ml_device,
                 label_clusters=True,
                 corpus_profile=corpus_profile_for(source_filename),
+                # A project's run directory is keyed on project id + variant,
+                # so a completed run would otherwise be reloaded wholesale and
+                # any changed pipeline parameter silently ignored. Re-running a
+                # project means recompute; the stage caches keep it cheap.
+                force=True,
             )
         except IngestError as exc:
             _fail(pid, "; ".join(exc.errors) if getattr(exc, "errors", None) else str(exc))

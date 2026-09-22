@@ -223,6 +223,89 @@ caches and a ranking, not a run directory.
 
 ---
 
+## 4b. The full app run, and the 2-cluster failure (2026-09-20 -> 09-22)
+
+The first end-to-end application run of the verified corpus — project
+`EuroParl EN 26k (verified)`, 26,244 speeches after PK dedup (147 duplicate
+`speech_id`s), 352,924 segments, `sentence_level`, MiniLM-L6-v2, gemma3:4b
+labeller — finished `ready` after ~3h and produced **two clusters**: one
+holding 346,150 of 352,924 mentions (98.1%), one of 2,119, and 4,655 noise.
+The LLM duly labelled the blob "Fisheries Quota Enforcement" — a §7
+centroid-sampling artifact: it saw five samples, not a corpus.
+
+**Cause.** Not the corpus, the embedding model, or UMAP. The auto sizing rule
+resolved `min_cluster_size` to 0.3% of 352,924 = 1059 and then, by the old
+3:1 ratio, `min_samples` to 353. The clustering cache filename records it
+verbatim: `hdbscan__mcs1059__ms353__proj-08e2f047-...`. At ms=353 every core
+distance is the distance to a point's 353rd neighbour, which smooths the
+density landscape into a single mode.
+
+**Evidence.** Re-clustering the same cached 10-d UMAP array
+(`data/cache/umap/proj-08e2f047-..._nc10__nn15__md000__cosine__26244.npy`,
+so no re-embedding and no re-projection) across a 12-point mcs x ms grid:
+
+| mcs | ms | clusters | noise | largest | sil (excl.) |
+|---|---|---|---|---|---|
+| 175 | 10 | 309 | 0.411 | 2.7% | 0.593 |
+| 175 | 58 | 282 | 0.419 | 2.1% | 0.619 |
+| 350 | 25 | 169 | 0.406 | 4.6% | 0.538 |
+| 700 | 58 | 92 | 0.437 | 6.0% | 0.548 |
+| 1059 | 25 | 62 | 0.401 | 7.3% | 0.492 |
+| 1059 | 50 | 62 | 0.426 | 7.1% | 0.505 |
+| 1059 | 100 | 55 | 0.404 | 7.1% | 0.477 |
+| 1059 | 353 | 2 | 0.013 | 98.1% | 0.375 |
+
+Holding mcs at the value the run used and only lowering ms recovers 62
+clusters, so `min_cluster_size` was never the problem. The bottom row
+reproduces the shipped run exactly, which validates the grid.
+
+**Fix.** `cluster.scaled_min_samples` caps ms at 50 (methodology §5 has the
+reasoning and the limits of the evidence). The two-stage micro pass got the
+same cap. Every previously validated configuration is unchanged.
+
+**A second bug, found while applying the first.** The re-run with the capped
+ms produced two clusters again — identical metrics, `runtime_s` still the
+original 7566 s, and no new clustering cache file. The worker log gave it
+away: `run proj-...__sentence_level already complete — loading artifacts`.
+`run_pipeline` skips everything when the run directory is complete, the
+project's run name is fixed, and the app seam never passed `force`. So *every*
+application re-run of a project had been reloading its previous artifacts —
+the clustering fix was never executed. `run_from_upload` /
+`run_project_pipeline` now take `force`, and `ml_pipeline.run_ml_pipeline`
+passes `force=True`. Worth remembering as a class of error: the run completed,
+reported success, and changed nothing.
+
+**Outcome of the forced re-run (2026-09-22 19:01).** 62 clusters, largest
+7.06%, noise 42.6%, silhouette 0.512 — matching the offline grid's mcs=1059 /
+ms=50 row, which confirms the fix reached the pipeline. Total runtime 129 s
+against the original 7566 s, because only the clustering stage had to
+recompute. The labels are recognisably thematic: Common Fisheries Policy, EU
+Budget Management, EU Climate Adaptation Funding, EU-Russia Relations and
+Human Rights, Bovine Animal Exports, Palestinian Authority Support.
+
+Two observations to carry forward. First, roughly a quarter of the largest
+clusters are **procedural, not topical** — "Proposal for Amendment" (24,927
+mentions), "Resolution Debate Adoption", "Question Procedure Debate", "Report
+Rapporteur Appreciation", "Legislative Process Coordination". That is the
+parliamentary analogue of §5b's generic praise/complaint clusters, it is what
+`mark_junk` exists for, and it is the strongest argument yet for wiring
+`boilerplate_terms` into `represent/terms.py`. Second, the run now trips a
+*different* flag — `high noise: 43% of documents discarded as noise` — which
+is the §5 silhouette-bias trade-off arriving on schedule, not a regression:
+the old run's 1.3% noise was the pathology.
+
+**Caveats.** Silhouette *rises* as mcs falls (0.62 at mcs=175 against 0.51 at
+1059), so 62 clusters is a readability choice, not a metric optimum — and that
+silhouette is measured in UMAP space (§4), with no C_v and no Tier 3 (Europarl
+has no ratings) to arbitrate. The labels above were read, not scored; no
+intruder test has been run.
+
+**Open item this exposes.** `projects.metrics` already carried
+`"giant cluster: one cluster holds 98% of all documents"` and
+`"only 2 clusters - no usable topic structure"` before the labelling stage
+ran. The pipeline labelled the blob and marked the project `ready` anyway.
+Failure flags are recorded, not enforced, and nothing surfaces them in the UI.
+
 ## 5. Explicitly out of scope / still open
 
 - **Multilingual.** Dropped by decision. The registered multilingual candidates
@@ -244,6 +327,10 @@ caches and a ranking, not a run directory.
 - **Sentiment stage** still runs `cardiffnlp/twitter-roberta-base-sentiment-latest`,
   English tweet-domain, on parliamentary rhetoric. It will not fail — it will
   return confident noise. Consider gating it off for this corpus.
+- **Run-quality gating.** See §4b: a run whose own metrics report a 98%
+  giant cluster still completes, labels and goes `ready`. Either the pipeline
+  should refuse (or warn loudly) on its own failure flags, or the project card
+  should show them.
 - **Tier-3 substitute.** Europarl has no ratings but does carry `speaker`,
   `date` and `chapter`. Generalising `compute_rating_entropy` to a categorical
   `compute_metadata_entropy(values, labels)` would restore the "is this cluster
