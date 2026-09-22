@@ -149,6 +149,16 @@ def _mock_segments(text: str) -> list[str]:
 async def _persist_mock_results(db, project_id: uuid.UUID, rows: list[dict], text_column: str, primary_key: str | None) -> None:
     """Simulated sentence-unit run: one review → several mention (segment) rows, each
     clustered, with the review's derived primary cluster on ``Document.cluster_id``."""
+    # Synthetic vectors are eight-dimensional random values and must never be
+    # exposed through semantic retrieval after a project is re-run in mock mode.
+    await db.execute(
+        update(Project).where(Project.id == project_id).values(
+            retrieval_ready=False,
+            embedding_model=None,
+            embedding_instruction=None,
+            embedding_dimension=None,
+        )
+    )
     await db.execute(delete(Segment).where(Segment.project_id == project_id))
     await db.execute(delete(Embedding).where(Embedding.document_id.in_(select(Document.id).where(Document.project_id == project_id))))
     await db.execute(delete(Document).where(Document.project_id == project_id))

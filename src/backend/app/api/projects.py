@@ -1,9 +1,12 @@
 import json
+import re
 import shutil
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import Float, case, cast, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +22,12 @@ from app.schemas import (
     DocumentCount,
     ProjectMetricsRead,
     ClusterCreate,
+    ClusterChatRequest,
+    ClusterChatResponse,
+    ClusterChatResult,
+    ClusterChatSource,
     ClusterEditRead,
+    ClusterChatMessage,
     ClusterFromSegments,
     ClusterMerge,
     ClusterRead,
@@ -39,12 +47,183 @@ from app.schemas import (
     SegmentReassign,
 )
 from app.ml_pipeline import run_ml_pipeline
+from app.services.ollama_chat import OllamaChatError, chat_completion, chat_message, stream_chat_completion
 from app.services.edits import record_edit
-from app.services.recompute import recompute_clusters, recompute_document_primary
+from app.services.recompute import _parse_rating, _rating_column, recompute_clusters, recompute_document_primary
 from app.tasks import PIPELINE_STEPS, run_simulated_pipeline
 
 
 router = APIRouter()
+
+_FILTER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "field": {"type": "string", "enum": ["rating", "sentiment", "useful", "funny", "cool", "date", "length", "text"]},
+        "op": {"type": "string", "enum": ["eq", "gt", "gte", "lt", "lte", "contains"]},
+        "value": {},
+    },
+    "required": ["field", "op", "value"],
+}
+
+_RESPONSE_MODE_SCHEMA = {"type": "string", "enum": ["direct_list", "analysis", "facts"]}
+
+_CLUSTER_CHAT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_cluster",
+            "description": "Return exact facts for the currently open cluster.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_current_cluster",
+            "description": "Explain, interpret, summarize, or analyze the currently open cluster and its aggregate metrics. Use this for questions about what sentiment, average stars, cohesion, size, or mentions mean. Do not return review rows unless the user explicitly asks for examples or evidence.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "focus": {"type": "string", "enum": ["general", "sentiment", "rating", "cohesion", "size", "mentions"]},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_reviews_by_rating",
+            "description": "Return reviews in the current cluster having one exact star rating. Use for requests such as reviews with 1 star, 4 stars, or score 5.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rating": {"type": "number", "minimum": 0, "maximum": 5},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "response_mode": _RESPONSE_MODE_SCHEMA,
+                },
+                "required": ["rating"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_lowest_rated_reviews",
+            "description": "Return the bottom or lowest-rated reviews in the current cluster, ordered by star rating ascending.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "response_mode": _RESPONSE_MODE_SCHEMA,
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_highest_rated_reviews",
+            "description": "Return the top or highest-rated reviews in the current cluster, ordered by star rating descending.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "response_mode": _RESPONSE_MODE_SCHEMA,
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_reviews",
+            "description": "Return exact review records from the current cluster. Use only when the user explicitly asks to list, show, retrieve, filter, rank, or provide review examples/evidence. Do not use merely to explain a cluster-level metric. Top/highest scores means rating descending; bottom/lowest scores means rating ascending.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "sort_by": {"type": "string", "enum": ["rating", "sentiment", "useful", "funny", "cool", "date", "length"]},
+                    "sort_dir": {"type": "string", "enum": ["asc", "desc"]},
+                    "filters": {"type": "array", "items": _FILTER_SCHEMA},
+                    "response_mode": _RESPONSE_MODE_SCHEMA,
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "count_current_cluster_reviews",
+            "description": "Count all reviews associated with the currently open cluster. Use for unfiltered questions asking how many reviews the cluster contains. This tool takes no filters.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "count_reviews",
+            "description": "Count reviews in the current cluster using an explicit rating, sentiment, metadata, date, length, or text filter. For the unfiltered total, use count_current_cluster_reviews instead.",
+            "parameters": {
+                "type": "object",
+                "properties": {"filters": {"type": "array", "items": _FILTER_SCHEMA}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_reviews",
+            "description": "Find current-cluster reviews containing a literal text phrase.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "response_mode": _RESPONSE_MODE_SCHEMA,
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_review",
+            "description": "Retrieve one exact review by ID, only if it belongs to the current cluster.",
+            "parameters": {
+                "type": "object",
+                "properties": {"review_id": {"type": "string"}, "response_mode": _RESPONSE_MODE_SCHEMA},
+                "required": ["review_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rank_reviews_by_opinion",
+            "description": "Rank verified current-cluster reviews for a genuinely subjective goal such as most insightful, concerning, sarcastic, or best-written. Do not use for top/bottom numeric scores.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                    "filters": {"type": "array", "items": _FILTER_SCHEMA},
+                    "response_mode": _RESPONSE_MODE_SCHEMA,
+                },
+                "required": ["goal"],
+            },
+        },
+    },
+]
+
+_RANKED_REVIEW_IDS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ids": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["ids"],
+    "additionalProperties": False,
+}
 
 
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_202_ACCEPTED)
@@ -105,6 +284,7 @@ async def list_projects(db: AsyncSession = Depends(get_db), current_user: User =
             role=role,
             last_error=project.last_error,
             unit=project.unit,
+            retrieval_ready=project.retrieval_ready,
         )
         for project, role, email in result.all()
     ]
@@ -350,6 +530,93 @@ async def cluster_documents(project_id: uuid.UUID, cluster_id: uuid.UUID, db: As
         return [_document_read(doc, memberships.get(doc.id, [])) for doc in docs]
     result = await db.execute(select(Document).where(Document.project_id == project_id, Document.cluster_id == cluster_id).limit(limit).offset(offset))
     return [_document_read(doc, []) for doc in result.scalars().all()]
+
+
+@router.post("/{project_id}/clusters/{cluster_id}/chat", response_model=ClusterChatResponse)
+async def cluster_chat(project_id: uuid.UUID, cluster_id: uuid.UUID, payload: ClusterChatRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ClusterChatResponse:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
+    project = await _get_project_or_404(db, project_id)
+    cluster = await db.get(Cluster, cluster_id)
+    if not cluster or cluster.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    question = _normalize_chat_question(payload.message)
+    if not question:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    settings = get_settings()
+    context, sources, direct_answer, results, tool_state = await _cluster_chat_context(
+        db,
+        project_id,
+        cluster,
+        question=question,
+        history=payload.history,
+        active_source_ids=payload.active_source_ids,
+        last_tool_state=payload.last_tool_state,
+        sentence=project.unit == "sentence",
+    )
+    if direct_answer is not None:
+        return ClusterChatResponse(message=ClusterChatMessage(role="assistant", content=direct_answer), model="deterministic", sources=sources, results=results, tool_state=tool_state)
+    messages = _cluster_chat_messages(context, payload.history, question)
+    try:
+        answer = await run_in_threadpool(
+            chat_completion,
+            base_url=settings.ollama_base_url,
+            model=settings.ollama_chat_model,
+            messages=messages,
+            timeout=settings.ollama_timeout_seconds,
+        )
+    except OllamaChatError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return ClusterChatResponse(message=ClusterChatMessage(role="assistant", content=answer), model=settings.ollama_chat_model, sources=sources, results=results, tool_state=tool_state)
+
+
+@router.post("/{project_id}/clusters/{cluster_id}/chat/stream")
+async def cluster_chat_stream(project_id: uuid.UUID, cluster_id: uuid.UUID, payload: ClusterChatRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> StreamingResponse:
+    await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
+    project = await _get_project_or_404(db, project_id)
+    cluster = await db.get(Cluster, cluster_id)
+    if not cluster or cluster.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    question = _normalize_chat_question(payload.message)
+    if not question:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    settings = get_settings()
+    context, sources, direct_answer, results, tool_state = await _cluster_chat_context(
+        db,
+        project_id,
+        cluster,
+        question=question,
+        history=payload.history,
+        active_source_ids=payload.active_source_ids,
+        last_tool_state=payload.last_tool_state,
+        sentence=project.unit == "sentence",
+    )
+    messages = _cluster_chat_messages(context, payload.history, question)
+
+    def events():
+        yield _ndjson({"type": "sources", "sources": [source.model_dump(mode="json") for source in sources]})
+        if results:
+            yield _ndjson({"type": "results", "results": [result.model_dump(mode="json") for result in results]})
+        if tool_state:
+            yield _ndjson({"type": "tool_state", "tool_state": tool_state})
+        if direct_answer is not None:
+            yield _ndjson({"type": "token", "content": direct_answer})
+            yield _ndjson({"type": "done", "model": "deterministic"})
+            return
+        try:
+            for token in stream_chat_completion(
+                base_url=settings.ollama_base_url,
+                model=settings.ollama_chat_model,
+                messages=messages,
+                timeout=settings.ollama_timeout_seconds,
+            ):
+                yield _ndjson({"type": "token", "content": token})
+            yield _ndjson({"type": "done", "model": settings.ollama_chat_model})
+        except OllamaChatError as exc:
+            yield _ndjson({"type": "error", "message": str(exc)})
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 @router.post("/{project_id}/clusters", response_model=ClusterRead, status_code=status.HTTP_201_CREATED)
@@ -836,6 +1103,7 @@ async def _project_read(db: AsyncSession, project: Project, role: ProjectRole) -
         role=role,
         last_error=project.last_error,
         unit=project.unit,
+        retrieval_ready=project.retrieval_ready,
     )
 
 
@@ -874,6 +1142,1179 @@ async def _sample_docs(db: AsyncSession, project_id: uuid.UUID, cluster_id: uuid
             select(Document.id, Document.text).where(Document.project_id == project_id, Document.cluster_id == cluster_id).limit(limit)
         )
     return [{"id": str(row_id), "text": text[:240]} for row_id, text in result.all()]
+
+
+def _ndjson(event: dict) -> str:
+    return json.dumps(event, ensure_ascii=False) + "\n"
+
+
+def _cluster_chat_messages(context: str, history: list[ClusterChatMessage], question: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are an assistant for qualitative review analysis. "
+                "Answer only from the provided current-cluster sources and context. If listed sources are provided, treat them as the only evidence. "
+                "If a requested document, address, business id, metadata value, count, or review is not present in the current-cluster sources/context, say it was not found in this cluster. "
+                "Never invent business IDs, addresses, reviews, statistics, counts, or evidence. Do not dump raw metadata or markdown code fences unless the user explicitly asks for raw metadata. "
+                "When the user asks what you can tell them about a specific review, give a concise qualitative interpretation of the review's experience, tone, and notable signals. Be concise and analytical.\n\n"
+                f"Cluster context:\n{context}"
+            ),
+        },
+        *[m.model_dump() for m in history[-8:]],
+        {"role": "user", "content": question},
+    ]
+
+
+async def _cluster_chat_context(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster: Cluster,
+    *,
+    question: str = "",
+    history: list[ClusterChatMessage] | None = None,
+    active_source_ids: list[uuid.UUID] | None = None,
+    last_tool_state: dict | None = None,
+    sentence: bool = False,
+) -> tuple[str, list[ClusterChatSource], str | None, list[ClusterChatResult], dict | None]:
+    structured = await _cluster_structured_answer(db, project_id, cluster.id, question, history=history or [], last_tool_state=last_tool_state, sentence=sentence)
+    if structured is not None:
+        direct_answer, sources, results, tool_state = structured
+        return "", sources, direct_answer, results, tool_state
+
+    samples = await _sample_docs(db, project_id, cluster.id, limit=8, sentence=sentence)
+    terms = ", ".join(str(term.get("term", "")) for term in cluster.top_terms[:12] if term.get("term"))
+    context = [
+        f"Label: {cluster.label}",
+        f"Size: {cluster.size} reviews" + (f"; {cluster.n_mentions} mentions" if sentence and cluster.n_mentions else ""),
+    ]
+    if cluster.summary:
+        context.append(f"Summary: {cluster.summary}")
+    if terms:
+        context.append(f"Top terms: {terms}")
+    if samples:
+        quoted = "\n".join(f"- {sample['text']}" for sample in samples)
+        context.append(f"Sample {'segments' if sentence else 'documents'}:\n{quoted}")
+    return "\n".join(context), [], None, [], None
+
+
+async def _cluster_structured_answer(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    question: str,
+    *,
+    history: list[ClusterChatMessage],
+    last_tool_state: dict | None = None,
+    sentence: bool,
+) -> tuple[str, list[ClusterChatSource], list[ClusterChatResult], dict | None] | None:
+    return await _planned_cluster_chat_answer(
+        db,
+        project_id,
+        cluster_id,
+        question,
+        history=history,
+        last_tool_state=last_tool_state,
+        sentence=sentence,
+    )
+
+
+async def _planned_cluster_chat_answer(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    question: str,
+    *,
+    history: list[ClusterChatMessage],
+    last_tool_state: dict | None,
+    sentence: bool,
+) -> tuple[str, list[ClusterChatSource], list[ClusterChatResult], dict | None] | None:
+    if social_answer := _social_chat_answer(question):
+        return social_answer, [], [], last_tool_state
+    plan = await _plan_cluster_chat_tool(db, project_id, cluster_id, question, history, last_tool_state)
+    if not plan:
+        answer = await _answer_from_current_cluster_context(db, project_id, cluster_id, question)
+        if fallback_plan := _tool_plan_from_message_content(answer):
+            validated_fallback = _validate_cluster_chat_plan(fallback_plan)
+            if validated_fallback:
+                executed = await _execute_cluster_chat_plan(
+                    db,
+                    project_id,
+                    cluster_id,
+                    question,
+                    validated_fallback,
+                    sentence=sentence,
+                )
+                if executed is not None:
+                    return executed
+        if _looks_like_tool_call_content(answer):
+            return "I couldn't safely process that data request. Please try again.", [], [], last_tool_state
+        return answer, [], [], last_tool_state
+    if direct_answer := plan.get("direct_answer"):
+        return str(direct_answer), [], [], last_tool_state
+    validated = _validate_cluster_chat_plan(plan)
+    if validated is None:
+        retry = await _plan_cluster_chat_tool(
+            db,
+            project_id,
+            cluster_id,
+            question,
+            history,
+            last_tool_state,
+            correction="Your previous tool call had invalid arguments. Choose again using exactly the published tool schema.",
+        )
+        if retry and retry.get("direct_answer"):
+            return str(retry["direct_answer"]), [], [], last_tool_state
+        validated = _validate_cluster_chat_plan(retry) if retry else None
+    if validated is None:
+        return "I couldn't safely run that data request. Please clarify which review field or comparison you mean.", [], [], last_tool_state
+    plan = validated
+    executed = await _execute_cluster_chat_plan(db, project_id, cluster_id, question, plan, sentence=sentence)
+    if executed is not None:
+        return executed
+    return "I could not execute that tool request safely. Please rephrase or clarify the field you want to use.", [], [], last_tool_state
+
+
+async def _plan_cluster_chat_tool(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    question: str,
+    history: list[ClusterChatMessage],
+    last_tool_state: dict | None,
+    correction: str | None = None,
+) -> dict | None:
+    cluster = await db.get(Cluster, cluster_id)
+    if not cluster or cluster.project_id != project_id:
+        return {"direct_answer": "Current cluster was not found."}
+    system = (
+        "You are ReviewScope, a qualitative-analysis assistant operating inside one current cluster. "
+        "Use a tool whenever the user requests exact reviews, IDs, counts, filters, sorting, ratings, metadata, or cluster facts. "
+        "Use count_current_cluster_reviews with no arguments for an unfiltered total review count. Use count_reviews only when the user states a filter. "
+        "Use analyze_current_cluster to explain aggregate cluster metrics such as sentiment, average stars, cohesion, size, and mentions. "
+        "Do not call list_reviews for a metric explanation unless the user explicitly asks for review examples or evidence. "
+        "Use list_reviews_by_rating for an exact star value, list_lowest_rated_reviews for bottom reviews, and list_highest_rated_reviews for top reviews. "
+        "Use rank_reviews_by_opinion only for subjective judgments. "
+        "Top or bottom scores are numeric: use list_reviews with rating descending or ascending. "
+        "Examples: 'five reviews with 5 stars' means list_reviews filtered to rating=5; "
+        "'bottom five reviews' means list_reviews sorted by rating ascending; "
+        "'what can you tell me about this cluster' means analyze_current_cluster; "
+        "after a count, 'show me those' means list_reviews with the previous filters. "
+        "All scope is injected by the backend; never request or invent another cluster. "
+        "You may answer directly only when no data lookup is needed. Never invent review content, IDs, ratings, counts, or statistics. "
+        "For a greeting or social message such as hello or thanks, reply briefly and socially; do not volunteer cluster analysis. "
+        f"Current cluster label: {cluster.label}; reviews: {cluster.size}; mentions: {cluster.n_mentions}; "
+        f"average stars: {cluster.mean_stars}; sentiment: {cluster.sentiment_avg}; cohesion: {cluster.cohesion}. "
+        "Sentiment is P(positive) - P(negative) on a -1 to 1 scale; below -0.2 is negative, -0.2 through 0.2 neutral, and above 0.2 positive. "
+        "A fresh explicit request overrides previous tool state; use memory only when the user genuinely refers back to prior results. "
+        f"Previous tool state: {json.dumps(last_tool_state, ensure_ascii=False)}"
+        + (f" {correction}" if correction else "")
+    )
+    messages: list[dict] = [
+        {"role": "system", "content": system},
+        *[
+            message.model_dump()
+            for message in history[-8:]
+            if message.content.strip().lower() not in {"none", "respond", "answer_from_context"}
+        ],
+        {"role": "user", "content": question},
+    ]
+    settings = get_settings()
+    try:
+        message = await run_in_threadpool(
+            chat_message,
+            base_url=settings.ollama_base_url,
+            model=settings.ollama_chat_model,
+            messages=messages,
+            timeout=settings.ollama_timeout_seconds,
+            tools=_CLUSTER_CHAT_TOOLS,
+        )
+    except OllamaChatError:
+        return None
+
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        function = tool_calls[0].get("function", {}) if isinstance(tool_calls[0], dict) else {}
+        name = str(function.get("name", ""))
+        arguments = function.get("arguments", {})
+        if isinstance(arguments, str):
+            arguments = _parse_json_object(arguments) or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        response_mode = str(arguments.pop("response_mode", "direct_list"))
+        return {"tool": name, "args": arguments, "response_mode": response_mode}
+
+    content = message.get("content")
+    if isinstance(content, str) and content.strip() and content.strip().lower() != "none":
+        if content_plan := _tool_plan_from_message_content(content):
+            return content_plan
+        if _looks_like_tool_call_content(content):
+            return {"tool": "__invalid_tool_call__", "args": {}, "response_mode": "direct_list"}
+        return {"direct_answer": content.strip()}
+    return None
+
+
+async def _execute_cluster_chat_plan(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    question: str,
+    plan: dict,
+    *,
+    sentence: bool,
+) -> tuple[str, list[ClusterChatSource], list[ClusterChatResult], dict | None] | None:
+    tool = str(plan.get("tool", ""))
+    args = plan.get("args") if isinstance(plan.get("args"), dict) else {}
+    mode = str(plan.get("response_mode", "direct_list"))
+    args["original_question"] = question
+
+    if tool in {"get_current_cluster", "analyze_current_cluster"}:
+        cluster = await db.get(Cluster, cluster_id)
+        if not cluster or cluster.project_id != project_id:
+            return "Current cluster was not found.", [], []
+        facts = _cluster_summary_answer(cluster, prefix="Current cluster")
+        if tool == "analyze_current_cluster" or mode == "analysis":
+            scored = await _sentiment_count(db, project_id, cluster_id, sentence=sentence)
+            total = cluster.n_mentions if sentence else cluster.size
+            unit = "sentence mentions" if sentence else "reviews"
+            analysis = await _selected_clusters_analysis(
+                question,
+                [cluster],
+                focus=str(args.get("focus", "general")),
+                sentiment_coverage=(scored, total, unit),
+            )
+            return f"Current cluster {cluster.label}:\n\n{analysis}\n\nCluster facts:\n\n{facts}", [], [], _tool_state(tool, args, [])
+        return facts, [], [], _tool_state(tool, args, [])
+
+    if tool == "list_reviews":
+        answer, sources, results = await _tool_list_reviews(db, project_id, cluster_id, args, sentence=sentence)
+    elif tool == "search_reviews":
+        answer, sources, results = await _tool_search_reviews(db, project_id, cluster_id, args, sentence=sentence)
+    elif tool == "count_reviews":
+        answer, sources, results = await _tool_count_reviews(db, project_id, cluster_id, args, sentence=sentence)
+        return answer, sources, results, _tool_state(tool, args, results, summary=_count_summary_from_answer(answer))
+    elif tool == "get_review":
+        result = await _tool_get_review(db, project_id, cluster_id, args, sentence=sentence)
+        if result is None:
+            return None
+        answer, sources, results = result
+    elif tool == "rank_reviews_by_opinion":
+        answer, sources, results = await _tool_rank_reviews_by_opinion(db, project_id, cluster_id, args, sentence=sentence)
+    else:
+        return None
+
+    if results and not await _chat_results_belong_to_cluster(db, project_id, cluster_id, results, sentence=sentence):
+        return "No reviews in this cluster matched that query.", [], [], _tool_state(tool, args, [])
+
+    if mode == "analysis" and results:
+        docs = await _documents_for_results(db, project_id, cluster_id, results, sentence=sentence)
+        rating_col = await _rating_column(db, project_id)
+        evidence = _chat_review_text_by_document(docs)
+        title = answer.split("\n", 1)[0]
+        analysis = await _selected_reviews_analysis(question, docs, rating_col, evidence)
+        return f"{title}\n\n{analysis}", sources, results, _tool_state(tool, args, results)
+    return answer, sources, results, _tool_state(tool, args, results)
+
+
+async def _tool_list_reviews(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    args: dict,
+    *,
+    sentence: bool,
+) -> tuple[str, list[ClusterChatSource], list[ClusterChatResult]]:
+    docs = await _cluster_documents_for_chat(db, project_id, cluster_id, sentence=sentence)
+    evidence = _chat_review_text_by_document(docs)
+    rating_col = await _rating_column(db, project_id)
+    rows = _apply_tool_filters(docs, args.get("filters"), rating_col, evidence)
+    sort_by = _normalize_tool_field(args.get("sort_by")) or "rating"
+    sort_dir = "asc" if str(args.get("sort_dir", "desc")).lower() == "asc" else "desc"
+    rows = [doc for doc in rows if _tool_value(doc, sort_by, rating_col, evidence[doc.id]) is not None]
+    rows.sort(key=lambda doc: _tool_sort_value(doc, sort_by, rating_col, evidence[doc.id]), reverse=sort_dir != "asc")
+    limit = _tool_limit(args.get("limit"), default=5, maximum=20)
+    picked = rows[:limit]
+    if not picked:
+        return "No reviews in this cluster matched that query.", [], []
+    sources = [_chat_source_from_doc(doc, [], evidence_text=evidence[doc.id], rating=_parse_rating(doc.raw_data, rating_col), matched_field=sort_by, matched_value=str(_tool_value(doc, sort_by, rating_col, evidence[doc.id]))) for doc in picked]
+    results = [_chat_result_from_doc(doc, _parse_rating(doc.raw_data, rating_col), evidence[doc.id]) for doc in picked]
+    return _review_list_answer("Matching reviews", results), sources, results
+
+
+async def _tool_search_reviews(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    args: dict,
+    *,
+    sentence: bool,
+) -> tuple[str, list[ClusterChatSource], list[ClusterChatResult]]:
+    query = str(args.get("query", "")).strip()
+    if len(query) < 3:
+        return "What text should I search for in this cluster's reviews?", [], []
+    docs = await _cluster_documents_for_chat(db, project_id, cluster_id, sentence=sentence)
+    evidence = _chat_review_text_by_document(docs)
+    picked = [
+        doc for doc in docs
+        if query.lower() in evidence[doc.id].lower()
+    ][:_tool_limit(args.get("limit"), default=5, maximum=20)]
+    if not picked:
+        return f"No reviews in this cluster mention `{query}`.", [], []
+    rating_col = await _rating_column(db, project_id)
+    sources = [_chat_source_from_doc(doc, [query], evidence_text=evidence[doc.id], rating=_parse_rating(doc.raw_data, rating_col)) for doc in picked]
+    results = [_chat_result_from_doc(doc, _parse_rating(doc.raw_data, rating_col), evidence[doc.id]) for doc in picked]
+    return _review_list_answer(f"Reviews mentioning `{query}`", results), sources, results
+
+
+async def _tool_count_reviews(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    args: dict,
+    *,
+    sentence: bool,
+) -> tuple[str, list[ClusterChatSource], list[ClusterChatResult]]:
+    if not args.get("filters"):
+        count_query = select(func.count()).select_from(Document).where(
+            Document.project_id == project_id,
+            _chat_cluster_membership_clause(project_id, cluster_id, sentence=sentence),
+        )
+        count = int((await db.execute(count_query)).scalar_one())
+        return f"This cluster contains {count} reviews.", [], []
+    docs = await _cluster_documents_for_chat(db, project_id, cluster_id, sentence=sentence)
+    evidence = _chat_review_text_by_document(docs)
+    rating_col = await _rating_column(db, project_id)
+    rows = _apply_tool_filters(docs, args.get("filters"), rating_col, evidence)
+    return f"Found {len(rows)} reviews in this cluster matching that query.", [], []
+
+
+async def _tool_get_review(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    args: dict,
+    *,
+    sentence: bool,
+) -> tuple[str, list[ClusterChatSource], list[ClusterChatResult]] | None:
+    review_id = str(args.get("review_id", "")).strip()
+    if not review_id:
+        return None
+    doc = await _find_cluster_review_by_id(db, project_id, cluster_id, review_id, sentence=sentence)
+    if doc:
+        rating_col = await _rating_column(db, project_id)
+        rating = _parse_rating(doc.raw_data, rating_col)
+        evidence = _chat_review_text_by_document([doc])
+        source = _chat_source_from_doc(doc, [review_id], evidence_text=evidence[doc.id], include_full=True, rating=rating)
+        result = _chat_result_from_doc(doc, rating, evidence[doc.id])
+        return _review_list_answer("Matched review", [result]), [source], [result]
+
+    doc = await _find_project_review_by_id(db, project_id, review_id)
+    if not doc:
+        return "No review with that ID was found in this project.", [], []
+    membership = "does not have a mention in" if sentence else "is not assigned to"
+    return f"That review exists, but it {membership} the currently open cluster.", [], []
+
+
+async def _find_cluster_review_by_id(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    review_id: str,
+    *,
+    sentence: bool,
+) -> Document | None:
+    conditions = _review_id_conditions(review_id)
+    query = select(Document).where(
+        Document.project_id == project_id,
+        _chat_cluster_membership_clause(project_id, cluster_id, sentence=sentence),
+        or_(*conditions),
+    )
+    return (await db.execute(query.limit(1))).scalar_one_or_none()
+
+
+async def _find_project_review_by_id(db: AsyncSession, project_id: uuid.UUID, review_id: str) -> Document | None:
+    conditions = _review_id_conditions(review_id)
+    return (await db.execute(
+        select(Document).where(Document.project_id == project_id, or_(*conditions)).limit(1)
+    )).scalar_one_or_none()
+
+
+def _review_id_conditions(review_id: str) -> list:
+    conditions = [Document.primary_key_value == review_id]
+    for key in ("review_id", "id"):
+        conditions.append(Document.raw_data[key].astext == review_id)
+    try:
+        conditions.append(Document.id == uuid.UUID(review_id))
+    except ValueError:
+        pass
+    return conditions
+
+
+async def _tool_rank_reviews_by_opinion(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    args: dict,
+    *,
+    sentence: bool,
+) -> tuple[str, list[ClusterChatSource], list[ClusterChatResult]]:
+    docs = await _cluster_documents_for_chat(db, project_id, cluster_id, sentence=sentence)
+    rating_col = await _rating_column(db, project_id)
+    evidence = _chat_review_text_by_document(docs)
+    candidates = _apply_tool_filters(docs, args.get("filters"), rating_col, evidence)[:80]
+    if not candidates:
+        return "No reviews in this cluster matched the requested criteria.", [], []
+    goal = str(args.get("goal") or "best matching reviews")[:200]
+    limit = _tool_limit(args.get("limit"), default=5, maximum=10)
+    ranked = await _rank_candidate_docs(goal, candidates, rating_col, limit, evidence)
+    if not ranked:
+        reverse = not re.search(r"\b(worst|least|negative|concerning|problematic|poor)\b", goal, re.IGNORECASE)
+        ranked = sorted(candidates, key=lambda doc: _review_quality_score(doc, rating_col), reverse=reverse)[:limit]
+    sources = [_chat_source_from_doc(doc, [], evidence_text=evidence[doc.id], rating=_parse_rating(doc.raw_data, rating_col)) for doc in ranked]
+    results = [_chat_result_from_doc(doc, _parse_rating(doc.raw_data, rating_col), evidence[doc.id]) for doc in ranked]
+    title = f"Reviews selected for: {goal}"
+    return _review_list_answer(title, results), sources, results
+
+
+def _normalize_chat_question(message: str) -> str:
+    return re.sub(r"[=+*/\\|<>\s]+$", "", message.strip())
+
+
+def _social_chat_answer(question: str) -> str | None:
+    normalized = re.sub(r"[^a-z\s]", "", question.lower())
+    normalized = " ".join(normalized.split())
+    if normalized in {"hello", "hi", "hey", "hello there", "hi there", "good morning", "good afternoon", "good evening"}:
+        return "Hello! What would you like to know about this cluster?"
+    if normalized in {"thanks", "thank you", "thanks a lot", "thank you very much"}:
+        return "You're welcome!"
+    return None
+
+
+def _tool_state(tool: str, args: dict, results: list[ClusterChatResult], *, summary: dict | None = None) -> dict:
+    public_args = {key: value for key, value in args.items() if key != "original_question"}
+    return {
+        "tool": tool,
+        "scope": {"type": "current_cluster"},
+        "args": public_args,
+        "result_ids": [result.primary_key_value for result in results],
+        "result_summary": summary or {"count": len(results)},
+    }
+
+
+def _count_summary_from_answer(answer: str) -> dict:
+    match = re.search(r"(?:Found|contains)\s+(\d+)", answer, re.IGNORECASE)
+    return {"count": int(match.group(1))} if match else {}
+
+
+def _review_quality_score(doc: Document, rating_col: str | None) -> float:
+    rating = _parse_rating(doc.raw_data, rating_col)
+    score = (rating or 0) * 10
+    score += (_raw_number(doc.raw_data, "useful") or 0) * 0.8
+    score += (_raw_number(doc.raw_data, "funny") or 0) * 0.4
+    score += (_raw_number(doc.raw_data, "cool") or 0) * 0.3
+    if doc.sentiment_score is not None:
+        score += doc.sentiment_score * 2
+    score += min(len(doc.text), 1200) / 1200
+    return score
+
+
+async def _selected_reviews_analysis(question: str, docs: list[Document], rating_col: str | None, evidence: dict[uuid.UUID, str]) -> str:
+    snippets = []
+    for doc in docs:
+        rating = _parse_rating(doc.raw_data, rating_col)
+        snippets.append(f"ID: {doc.primary_key_value}\nRating: {rating if rating is not None else 'n/a'}\nText: {_truncate(evidence[doc.id], 700)}")
+    prompt = (
+        "Analyze only the selected real reviews below. Do not add new review IDs or claims not supported by the text. "
+        "Give 2-4 concise bullets explaining the shared pattern, tone, and why these reviews stand out.\n\n"
+        f"User question: {question}\n\nSelected reviews:\n" + "\n\n".join(snippets)
+    )
+    settings = get_settings()
+    try:
+        return await run_in_threadpool(
+            chat_completion,
+            base_url=settings.ollama_base_url,
+            model=settings.ollama_chat_model,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=settings.ollama_timeout_seconds,
+            response_format=_RANKED_REVIEW_IDS_SCHEMA,
+        )
+    except OllamaChatError:
+        ratings = [_parse_rating(doc.raw_data, rating_col) for doc in docs]
+        known = [rating for rating in ratings if rating is not None]
+        avg = sum(known) / len(known) if known else None
+        descriptor = f" Their average rating is {avg:.1f} stars." if avg is not None else ""
+        return f"These reviews stand out based on the selected ranking criteria and their review text.{descriptor} Read the cards for the concrete evidence."
+
+
+def _cluster_summary_answer(cluster: Cluster, *, prefix: str, compact: bool = False) -> str:
+    stats = [
+        f"id: {cluster.id}",
+        f"label: {cluster.label}",
+        f"reviews: {cluster.size}",
+    ]
+    if cluster.n_mentions and cluster.n_mentions != cluster.size:
+        stats.append(f"mentions: {cluster.n_mentions}")
+    if cluster.mean_stars is not None:
+        stats.append(f"avg stars: {cluster.mean_stars:.2f}")
+    if cluster.sentiment_avg is not None:
+        stats.append(f"sentiment: {cluster.sentiment_avg:.3f}")
+    if cluster.cohesion is not None:
+        stats.append(f"cohesion: {cluster.cohesion:.3f}")
+    if compact:
+        return f"{prefix} {cluster.label}\n" + "; ".join(stats)
+    summary = f"\nSummary: {cluster.summary}" if cluster.summary else ""
+    return f"{prefix} {cluster.label}\n" + "\n".join(stats) + summary
+
+
+async def _selected_clusters_analysis(
+    question: str,
+    clusters: list[Cluster],
+    *,
+    focus: str = "general",
+    sentiment_coverage: tuple[int, int, str] | None = None,
+) -> str:
+    rows = []
+    for cluster in clusters:
+        terms = ", ".join(str(term.get("term", "")) for term in cluster.top_terms[:8] if term.get("term"))
+        rows.append(
+            "\n".join(
+                [
+                    f"ID: {cluster.id}",
+                    f"Label: {cluster.label}",
+                    f"Reviews: {cluster.size}",
+                    f"Mentions: {cluster.n_mentions}",
+                    f"Average stars: {cluster.mean_stars:.2f}" if cluster.mean_stars is not None else "Average stars: n/a",
+                    f"Sentiment: {cluster.sentiment_avg:.3f}" if cluster.sentiment_avg is not None else "Sentiment: n/a",
+                    f"Cohesion: {cluster.cohesion:.3f}" if cluster.cohesion is not None else "Cohesion: n/a",
+                    f"Top terms: {terms}" if terms else "Top terms: n/a",
+                    f"Summary: {cluster.summary}" if cluster.summary else "Summary: n/a",
+                ]
+            )
+        )
+    methodology = ""
+    if focus == "sentiment" or re.search(r"\bsentiment\b", question, re.IGNORECASE):
+        coverage = ""
+        if sentiment_coverage:
+            scored, total, unit = sentiment_coverage
+            coverage = f" Sentiment coverage is {scored} of {total} {unit}."
+        methodology = (
+            " Sentiment methodology: each text score is P(positive) - P(negative), ranging from -1 to 1. "
+            "Scores below -0.2 are negative, -0.2 through 0.2 are neutral, and above 0.2 are positive. "
+            "The cluster sentiment is the mean of available member scores. In sentence-level projects, members are sentence mentions, not whole reviews."
+            + coverage
+        )
+    prompt = (
+        "Analyze only the retrieved cluster facts below. Do not invent clusters, counts, ratings, sentiment, or examples. "
+        "Give concise takeaways that directly answer the user's question. Explain the requested metric before interpreting its value. "
+        "Mention tradeoffs when size, stars, sentiment, and cohesion disagree."
+        f"{methodology}\n\n"
+        f"User question: {question}\n\nRetrieved clusters:\n" + "\n\n".join(rows)
+    )
+    settings = get_settings()
+    try:
+        return await run_in_threadpool(
+            chat_completion,
+            base_url=settings.ollama_base_url,
+            model=settings.ollama_chat_model,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=settings.ollama_timeout_seconds,
+        )
+    except OllamaChatError:
+        if not clusters:
+            return "No clusters were available to analyze."
+        if focus == "sentiment" or re.search(r"\bsentiment\b", question, re.IGNORECASE):
+            cluster = clusters[0]
+            value = f"{cluster.sentiment_avg:.3f}" if cluster.sentiment_avg is not None else "unavailable"
+            coverage = ""
+            if sentiment_coverage:
+                scored, total, unit = sentiment_coverage
+                coverage = f" It covers {scored} of {total} {unit}."
+            return (
+                f"The cluster sentiment score is {value}. It is the mean of P(positive) - P(negative) scores, on a -1 to 1 scale. "
+                "Values below -0.2 are negative, values from -0.2 to 0.2 are neutral, and values above 0.2 are positive."
+                f"{coverage} It is model-derived and is not the same as the average star rating."
+            )
+        largest = max(clusters, key=lambda cluster: cluster.size)
+        lowest = min((cluster for cluster in clusters if cluster.mean_stars is not None), key=lambda cluster: cluster.mean_stars, default=None)
+        highest = max((cluster for cluster in clusters if cluster.mean_stars is not None), key=lambda cluster: cluster.mean_stars, default=None)
+        lines = [f"The largest retrieved cluster is `{largest.label}` with {largest.size} reviews."]
+        if lowest and highest and lowest.id != highest.id:
+            lines.append(f"Ratings range from `{lowest.label}` at {lowest.mean_stars:.2f} stars to `{highest.label}` at {highest.mean_stars:.2f} stars.")
+        lines.append("Use the cluster facts below for the exact metrics.")
+        return " ".join(lines)
+
+
+async def _answer_from_current_cluster_context(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    question: str,
+) -> str:
+    cluster = await db.get(Cluster, cluster_id)
+    if not cluster or cluster.project_id != project_id:
+        return "Current cluster was not found."
+    docs = list((await db.execute(
+        select(Document)
+        .where(Document.project_id == project_id, Document.cluster_id == cluster_id)
+        .limit(8)
+    )).scalars().all())
+    rating_col = await _rating_column(db, project_id)
+    evidence = []
+    for doc in docs:
+        rating = _parse_rating(doc.raw_data, rating_col)
+        evidence.append(
+            f"Review {doc.primary_key_value}; rating: {rating if rating is not None else 'n/a'}; text: {_truncate(doc.text, 600)}"
+        )
+    prompt = (
+        "Answer the user's question about the currently open cluster. Use only the supplied cluster facts and review evidence. "
+        "Do not mention routing, tools, or planner tokens. Never answer with only 'none'. If evidence is insufficient, say what cannot be concluded.\n\n"
+        f"User question: {question}\n\n"
+        f"Cluster facts:\n{_cluster_summary_answer(cluster, prefix='Current cluster')}\n\n"
+        f"Primary-cluster review evidence:\n" + ("\n".join(evidence) if evidence else "No review samples available.")
+    )
+    settings = get_settings()
+    try:
+        return await run_in_threadpool(
+            chat_completion,
+            base_url=settings.ollama_base_url,
+            model=settings.ollama_chat_model,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=settings.ollama_timeout_seconds,
+        )
+    except OllamaChatError:
+        return "I couldn't generate a response because the chat model is currently unavailable."
+
+
+def _raw_number(raw_data: dict, field: str) -> float | None:
+    value = raw_data.get(field)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _cluster_documents_for_chat(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    *,
+    sentence: bool,
+) -> list[Document]:
+    query = select(Document).where(
+        Document.project_id == project_id,
+        _chat_cluster_membership_clause(project_id, cluster_id, sentence=sentence),
+    )
+    return list((await db.execute(query)).scalars().all())
+
+
+def _chat_cluster_membership_clause(
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    *,
+    sentence: bool,
+):
+    if sentence:
+        member_ids = select(Segment.document_id).where(
+            Segment.project_id == project_id,
+            Segment.cluster_id == cluster_id,
+        )
+        return Document.id.in_(member_ids)
+    return Document.cluster_id == cluster_id
+
+
+def _chat_review_text_by_document(docs: list[Document]) -> dict[uuid.UUID, str]:
+    return {doc.id: doc.text for doc in docs}
+
+
+async def _chat_results_belong_to_cluster(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    results: list[ClusterChatResult],
+    *,
+    sentence: bool,
+) -> bool:
+    result_ids = {result.document_id for result in results}
+    if not result_ids:
+        return True
+    matched_ids = set((await db.execute(
+        select(Document.id).where(
+            Document.project_id == project_id,
+            Document.id.in_(result_ids),
+            _chat_cluster_membership_clause(project_id, cluster_id, sentence=sentence),
+        )
+    )).scalars().all())
+    return matched_ids == result_ids
+
+
+async def _documents_for_results(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    results: list[ClusterChatResult],
+    *,
+    sentence: bool,
+) -> list[Document]:
+    result_ids = [result.document_id for result in results]
+    docs = list((await db.execute(
+        select(Document).where(
+            Document.project_id == project_id,
+            Document.id.in_(result_ids),
+            _chat_cluster_membership_clause(project_id, cluster_id, sentence=sentence),
+        )
+    )).scalars().all())
+    by_id = {doc.id: doc for doc in docs}
+    return [by_id[result.document_id] for result in results if result.document_id in by_id]
+
+
+def _chat_result_from_doc(doc: Document, rating: float | None, evidence_text: str | None = None) -> ClusterChatResult:
+    return ClusterChatResult(
+        document_id=doc.id,
+        primary_key_value=doc.primary_key_value,
+        rating=rating,
+        snippet=_truncate(evidence_text if evidence_text is not None else doc.text, 520),
+    )
+
+
+def _review_list_answer(title: str, results: list[ClusterChatResult]) -> str:
+    lines = [f"{title} ({len(results)}):"]
+    for index, result in enumerate(results, start=1):
+        rating = f"Rating: {result.rating:g}" if result.rating is not None else "Rating: n/a"
+        lines.append(f"{index}. Review {result.primary_key_value}\n{rating}\nText: {result.snippet}")
+    return "\n\n".join(lines)
+
+
+def _parse_ranked_ids(raw: str, allowed: set[str]) -> list[str]:
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = None
+    values = payload.get("ids") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        values = re.findall(r"[A-Za-z0-9_-]{3,}", raw)
+    ranked = []
+    seen = set()
+    for value in values:
+        primary_key = str(value)
+        if primary_key in allowed and primary_key not in seen:
+            ranked.append(primary_key)
+            seen.add(primary_key)
+    return ranked
+
+
+def _parse_json_object(raw: str) -> dict | None:
+    candidates = [raw.strip()]
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match and match.group(0) not in candidates:
+        candidates.append(match.group(0))
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except ValueError:
+            continue
+        for _ in range(2):
+            if not isinstance(payload, str):
+                break
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                break
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _tool_plan_from_message_content(content: str) -> dict | None:
+    payload = _parse_json_object(content)
+    if not payload:
+        return None
+    function = payload.get("function") if isinstance(payload.get("function"), dict) else payload
+    name = function.get("name") or payload.get("tool")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    arguments = function.get("arguments", function.get("parameters", payload.get("args", {})))
+    if isinstance(arguments, str):
+        arguments = _parse_json_object(arguments) or {}
+    if not isinstance(arguments, dict):
+        arguments = {}
+    arguments = dict(arguments)
+    response_mode = str(arguments.pop("response_mode", payload.get("response_mode", "direct_list")))
+    return {"tool": name.strip(), "args": arguments, "response_mode": response_mode}
+
+
+def _looks_like_tool_call_content(content: str) -> bool:
+    has_protocol_key = re.search(r"[\"']?(?:name|tool|function|parameters|arguments)[\"']?\s*:", content, re.IGNORECASE)
+    tool_names = (
+        "get_current_cluster",
+        "analyze_current_cluster",
+        "list_reviews",
+        "count_current_cluster_reviews",
+        "count_reviews",
+        "search_reviews",
+        "get_review",
+        "rank_reviews_by_opinion",
+    )
+    return bool(has_protocol_key and any(name in content for name in tool_names))
+
+
+def _validate_cluster_chat_plan(plan: dict) -> dict | None:
+    tool = str(plan.get("tool", ""))
+    unfiltered_count = tool in {"count_current_cluster_reviews", "count_cluster_reviews", "get_cluster_size"}
+    tool = {
+        "get_reviews": "list_reviews",
+        "filter_reviews": "list_reviews",
+        "get_reviews_by_rating": "list_reviews_by_rating",
+        "reviews_by_rating": "list_reviews_by_rating",
+        "bottom_reviews": "list_lowest_rated_reviews",
+        "top_reviews": "list_highest_rated_reviews",
+        "count_current_cluster_reviews": "count_reviews",
+        "count_cluster_reviews": "count_reviews",
+        "get_cluster_size": "count_reviews",
+    }.get(tool, tool)
+    allowed_tools = {
+        "get_current_cluster",
+        "analyze_current_cluster",
+        "list_reviews",
+        "list_reviews_by_rating",
+        "list_lowest_rated_reviews",
+        "list_highest_rated_reviews",
+        "count_reviews",
+        "search_reviews",
+        "get_review",
+        "rank_reviews_by_opinion",
+    }
+    if tool not in allowed_tools:
+        return None
+    mode = str(plan.get("response_mode", "direct_list"))
+    if mode not in {"direct_list", "analysis", "count", "facts"}:
+        mode = "direct_list"
+    raw_args = plan.get("args")
+    args = dict(raw_args) if isinstance(raw_args, dict) else {}
+    for key in ("cluster_id", "project_id", "scope"):
+        args.pop(key, None)
+    if unfiltered_count:
+        args = {"filters": []}
+
+    if tool == "list_reviews_by_rating":
+        rating = args.get("rating", args.get("stars", args.get("score")))
+        try:
+            rating = float(rating)
+        except (TypeError, ValueError):
+            return None
+        tool = "list_reviews"
+        args = {
+            "limit": args.get("limit", 5),
+            "sort_by": "rating",
+            "sort_dir": "desc",
+            "filters": [{"field": "rating", "op": "eq", "value": rating}],
+        }
+    elif tool in {"list_lowest_rated_reviews", "list_highest_rated_reviews"}:
+        direction = "asc" if tool == "list_lowest_rated_reviews" else "desc"
+        tool = "list_reviews"
+        args = {"limit": args.get("limit", 5), "sort_by": "rating", "sort_dir": direction, "filters": []}
+    elif tool == "rank_reviews_by_opinion":
+        goal = str(args.get("goal", "")).lower()
+        if re.search(r"\b(bottom|lowest)\b", goal):
+            tool = "list_reviews"
+            args = {"limit": args.get("limit", 5), "sort_by": "rating", "sort_dir": "asc", "filters": args.get("filters", [])}
+        elif re.search(r"\b(top|highest)\b", goal):
+            tool = "list_reviews"
+            args = {"limit": args.get("limit", 5), "sort_by": "rating", "sort_dir": "desc", "filters": args.get("filters", [])}
+
+    if tool == "get_current_cluster":
+        args = {}
+    elif tool == "analyze_current_cluster":
+        focus = str(args.get("focus", "general")).lower()
+        args = {"focus": focus if focus in {"general", "sentiment", "rating", "cohesion", "size", "mentions"} else "general"}
+    elif tool in {"list_reviews", "count_reviews", "rank_reviews_by_opinion"}:
+        raw_filters = args.get("filters", args.get("filter"))
+        if raw_filters is None:
+            rating = args.get("rating", args.get("stars", args.get("score")))
+            if rating is not None:
+                raw_filters = {"field": "rating", "op": "eq", "value": rating}
+            elif "field" in args and "value" in args:
+                raw_filters = {"field": args["field"], "op": args.get("op", "eq"), "value": args["value"]}
+        filters = _validated_tool_filters(raw_filters)
+        if filters is None:
+            return None
+        args["filters"] = filters
+        if tool != "count_reviews":
+            args["limit"] = _tool_limit(args.get("limit"), default=5, maximum=20 if tool == "list_reviews" else 10)
+        if tool == "list_reviews":
+            sort_by = _normalize_tool_field(args.get("sort_by")) or "rating"
+            if sort_by == "text":
+                return None
+            args["sort_by"] = sort_by
+            args["sort_dir"] = "asc" if str(args.get("sort_dir", "desc")).lower() == "asc" else "desc"
+        elif tool == "rank_reviews_by_opinion":
+            goal = str(args.get("goal", "")).strip()
+            if not goal:
+                return None
+            args["goal"] = goal[:200]
+    elif tool == "search_reviews":
+        query = str(args.get("query", "")).strip()
+        if len(query) < 2:
+            return None
+        args = {"query": query[:200], "limit": _tool_limit(args.get("limit"), default=5, maximum=20)}
+    elif tool == "get_review":
+        review_id = str(args.get("review_id", "")).strip()
+        if not review_id:
+            return None
+        args = {"review_id": review_id}
+    return {"tool": tool, "args": args, "response_mode": mode}
+
+
+def _validated_tool_filters(filters) -> list[dict] | None:
+    if filters is None or filters == {} or filters == []:
+        return []
+    if isinstance(filters, dict):
+        if "field" not in filters and len(filters) == 1:
+            field, value = next(iter(filters.items()))
+            filters = [{"field": field, "op": "eq", "value": value}]
+        else:
+            filters = [filters]
+    if not isinstance(filters, list) or len(filters) > 10:
+        return None
+    validated = []
+    for item in filters:
+        if not isinstance(item, dict):
+            return None
+        if not item:
+            continue
+        if item.get("value") is None and "value" in item:
+            continue
+        if item.get("field") is None and item.get("value") is None:
+            continue
+        raw_field = str(item.get("field", "")).lower()
+        if raw_field in {"cluster", "cluster_id", "current_cluster", "project", "project_id", "scope"}:
+            continue
+        field = _normalize_tool_field(item.get("field"))
+        op = str(item.get("op", "eq")).lower()
+        if field is None or op not in {"eq", "gt", "gte", "lt", "lte", "contains"} or "value" not in item:
+            return None
+        if op == "contains" and field != "text":
+            return None
+        validated.append({"field": field, "op": op, "value": item["value"]})
+    return validated
+
+
+def _tool_limit(value, *, default: int, maximum: int) -> int:
+    try:
+        return max(1, min(maximum, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_tool_field(value) -> str | None:
+    field = str(value or "").strip().lower().replace(" ", "_")
+    aliases = {
+        "score": "rating",
+        "stars": "rating",
+        "star": "rating",
+        "rated": "rating",
+        "rating": "rating",
+        "sentiment_score": "sentiment",
+        "sentiment": "sentiment",
+        "useful_votes": "useful",
+        "useful": "useful",
+        "funny_votes": "funny",
+        "funniest": "funny",
+        "funny": "funny",
+        "cool_votes": "cool",
+        "coolest": "cool",
+        "cool": "cool",
+        "created_at": "date",
+        "date": "date",
+        "time": "date",
+        "text_length": "length",
+        "length": "length",
+        "longest": "length",
+        "shortest": "length",
+        "text": "text",
+    }
+    return aliases.get(field)
+
+
+def _tool_value(doc: Document, field: str, rating_col: str | None, evidence_text: str | None = None):
+    if field == "rating":
+        return _parse_rating(doc.raw_data, rating_col)
+    if field == "sentiment":
+        return doc.sentiment_score
+    if field in {"useful", "funny", "cool"}:
+        return _raw_number(doc.raw_data, field)
+    if field == "date":
+        value = doc.raw_data.get("date")
+        return str(value) if value is not None else None
+    if field == "length":
+        return len(evidence_text if evidence_text is not None else doc.text)
+    if field == "text":
+        return evidence_text if evidence_text is not None else doc.text
+    return None
+
+
+def _tool_sort_value(doc: Document, field: str, rating_col: str | None, evidence_text: str | None = None):
+    value = _tool_value(doc, field, rating_col, evidence_text)
+    if isinstance(value, str):
+        return value.lower()
+    return value if value is not None else -1
+
+
+def _apply_tool_filters(
+    docs: list[Document],
+    filters,
+    rating_col: str | None,
+    evidence: dict[uuid.UUID, str] | None = None,
+) -> list[Document]:
+    if not isinstance(filters, list):
+        return docs
+    rows = docs
+    for raw_filter in filters:
+        if not isinstance(raw_filter, dict):
+            continue
+        field = _normalize_tool_field(raw_filter.get("field"))
+        op = str(raw_filter.get("op", "eq")).lower()
+        expected = raw_filter.get("value")
+        if field is None:
+            continue
+        rows = [
+            doc for doc in rows
+            if _tool_filter_matches(_tool_value(doc, field, rating_col, evidence.get(doc.id) if evidence else None), op, expected)
+        ]
+    return rows
+
+
+def _tool_filter_matches(actual, op: str, expected) -> bool:
+    if actual is None:
+        return False
+    if op == "contains":
+        return str(expected).lower() in str(actual).lower()
+    if isinstance(actual, (int, float)):
+        try:
+            expected_num = float(expected)
+        except (TypeError, ValueError):
+            return False
+        if op == "eq":
+            return float(actual) == expected_num
+        if op == "gt":
+            return float(actual) > expected_num
+        if op == "gte":
+            return float(actual) >= expected_num
+        if op == "lt":
+            return float(actual) < expected_num
+        if op == "lte":
+            return float(actual) <= expected_num
+    if op == "eq":
+        return str(actual).lower() == str(expected).lower()
+    if op in {"gt", "gte", "lt", "lte"}:
+        actual_text = str(actual)
+        expected_text = str(expected)
+        if op == "gt":
+            return actual_text > expected_text
+        if op == "gte":
+            return actual_text >= expected_text
+        if op == "lt":
+            return actual_text < expected_text
+        if op == "lte":
+            return actual_text <= expected_text
+    return False
+
+
+async def _rank_candidate_docs(
+    goal: str,
+    candidates: list[Document],
+    rating_col: str | None,
+    limit: int,
+    evidence: dict[uuid.UUID, str],
+) -> list[Document]:
+    by_id = {doc.primary_key_value: doc for doc in candidates}
+    candidate_text = []
+    for doc in candidates:
+        rating = _parse_rating(doc.raw_data, rating_col)
+        extras = []
+        for field in ("useful", "funny", "cool", "date"):
+            if field in doc.raw_data:
+                extras.append(f"{field}: {doc.raw_data[field]}")
+        candidate_text.append(
+            f"ID: {doc.primary_key_value}\nRating: {rating if rating is not None else 'n/a'}\n{'; '.join(extras)}\nText: {_truncate(evidence[doc.id], 700)}"
+        )
+    settings = get_settings()
+    prompt = (
+        "Rank review IDs for the requested goal using only the candidate IDs. "
+        "Return strict JSON only: {\"ids\":[\"id1\",\"id2\"]}. Do not invent IDs.\n"
+        f"Goal: {goal}\nLimit: {limit}\n\nCandidates:\n" + "\n\n".join(candidate_text)
+    )
+    try:
+        raw = await run_in_threadpool(
+            chat_completion,
+            base_url=settings.ollama_base_url,
+            model=settings.ollama_chat_model,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=settings.ollama_timeout_seconds,
+        )
+    except OllamaChatError:
+        return []
+    ranked_ids = _parse_ranked_ids(raw, set(by_id))[:limit]
+    return [by_id[primary_key] for primary_key in ranked_ids]
+
+
+def _chat_source_from_doc(
+    doc: Document,
+    terms: list[str],
+    *,
+    evidence_text: str | None = None,
+    include_full: bool = False,
+    rating: float | None = None,
+    matched_field: str | None = None,
+    matched_value: str | None = None,
+) -> ClusterChatSource:
+    text = evidence_text if evidence_text is not None else doc.text
+    for term in terms:
+        if matched_field is not None:
+            break
+        if doc.primary_key_value == term:
+            matched_field = "primary_key_value"
+            matched_value = doc.primary_key_value
+            break
+        found = _find_raw_match(doc.raw_data, term)
+        if found:
+            matched_field, matched_value = found
+            break
+        if term.lower() in text.lower():
+            matched_field = "text"
+            matched_value = term
+            break
+    return ClusterChatSource(
+        document_id=doc.id,
+        primary_key_value=doc.primary_key_value,
+        matched_field=matched_field,
+        matched_value=matched_value,
+        rating=rating,
+        snippet=_truncate(text, 360),
+        full_text=text if include_full else None,
+        raw_data=dict(doc.raw_data),
+    )
+
+
+def _find_raw_match(value, term: str, path: str = "raw_data") -> tuple[str, str] | None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            found = _find_raw_match(child, term, f"{path}.{key}")
+            if found:
+                return found
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found = _find_raw_match(child, term, f"{path}[{index}]")
+            if found:
+                return found
+    elif value is not None and term.lower() in str(value).lower():
+        return path, str(value)
+    return None
+
+
+def _truncate(value: str, max_chars: int) -> str:
+    return value if len(value) <= max_chars else value[: max_chars - 3] + "..."
 
 
 async def _sentiment_count(db: AsyncSession, project_id: uuid.UUID, cluster_id: uuid.UUID, *, sentence: bool = False) -> int:

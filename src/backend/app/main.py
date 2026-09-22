@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, projects, system
+from app.api import auth, project_chat, projects, system
 from app.core.config import get_settings
 
 
@@ -25,4 +25,5 @@ async def health() -> dict[str, str]:
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
+app.include_router(project_chat.router, prefix="/api/projects", tags=["project chat"])
 app.include_router(system.router, prefix="/api", tags=["system"])

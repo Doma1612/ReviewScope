@@ -245,6 +245,7 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
         embeddings.append(Embedding(
             document_id=did,
             vector=list(rec.vector),
+            vector_pg=list(rec.vector) if len(rec.vector) == 768 else None,
             umap_x=rec.umap_x,
             umap_y=rec.umap_y,
             umap_z=rec.umap_z,
@@ -265,6 +266,7 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
             cluster_id=to_uuid(rec.cluster_id),
             sentiment_score=rec.sentiment_score,
             vector=list(rec.vector),
+            vector_pg=list(rec.vector) if len(rec.vector) == 768 else None,
             umap_x=rec.umap_x,
             umap_y=rec.umap_y,
             umap_z=rec.umap_z,
@@ -301,7 +303,24 @@ def persist_run_result(session, result) -> int:
     session.add_all(segments)
     session.flush()
 
+    spec = (getattr(result, "manifest", {}) or {}).get("spec", {})
+    vectors = segments if unit == "sentence" else embeddings
+    dimension = len(vectors[0].vector) if vectors else None
+    # RAG only becomes available after a real, known 768-D pipeline run. This
+    # intentionally leaves simulated and legacy projects disabled until re-run.
+    ready = bool(
+        dimension == 768
+        and spec.get("embedding_model")
+        and all(row.vector_pg is not None for row in vectors)
+    )
     session.execute(
-        update(Project).where(Project.id == project_id).values(doc_count=len(documents), unit=unit)
+        update(Project).where(Project.id == project_id).values(
+            doc_count=len(documents),
+            unit=unit,
+            embedding_model=spec.get("embedding_model"),
+            embedding_instruction=spec.get("instruction", "no_inst"),
+            embedding_dimension=dimension,
+            retrieval_ready=ready,
+        )
     )
     return len(documents)

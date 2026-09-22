@@ -11,6 +11,7 @@ export type Project = {
   // "document" = one cluster per review (frozen/read-only); "sentence" = segment
   // (mention) level, a review maps to several clusters and editing is enabled.
   unit: "document" | "sentence";
+  retrieval_ready: boolean;
 };
 
 export type PipelineStatus = {
@@ -47,6 +48,55 @@ export type Cluster = {
   mean_stars: number | null;
   cohesion: number | null;
   sample_docs: { id: string; text: string }[];
+};
+export type ChatMessage = { role: "user" | "assistant"; content: string };
+export type ChatSource = {
+  document_id: string;
+  primary_key_value: string;
+  matched_field: string | null;
+  matched_value: string | null;
+  rating: number | null;
+  snippet: string;
+  full_text: string | null;
+  raw_data: Record<string, unknown>;
+};
+export type ChatResult = {
+  document_id: string;
+  primary_key_value: string;
+  rating: number | null;
+  snippet: string;
+};
+export type ChatToolState = Record<string, unknown>;
+export type ProjectChatSource = {
+  citation_id: string;
+  unit: "document" | "segment" | "cluster";
+  document_id: string | null;
+  segment_id: string | null;
+  primary_key_value: string | null;
+  cluster_id: string;
+  cluster_label: string;
+  rating: number | null;
+  snippet: string;
+  parent_text: string | null;
+  distance: number | null;
+  size: number | null;
+  n_mentions: number | null;
+  sentiment_avg: number | null;
+  mean_stars: number | null;
+};
+export type ProjectChatStreamHandlers = {
+  onSources?: (sources: ProjectChatSource[]) => void;
+  onToken?: (content: string) => void;
+  onDone?: (model: string) => void;
+  onError?: (message: string) => void;
+};
+export type ChatStreamHandlers = {
+  onSources?: (sources: ChatSource[]) => void;
+  onResults?: (results: ChatResult[]) => void;
+  onToolState?: (toolState: ChatToolState | null) => void;
+  onToken?: (content: string) => void;
+  onDone?: (model: string) => void;
+  onError?: (message: string) => void;
 };
 export type ClusterMembership = { cluster_id: string; cluster_label: string; mention_count: number; share: number };
 export type DocumentItem = {
@@ -97,6 +147,136 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function requestNdjson(path: string, options: RequestInit, handlers: ChatStreamHandlers): Promise<void> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...options.headers },
+    ...options,
+  });
+  if (response.status === 404 && path.endsWith("/stream")) {
+    const fallback = await request<{ message: ChatMessage; model: string; sources: ChatSource[]; results?: ChatResult[]; tool_state?: ChatToolState | null }>(path.replace(/\/stream$/, ""), options);
+    handlers.onSources?.(fallback.sources ?? []);
+    handlers.onResults?.(fallback.results ?? []);
+    handlers.onToolState?.(fallback.tool_state ?? null);
+    handlers.onToken?.(fallback.message.content);
+    handlers.onDone?.(fallback.model);
+    return;
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(body.detail ?? "Request failed");
+  }
+  if (!response.body) throw new Error("Streaming response is not available");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) processChatEvent(line, handlers);
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) processChatEvent(buffer, handlers);
+}
+
+function processChatEvent(line: string, handlers: ChatStreamHandlers) {
+  if (!line.trim()) return;
+  const event = JSON.parse(line) as { type: string; sources?: ChatSource[]; results?: ChatResult[]; tool_state?: ChatToolState | null; content?: string; model?: string; message?: string };
+  if (event.type === "sources") handlers.onSources?.(event.sources ?? []);
+  else if (event.type === "results") handlers.onResults?.(event.results ?? []);
+  else if (event.type === "tool_state") handlers.onToolState?.(event.tool_state ?? null);
+  else if (event.type === "token") handlers.onToken?.(event.content ?? "");
+  else if (event.type === "done") handlers.onDone?.(event.model ?? "");
+  else if (event.type === "error") handlers.onError?.(event.message ?? "Chat request failed");
+}
+
+async function requestProjectChatNdjson(path: string, options: RequestInit, handlers: ProjectChatStreamHandlers): Promise<void> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...options.headers },
+    ...options,
+  });
+  if (response.status === 404 && path.endsWith("/stream")) {
+    const fallbackResponse = await fetch(`${API_BASE}${path.replace(/\/stream$/, "")}`, {
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...options.headers },
+      ...options,
+    });
+    if (!fallbackResponse.ok) {
+      const body = await fallbackResponse.json().catch(() => ({ detail: fallbackResponse.statusText }));
+      throw new Error(projectChatErrorMessage(body, fallbackResponse.statusText));
+    }
+    const fallback = await fallbackResponse.json() as { message?: { content?: unknown }; model: string; sources: ProjectChatSource[] };
+    handlers.onSources?.(fallback.sources ?? []);
+    const content = projectTokenText(fallback.message?.content);
+    if (content == null) handlers.onError?.("The chat server returned an invalid response message.");
+    else {
+      handlers.onToken?.(content);
+      handlers.onDone?.(fallback.model);
+    }
+    return;
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(projectChatErrorMessage(body, response.statusText));
+  }
+  if (!response.body) throw new Error("Streaming response is not available");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) processProjectChatEvent(line, handlers);
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) processProjectChatEvent(buffer, handlers);
+}
+
+function projectChatErrorMessage(body: unknown, fallback: string): string {
+  if (!body || typeof body !== "object" || !("detail" in body)) return fallback || "Project chat request failed";
+  const detail = (body as { detail?: unknown }).detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const issue = item as { loc?: unknown; msg?: unknown };
+      return typeof issue.msg === "string" ? `${Array.isArray(issue.loc) ? issue.loc.join(".") + ": " : ""}${issue.msg}` : null;
+    }).filter((message): message is string => Boolean(message));
+    if (messages.length) return messages.join("; ");
+  }
+  return fallback || "Project chat request failed";
+}
+
+function projectTokenText(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object" || !("content" in value)) return null;
+  const nested = (value as { content?: unknown }).content;
+  return typeof nested === "string" ? nested : null;
+}
+
+function processProjectChatEvent(line: string, handlers: ProjectChatStreamHandlers) {
+  if (!line.trim()) return;
+  const event = JSON.parse(line) as { type: string; sources?: ProjectChatSource[]; content?: unknown; model?: string; message?: string };
+  if (event.type === "sources") handlers.onSources?.(event.sources ?? []);
+  else if (event.type === "token") {
+    // Accept the current string protocol and the nested shape emitted by older
+    // development containers, but never stringify an unexpected object into chat.
+    const content = projectTokenText(event.content);
+    if (content == null) handlers.onError?.("The chat server returned an invalid response token.");
+    else handlers.onToken?.(content);
+  }
+  else if (event.type === "done") handlers.onDone?.(event.model ?? "");
+  else if (event.type === "error") handlers.onError?.(event.message ?? "Chat request failed");
+}
+
 export const api = {
   register: (email: string, password: string) => request("/api/auth/register", { method: "POST", body: JSON.stringify({ email, password }) }),
   login: (email: string, password: string) => request("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
@@ -130,6 +310,12 @@ export const api = {
     return request<{ total: number }>(`/api/projects/${projectId}/documents/count${qs ? `?${qs}` : ""}`);
   },
   clusterDocuments: (projectId: string, clusterId: string) => request<DocumentItem[]>(`/api/projects/${projectId}/clusters/${clusterId}/documents`),
+  clusterChat: (projectId: string, clusterId: string, message: string, history: ChatMessage[], activeSourceIds: string[], lastToolState?: ChatToolState | null) =>
+    request<{ message: ChatMessage; model: string; sources: ChatSource[]; results: ChatResult[]; tool_state: ChatToolState | null }>(`/api/projects/${projectId}/clusters/${clusterId}/chat`, { method: "POST", body: JSON.stringify({ message, history, active_source_ids: activeSourceIds, last_tool_state: lastToolState ?? null }) }),
+  clusterChatStream: (projectId: string, clusterId: string, message: string, history: ChatMessage[], activeSourceIds: string[], lastToolState: ChatToolState | null, handlers: ChatStreamHandlers) =>
+    requestNdjson(`/api/projects/${projectId}/clusters/${clusterId}/chat/stream`, { method: "POST", body: JSON.stringify({ message, history, active_source_ids: activeSourceIds, last_tool_state: lastToolState }) }, handlers),
+  projectChatStream: (projectId: string, message: string, history: ChatMessage[], handlers: ProjectChatStreamHandlers) =>
+    requestProjectChatNdjson(`/api/projects/${projectId}/chat/stream`, { method: "POST", body: JSON.stringify({ message, history }) }, handlers),
   // Move all of a review's mentions to one cluster (sentence-unit "move all").
   reassignReview: (projectId: string, documentId: string, clusterId: string | null) =>
     request<DocumentItem>(`/api/projects/${projectId}/documents/${documentId}`, { method: "PATCH", body: JSON.stringify({ cluster_id: clusterId }) }),

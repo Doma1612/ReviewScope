@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # call the real reviewscope_ml seam. ml_device is passed straight to the seam.
     simulate_ml: bool = Field(default=True, alias="SIMULATE_ML")
     ml_device: str = Field(default="cpu", alias="ML_DEVICE")
+    ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
+    ollama_chat_model: str = Field(default="llama3.2", alias="OLLAMA_CHAT_MODEL")
+    ollama_timeout_seconds: int = Field(default=120, alias="OLLAMA_TIMEOUT_SECONDS")
 
     model_config = SettingsConfigDict(
         env_file=".env",
