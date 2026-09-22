@@ -25,8 +25,38 @@ settings = get_settings()
 _GREETING = re.compile(r"^(?:hi|hello|hey)(?:\s+there)?[!,.\s]*$", re.IGNORECASE)
 
 
+# Tools that only make sense for a question that actually asks for them. The
+# planner reaches for them on plain topical questions, and each one then
+# answers confidently about something the user did not ask.
+_TOOL_INTENT = {
+    "rank_clusters": re.compile(
+        r"\b(?:rank|ranking|largest|biggest|smallest|most|least|highest|lowest|top|bottom|worst|best)\b",
+        re.IGNORECASE,
+    ),
+    "get_project_cluster_count": re.compile(r"\b(?:how many|number of|count)\b", re.IGNORECASE),
+    "explain_project_data_source": re.compile(
+        r"\b(?:how do you know|how did you|where .* from|data source|based on what)\b", re.IGNORECASE
+    ),
+    "describe_project_chat": re.compile(
+        r"\b(?:what can you|who are you|help|capabilit)\b", re.IGNORECASE
+    ),
+}
+
+# A plain topical question that fails tool selection is still answerable: the
+# retrieval path takes the question as its query. Measured on llama3.2, eight
+# identical planning calls for "housing prices" produced five different
+# outcomes and never chose search_project_evidence, so treating a planner
+# mishap as a hard error makes the chat look broken when it is not.
+_SEARCH_FALLBACK = ("search_project_evidence", {"query": None, "limit": 10})
+
+
 def _is_greeting(message: str) -> bool:
     return bool(_GREETING.fullmatch(message.strip()))
+
+
+def _search_fallback(question: str) -> tuple[str, dict]:
+    name, arguments = _SEARCH_FALLBACK
+    return name, {**arguments, "query": question}
 
 
 async def _authorize_project_chat(db: AsyncSession, project_id: uuid.UUID, user: User) -> None:
@@ -73,8 +103,20 @@ async def _context(db: AsyncSession, project_id: uuid.UUID, user: User, body: Pr
             question=body.message.strip(),
             history=body.history,
         )
-    except (OllamaChatError, ValueError) as exc:
+    except OllamaChatError as exc:
+        # Ollama itself is unreachable or erroring — a real failure to report.
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except ValueError:
+        # The planner picked nothing usable. Answer the question directly.
+        tool_name, arguments = _search_fallback(body.message.strip())
+
+    intent = _TOOL_INTENT.get(tool_name)
+    if intent is not None and not intent.search(body.message):
+        # Answering an unasked question is worse than picking the wrong tool:
+        # it returns a confident number with no error. The sentiment ranking in
+        # particular is only as meaningful as the corpus the sentiment model
+        # was trained for.
+        tool_name, arguments = _search_fallback(body.message.strip())
 
     if tool_name == "describe_project_chat":
         sources = []
