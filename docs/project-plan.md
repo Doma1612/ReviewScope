@@ -73,6 +73,45 @@ gantt
     WP12 – Demo Prep                        :wp12b, 2026-09-07, 2w
 ```
 
+### Gantt Chart — actual (as of 2026-09-23)
+
+Reconstructed from commit and run dates, so windows mark when work landed and may
+start later than the work did. Legend: done = finished, active = ongoing,
+crit = partially delivered (reason in the task name).
+
+```mermaid
+gantt
+    title ReviewScope — Actual Progress (23.09.2026)
+    dateFormat  YYYY-MM-DD
+    axisFormat  %d.%m
+
+    section Milestones
+    Project Plan Presentation     :milestone, m1, 2026-05-07, 0d
+    MVP Complete                  :milestone, m2, 2026-06-29, 0d
+    Midterm Presentation          :milestone, m3, 2026-07-02, 0d
+    Final Presentation            :milestone, m4, 2026-09-24, 0d
+    Resources Due                 :milestone, m5, 2026-10-12, 0d
+
+    section Backend & Algorithm (Daniel, Dominik)
+    WP1 – Setup & Infrastructure (no CI yet)        :crit, wp1, 2026-04-29, 2026-06-28
+    WP2 – Core Backend                              :done, wp2, 2026-06-01, 2026-07-02
+    WP4 – Data Ingestion (Yelp)                     :done, wp4, 2026-05-25, 2026-06-11
+    WP5 – NLP Pipeline (eval + model selection)     :done, wp5, 2026-05-19, 2026-08-20
+    WP7 – RAG Engine                                :done, wp7, 2026-08-08, 2026-09-22
+    WP9 – EuroParl Integration (English only)       :done, wp9, 2026-09-18, 2026-09-22
+    WP9b – Reproducibility (per-seed only)          :crit, wp9b, 2026-06-11, 2026-08-08
+    WP11 – Integration & Testing                    :active, wp11, 2026-08-20, 2026-09-24
+    WP12 – Demo Prep                                :active, wp12, 2026-09-20, 2026-09-24
+
+    section Frontend (Shokoufeh)
+    WP3 – Scaffolding & Upload UI                   :done, wp3, 2026-06-01, 2026-06-30
+    WP6 – Cluster Visualization                     :done, wp6, 2026-06-15, 2026-08-08
+    WP8 – RAG Chat Interface (no chat history)      :done, wp8, 2026-08-08, 2026-09-22
+    WP10 – Timeline Visualization (not merged)      :crit, wp10, 2026-09-18, 2026-09-21
+    WP11 – Integration & Testing                    :active, wp11b, 2026-08-20, 2026-09-24
+    WP12 – Demo Prep                                :active, wp12b, 2026-09-20, 2026-09-24
+```
+
 ---
 
 ## Phase Summary
