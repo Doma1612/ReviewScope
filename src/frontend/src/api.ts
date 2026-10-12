@@ -112,7 +112,6 @@ export type DocumentItem = {
 };
 export type Member = { user_id: string; email: string; role: "owner" | "viewer" };
 export type Models = { embedding_model: string; label_model: string; variant: string; simulated: boolean };
-export type Health = { status: string };
 export type ProjectMetrics = { metrics: Record<string, unknown> | null; computed_at: string | null; stale: boolean };
 export type SchemaColumn = { name: string; type: string; is_primary_key: boolean };
 export type DocumentFilter = { column: string; op: "eq" | "gte" | "lte"; value: string; type: string };
@@ -326,8 +325,6 @@ export const api = {
     request<EmbeddingPoint>(`/api/projects/${projectId}/segments/${segmentId}`, { method: "PATCH", body: JSON.stringify({ cluster_id: clusterId }) }),
   bulkReassignSegments: (projectId: string, segmentIds: string[], clusterId: string | null) =>
     request<{ moved: number }>(`/api/projects/${projectId}/segments/reassign`, { method: "POST", body: JSON.stringify({ segment_ids: segmentIds, cluster_id: clusterId }) }),
-  createCluster: (projectId: string, label: string) =>
-    request<Cluster>(`/api/projects/${projectId}/clusters`, { method: "POST", body: JSON.stringify({ label }) }),
   mergeClusters: (projectId: string, sourceIds: string[], targetId: string) =>
     request<Cluster>(`/api/projects/${projectId}/clusters/merge`, { method: "POST", body: JSON.stringify({ source_ids: sourceIds, target_id: targetId }) }),
   createClusterFromSegments: (projectId: string, segmentIds: string[], label: string) =>
@@ -337,8 +334,6 @@ export const api = {
   deleteCluster: (projectId: string, clusterId: string) =>
     request<void>(`/api/projects/${projectId}/clusters/${clusterId}`, { method: "DELETE" }),
   getSchema: (projectId: string) => request<{ columns: SchemaColumn[] }>(`/api/projects/${projectId}/schema`),
-  saveSchema: (projectId: string, columns: SchemaColumn[]) =>
-    request<{ columns: SchemaColumn[] }>(`/api/projects/${projectId}/schema`, { method: "POST", body: JSON.stringify({ columns }) }),
   edits: (projectId: string) => request<ClusterEdit[]>(`/api/projects/${projectId}/edits`),
   projectMetrics: (projectId: string) => request<ProjectMetrics>(`/api/projects/${projectId}/metrics`),
   members: (projectId: string) => request<Member[]>(`/api/projects/${projectId}/members`),
@@ -346,5 +341,4 @@ export const api = {
   updateMember: (projectId: string, userId: string, role: Member["role"]) => request<Member>(`/api/projects/${projectId}/members/${userId}`, { method: "PATCH", body: JSON.stringify({ role }) }),
   removeMember: (projectId: string, userId: string) => request<void>(`/api/projects/${projectId}/members/${userId}`, { method: "DELETE" }),
   models: () => request<Models>("/api/models"),
-  health: () => request<Health>("/api/health"),
 };

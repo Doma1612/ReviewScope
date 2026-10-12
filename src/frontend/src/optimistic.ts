@@ -45,35 +45,6 @@ const patchDocs =
   (docs?: DocumentItem[]) =>
     docs?.map((doc) => (predicate(doc) ? { ...doc, cluster_id: clusterId } : doc));
 
-// Move `docIds` into `targetClusterId` (null = noise) across embeddings, document
-// lists and cluster sizes. Size deltas are derived from the embeddings cache so the
-// card counts shift instantly too.
-export function applyReassign(
-  qc: QueryClient,
-  projectId: string,
-  docIds: Set<string>,
-  targetClusterId: string | null,
-  clusters: Cluster[],
-): void {
-  const targetLabel = targetClusterId ? clusters.find((c) => c.id === targetClusterId)?.label ?? null : null;
-  const delta = new Map<string, number>();
-
-  qc.setQueriesData<EmbeddingPoint[]>({ queryKey: ["embeddings", projectId] }, (points) =>
-    points?.map((point) => {
-      if (!docIds.has(point.document_id) || point.cluster_id === targetClusterId) return point;
-      if (point.cluster_id) delta.set(point.cluster_id, (delta.get(point.cluster_id) ?? 0) - 1);
-      if (targetClusterId) delta.set(targetClusterId, (delta.get(targetClusterId) ?? 0) + 1);
-      return { ...point, cluster_id: targetClusterId, cluster_label: targetLabel };
-    }),
-  );
-  qc.setQueriesData<Cluster[]>({ queryKey: ["clusters", projectId] }, (cs) =>
-    cs?.map((c) => (delta.has(c.id) ? { ...c, size: Math.max(0, c.size + delta.get(c.id)!) } : c)),
-  );
-  const patch = patchDocs((doc) => docIds.has(doc.id), targetClusterId);
-  qc.setQueriesData<DocumentItem[]>({ queryKey: ["documents", projectId] }, patch);
-  qc.setQueriesData<DocumentItem[]>({ queryKey: ["cluster-docs", projectId] }, patch);
-}
-
 export function applyRename(qc: QueryClient, projectId: string, clusterId: string, label: string): void {
   qc.setQueriesData<Cluster[]>({ queryKey: ["clusters", projectId] }, (cs) =>
     cs?.map((c) => (c.id === clusterId ? { ...c, label, label_source: "hitl_override" } : c)),
@@ -121,46 +92,6 @@ export function applyJunk(qc: QueryClient, projectId: string, clusterId: string)
   );
   qc.setQueriesData<Cluster[]>({ queryKey: ["clusters", projectId] }, (cs) => cs?.filter((c) => c.id !== clusterId));
   const patch = patchDocs((doc) => doc.cluster_id === clusterId, null);
-  qc.setQueriesData<DocumentItem[]>({ queryKey: ["documents", projectId] }, patch);
-  qc.setQueriesData<DocumentItem[]>({ queryKey: ["cluster-docs", projectId] }, patch);
-}
-
-// Create a new cluster from a selection. The real id is server-assigned, so we
-// stage a temporary card/membership that the onSettled invalidation replaces.
-export function applyCreateFromSelection(
-  qc: QueryClient,
-  projectId: string,
-  docIds: Set<string>,
-  label: string,
-): void {
-  const tempId = `temp-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Math.random()}`;
-  const newCluster: Cluster = {
-    id: tempId,
-    label,
-    summary: "",
-    label_source: "hitl_override",
-    top_terms: [],
-    word_frequencies: {},
-    size: docIds.size,
-    n_mentions: docIds.size,
-    sentiment_avg: null,
-    sentiment_count: 0,
-    mean_stars: null,
-    cohesion: null,
-    sample_docs: [],
-  };
-  const delta = new Map<string, number>();
-  qc.setQueriesData<EmbeddingPoint[]>({ queryKey: ["embeddings", projectId] }, (points) =>
-    points?.map((point) => {
-      if (!docIds.has(point.document_id)) return point;
-      if (point.cluster_id) delta.set(point.cluster_id, (delta.get(point.cluster_id) ?? 0) - 1);
-      return { ...point, cluster_id: tempId, cluster_label: label };
-    }),
-  );
-  qc.setQueriesData<Cluster[]>({ queryKey: ["clusters", projectId] }, (cs) =>
-    cs ? [...cs.map((c) => (delta.has(c.id) ? { ...c, size: Math.max(0, c.size + delta.get(c.id)!) } : c)), newCluster] : cs,
-  );
-  const patch = patchDocs((doc) => docIds.has(doc.id), tempId);
   qc.setQueriesData<DocumentItem[]>({ queryKey: ["documents", projectId] }, patch);
   qc.setQueriesData<DocumentItem[]>({ queryKey: ["cluster-docs", projectId] }, patch);
 }

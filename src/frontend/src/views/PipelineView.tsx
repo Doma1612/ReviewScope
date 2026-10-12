@@ -87,8 +87,6 @@ const METHOD_STAGES: MethodStage[] = [
   },
 ];
 
-const STATUS_ORDER = { pending: 0, running: 1, done: 2, failed: 3 } as const;
-
 export function PipelineView() {
   const { projectId = "" } = useParams();
   const project = useQuery({ queryKey: ["project", projectId], queryFn: () => api.project(projectId) });

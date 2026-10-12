@@ -220,10 +220,6 @@ class ClusterEditRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class DocumentReassign(BaseModel):
-    cluster_id: uuid.UUID | None = None  # None = move to noise
-
-
 class BulkReassign(BaseModel):
     document_ids: list[uuid.UUID]
     cluster_id: uuid.UUID | None = None  # None = move to noise
@@ -252,11 +248,6 @@ class ClusterCreate(BaseModel):
 class ClusterMerge(BaseModel):
     source_ids: list[uuid.UUID]
     target_id: uuid.UUID
-
-
-class ClusterFromSelection(BaseModel):
-    document_ids: list[uuid.UUID]
-    label: str
 
 
 class SegmentReassign(BaseModel):

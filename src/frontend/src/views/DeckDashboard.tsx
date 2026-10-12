@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api, Cluster, EmbeddingPoint, Project } from "../api";
+import { api, Cluster, EmbeddingPoint } from "../api";
 import { NOISE_COLOR, clusterColor, pointColor } from "../colors";
 import { hoverTitle, sentimentSummary } from "../hover";
 import { POINT_CAP, samplePoints } from "../plot";
