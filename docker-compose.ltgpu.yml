@@ -1,0 +1,63 @@
+# Override for ltgpu1 (shared uni box): GPU without nvidia-container-toolkit.
+#
+#   docker-compose -f docker-compose.yml -f docker-compose.ltgpu.yml up -d
+#
+# This box has Docker 20.10.7, no sudo, and no nvidia-container-toolkit, so
+# `runtime: nvidia` / `--gpus` / docker-compose.gpu.yml do not work here. Instead
+# the driver device nodes are passed through directly and the host's userspace
+# driver libs are bind-mounted. Machines with the toolkit use
+# docker-compose.gpu.yml instead.
+
+services:
+  db:
+    # Docker 20.10.7's seccomp profile blocks clone3. The pgvector image is
+    # bookworm-based (glibc >=2.34 uses clone3), so initdb can't fork postgres
+    # ("popen failure: Cannot allocate memory"). Relaxing seccomp for just this
+    # container is a runtime option — no sudo, no daemon change. (redis is
+    # Alpine/musl and api/worker are bullseye, so none of them hit this.)
+    security_opt:
+      - seccomp=unconfined
+
+  worker:
+    environment:
+      # A request, not a grab: each run claims only idle cards via nvidia-smi
+      # (app.ml_pipeline._claim_device) and falls back to CPU when all are busy.
+      ML_DEVICE: cuda
+      ML_MAX_GPUS: 1
+    # All 4 GPUs are visible so the claim can pick whichever one is idle; the
+    # process is then pinned to its claimed card via CUDA_VISIBLE_DEVICES.
+    devices:
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidia1:/dev/nvidia1
+      - /dev/nvidia2:/dev/nvidia2
+      - /dev/nvidia3:/dev/nvidia3
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+    volumes:
+      # Host driver libs: mount the .so.1 SONAME symlinks — Docker resolves each
+      # to the versioned file, so these survive driver minor-version bumps.
+      - /lib/x86_64-linux-gnu/libcuda.so.1:/lib/x86_64-linux-gnu/libcuda.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-ml.so.1:/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:ro
+      # claim_gpu() shells out to nvidia-smi to find idle cards.
+      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
+
+  ollama:
+    # Ollama's Go runtime uses syscalls this box's old Docker seccomp profile
+    # blocks (SIGSYS → runtime crash). Same relaxation as db.
+    security_opt:
+      - seccomp=unconfined
+    # Exposing ONLY /dev/nvidia3 hard-pins Ollama to GPU 3: it cannot see or
+    # spread across the other cards (unpinned it spread a small model over every
+    # GPU, ~26 GB, and blocked the box). Change the 3 below if a neighbour is on it.
+    devices:
+      - /dev/nvidia3:/dev/nvidia3
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+    volumes:
+      - /lib/x86_64-linux-gnu/libcuda.so.1:/lib/x86_64-linux-gnu/libcuda.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-ml.so.1:/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:ro

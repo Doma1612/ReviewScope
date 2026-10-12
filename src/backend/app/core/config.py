@@ -23,9 +23,12 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     # ML integration. simulate_ml keeps the fabricated pipeline (no heavy deps,
     # used by tests and lightweight runs); the dockerized worker sets it false to
-    # call the real reviewscope_ml seam. ml_device is passed straight to the seam.
+    # call the real reviewscope_ml seam. ml_device="cuda" is a request, not a
+    # guarantee: each run claims only idle GPUs and falls back to CPU otherwise.
+    # ml_max_gpus caps how many idle cards one run may take (0 = all idle ones).
     simulate_ml: bool = Field(default=True, alias="SIMULATE_ML")
     ml_device: str = Field(default="cpu", alias="ML_DEVICE")
+    ml_max_gpus: int = Field(default=1, alias="ML_MAX_GPUS")
     ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
     ollama_chat_model: str = Field(default="llama3.2", alias="OLLAMA_CHAT_MODEL")
     ollama_timeout_seconds: int = Field(default=120, alias="OLLAMA_TIMEOUT_SECONDS")

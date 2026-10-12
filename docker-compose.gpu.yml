@@ -1,0 +1,33 @@
+# Override for an NVIDIA machine with nvidia-container-toolkit installed
+# (the normal setup on a personal workstation or a cloud GPU VM).
+#
+#   docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# On ltgpu1 use docker-compose.ltgpu.yml instead (no toolkit there).
+#
+# The worker image ships torch 2.7.1+cu126 (pinned for ltgpu1's Pascal cards);
+# it covers Pascal through Hopper / RTX 40xx but not Blackwell (RTX 50xx).
+
+services:
+  worker:
+    environment:
+      # Each run claims only idle cards and falls back to CPU when all are busy.
+      ML_DEVICE: cuda
+      ML_MAX_GPUS: 1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              # utility = nvidia-smi, which the idle-GPU claim relies on.
+              capabilities: [gpu, utility, compute]
+
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

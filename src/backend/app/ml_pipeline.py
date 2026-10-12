@@ -45,6 +45,7 @@ def run_ml_pipeline(project_id: str) -> None:
         session.execute(update(Project).where(Project.id == pid).values(status=ProjectStatus.processing, last_error=None))
         session.commit()
 
+    claim = _claim_device(settings)
     try:
         # Lazy import: only this path needs torch / sentence-transformers / umap.
         from reviewscope_ml.app import IngestError, run_from_upload
@@ -57,7 +58,7 @@ def run_ml_pipeline(project_id: str) -> None:
                 schema=schema,
                 project_id=project_id,
                 progress=sink,
-                device=settings.ml_device,
+                device=claim.device if claim else "cpu",
                 label_clusters=True,
                 corpus_profile=corpus_profile_for(source_filename),
                 # A project's run directory is keyed on project id + variant,
@@ -94,6 +95,25 @@ def run_ml_pipeline(project_id: str) -> None:
             session.commit()
     except Exception as exc:  # noqa: BLE001 — surface any failure as a failed run
         _fail(pid, str(exc))
+    finally:
+        if claim:
+            claim.release()
+
+
+def _claim_device(settings):
+    """Pin this run to idle GPU(s), or None for a plain CPU run.
+
+    The GPU box is shared and unscheduled, so ML_DEVICE=cuda only *requests* a
+    GPU: claim_gpu() picks idle cards via nvidia-smi, sets CUDA_VISIBLE_DEVICES,
+    and falls back to CPU when every card is busy or no driver is present. It
+    must run before torch initialises CUDA, which is why the worker recycles
+    its process after every task (see app.worker).
+    """
+    if settings.ml_device != "cuda":
+        return None
+    from reviewscope_ml.runtime.gpu import claim_gpu
+
+    return claim_gpu(max_gpus=settings.ml_max_gpus or None)
 
 
 def _ensure_jobs(session, project_id: uuid.UUID) -> None:

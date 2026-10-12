@@ -7,6 +7,11 @@ settings = get_settings()
 
 celery_app = Celery("reviewscope", broker=settings.redis_url, backend=settings.redis_url)
 
+# One task per worker process: a pipeline run pins its GPU through
+# CUDA_VISIBLE_DEVICES, which CUDA reads only once per process. A recycled
+# process would keep the previous run's cards (or CUDA state) for the next run.
+celery_app.conf.worker_max_tasks_per_child = 1
+
 # Import the task modules so their @celery_app.task registrations run in the
 # worker. Done after celery_app is defined so the app.* -> app.worker import in
 # those modules resolves. ml_pipeline keeps reviewscope_ml as a lazy in-task

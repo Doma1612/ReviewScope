@@ -21,7 +21,12 @@ RUN apt-get update \
 # image is available for execution on the device". torch 2.7.1 ships sm_60 cubins
 # that run on sm_61 (verified against the host .venv). Installing it first pins
 # the resolver so the reviewscope_ml install below keeps this build.
-RUN pip install --no-cache-dir torch==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+# arm64 (Apple Silicon, Graviton) gets the CPU build: PyTorch publishes no CUDA
+# wheel of 2.7.1 for aarch64, and Docker on a Mac has no GPU anyway. TARGETARCH is
+# set by BuildKit/buildx only; the legacy builder (ltgpu1) leaves it empty → CUDA.
+ARG TARGETARCH
+RUN if [ "$TARGETARCH" = "arm64" ]; then TORCH_INDEX=cpu; else TORCH_INDEX=cu126; fi \
+    && pip install --no-cache-dir torch==2.7.1 --index-url "https://download.pytorch.org/whl/$TORCH_INDEX"
 
 # Install the reviewscope_ml package first (its heavy deps — sentence-transformers,
 # torch, umap, hdbscan — are the slow, cache-worthy layer). Only the package
