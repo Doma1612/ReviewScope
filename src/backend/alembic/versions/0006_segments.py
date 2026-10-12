@@ -3,13 +3,6 @@
 Revision ID: 0006_segments
 Revises: 0005_project_metrics
 Create Date: 2026-07-01
-
-Additive only. Creates the ``segments`` table (the clustered unit for
-sentence-unit projects), adds ``projects.unit`` (defaults every existing row to
-"document"), ``clusters.n_mentions``, and ``cluster_edits.segment_id``, and
-widens the edit-action CHECK constraint. Nothing is dropped and no existing rows
-are rewritten — the ``embeddings`` table and all current documents/clusters stay
-exactly as they are, so existing (document-unit) projects keep rendering.
 """
 from alembic import op
 import sqlalchemy as sa
@@ -39,23 +32,19 @@ ACTIONS = (
 
 
 def upgrade() -> None:
-    # Per-project clustering unit; existing rows backfill to "document".
     op.add_column(
         "projects",
         sa.Column("unit", sa.Text(), nullable=False, server_default="document"),
     )
-    # Mention (segment) count alongside the distinct-review `size`.
     op.add_column(
         "clusters",
         sa.Column("n_mentions", sa.Integer(), nullable=False, server_default="0"),
     )
-    # Subject column for segment-level edits (plain UUID, mirrors document_id).
     op.add_column(
         "cluster_edits",
         sa.Column("segment_id", postgresql.UUID(as_uuid=True), nullable=True),
     )
 
-    # The clustered unit for sentence-unit projects.
     op.create_table(
         "segments",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
@@ -76,7 +65,6 @@ def upgrade() -> None:
     op.create_index("ix_segments_document_id", "segments", ["document_id"])
     op.create_index("ix_segments_cluster_id", "segments", ["cluster_id"])
 
-    # Widen the edit-action vocabulary (drop + recreate the CHECK).
     op.drop_constraint("ck_cluster_edits_action", "cluster_edits", type_="check")
     op.create_check_constraint(
         "ck_cluster_edits_action",
@@ -86,7 +74,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Restore the pre-0006 action list (drop the three sentence-unit actions).
     legacy = ACTIONS[:-3]
     op.drop_constraint("ck_cluster_edits_action", "cluster_edits", type_="check")
     op.create_check_constraint(

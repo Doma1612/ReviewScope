@@ -1,20 +1,3 @@
-"""
-Pipeline comparison: run all four variants, evaluate, and write a report that
-encodes the two-step decision protocol:
-
-    Step 1 (automated)  — metrics + stability shortlist 2-3 finalists.
-    Step 2 (human)      — qualitative inspection + intruder test pick the
-                          winner; the HITL app records the confirmation.
-
-The report deliberately does NOT contain a "winner" computed from metrics.
-Metrics are proxies for ranking candidates cheaply; a configuration that
-scores well but produces clusters a reader cannot name in one phrase has
-failed. The final section is a sign-off block the human reviewer completes.
-
-CLI::
-
-    python -m reviewscope_ml.eval.report --sample-size 1000 --device cpu
-"""
 from __future__ import annotations
 
 import logging
@@ -33,9 +16,6 @@ from .inspection import render_inspection, render_intruder_test
 
 logger = logging.getLogger("reviewscope.report")
 
-# Metrics used for the shortlist ranking. Higher is better for all of these
-# (silhouette twice: once classic, once with noise as a pseudo-cluster, so a
-# noise-discarding algorithm cannot win on selective grading alone).
 RANK_METRICS = ("silhouette", "silhouette_incl_noise", "coherence_cv", "rating_entropy")
 N_FINALISTS = 3
 STABILITY_SEEDS = (42, 43, 44)
@@ -51,16 +31,6 @@ def run_comparison(
     tag: Optional[str] = None,
     force: bool = False,
 ) -> Path:
-    """
-    Run every variant once with full artifacts (first seed) plus cheap
-    label-free repeats for the remaining seeds (stability), then write
-    ``data/runs/comparison_{size}[_{tag}]/report.md`` + charts.
-
-    ``embedding_model``/``instruction`` override the three custom variants
-    (BERTopic stays stock — that is what "off-the-shelf baseline" means), so
-    a model sweep is one CLI call per candidate; ``tag`` defaults to the
-    model slug to keep each sweep's report separate.
-    """
     specs = specs or default_specs()
     if embedding_model:
         from ..core.cache import make_slug
@@ -106,7 +76,6 @@ def run_comparison(
 
 
 def _shortlist(arts: dict[str, RunArtifacts]) -> list[str]:
-    """Mean rank across RANK_METRICS; missing metric = worst rank for it."""
     names = list(arts)
     mean_ranks: dict[str, list[float]] = {n: [] for n in names}
     for metric in RANK_METRICS:
@@ -223,8 +192,6 @@ def _render_report(
         "",
     ]
 
-    # Sentence-level artifacts store segment ids; rebuild the (deterministic)
-    # segment set so inspection shows the actual clustered sentences.
     seg_reviews = None
     for name in finalists:
         art = arts[name]
@@ -273,7 +240,6 @@ def _write_charts(arts: dict[str, RunArtifacts], out_dir: Path) -> None:
     names = list(arts)
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
 
-    # Silhouette vs coherence (the "real winners are top-right" view)
     for n in names:
         m = arts[n].metrics
         if m.get("silhouette") is not None and m.get("coherence_cv") is not None:
@@ -355,7 +321,6 @@ if __name__ == "__main__":
         overrides["batch_size"] = 64
 
     if args.device == "cuda":
-        # Shared-box etiquette: claim idle devices only, programmatically.
         from ..runtime.gpu import claim_gpu
 
         max_gpus = None if args.gpus == "auto" else int(args.gpus)
@@ -363,13 +328,9 @@ if __name__ == "__main__":
         overrides.update(device=claim.device, gpu_ids=claim.gpu_ids)
     cfg = load_config(**overrides)
 
-    # Persist the full progress log next to the artifacts: long runs are
-    # usually followed via `tail -f` from another shell or after a reconnect.
     cfg.ensure_dirs()
     from ..core.cache import make_slug
 
-    # Separate report dirs per (category, embedding model) so sweeps and
-    # cross-domain runs never overwrite each other's results.
     tag_parts = []
     if args.data_file:
         tag_parts.append(Path(args.data_file).stem.removeprefix("sample_").rsplit("_", 1)[0])

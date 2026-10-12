@@ -41,8 +41,6 @@ class TestProjectConfig:
         assert "_" not in tok and tok != "hotels"
 
     def test_corpus_slug_round_trips_through_config(self):
-        # The synthetic data_file must parse back to exactly the token, so every
-        # cached artifact is keyed to this project (and never collides with hotels).
         cfg = project_config("abc-123", n_docs=1234)
         assert cfg.corpus_slug == project_corpus_token("abc-123")
         assert cfg.sample_size == 1234
@@ -57,7 +55,6 @@ class TestRunProjectPipeline:
 
         def fake_run_pipeline(cfg, spec, **kwargs):
             seen_kwargs.update(kwargs)
-            # exercise the stage -> step progress translation
             for stage in ("embed", "reduce", "cluster", "sentiment", "label", "evaluate"):
                 kwargs["on_stage"](stage)
             return small_run
@@ -73,19 +70,13 @@ class TestRunProjectPipeline:
         assert result.n_documents == 12
         assert result.n_clusters == 2
         assert seen_kwargs["on_stage"] is not None
-        # the canonical 8-step vocabulary surfaced, ending with Finalize done
         steps = [name for _, name, _ in progress.events]
         assert "Embed" in steps and "Cluster" in steps and "Finalize" in steps
         assert progress.events[-1] == (8, "Finalize", "done")
-        # steps are monotonically non-decreasing (no backwards progress)
         indices = [i for i, _, _ in progress.events]
         assert indices == sorted(indices)
 
     def test_sentence_level_is_accepted(self, monkeypatch, small_run):
-        # The sentence_level guard was removed deliberately when the segments
-        # table landed: mention-unit runs are the application's default shape,
-        # not an unsupported experiment. This test guards the removal so the
-        # guard cannot creep back in.
         corpus = corpus_for(small_run.doc_ids)
         emb = np.arange(len(small_run.doc_ids) * 4, dtype=float).reshape(-1, 4)
         seen_spec = {}
@@ -110,23 +101,15 @@ class TestRunProjectPipeline:
 
 
 def test_default_spec_is_sentence_level():
-    # The application runs the mention-unit pipeline: a review maps to several
-    # clusters via its sentence mentions. Changing this changes the shape of
-    # every new project's data, so it is asserted rather than assumed.
     spec = app_default_spec()
     assert spec.variant == "sentence_level"
 
 
 def test_sentence_default_embedding_is_the_selected_model():
-    # docs/technology-selection.md: MiniLM-L6-v2 won the segment-unit sweep on
-    # both quality (mean rank) and cost (~10x throughput of the runner-up).
     assert app_default_spec().embedding_model == "sentence-transformers/all-MiniLM-L6-v2"
 
 
 def test_document_variants_keep_their_own_selection():
-    # The segment-unit re-selection is scoped to the segment unit. The
-    # document-unit variants were decided separately (notebook 04) and must not
-    # be silently re-decided by a sweep that never evaluated them on documents.
     from reviewscope_ml.pipelines.spec import default_specs
 
     specs = default_specs()

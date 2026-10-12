@@ -11,8 +11,6 @@ import { LabelSourceBadge } from "../ui/LabelSourceBadge";
 import { StarRating } from "../ui/StarRating";
 import { WordCloud } from "../ui/WordCloud";
 
-// Bucket the cluster's per-document sentiment scores into negative/neutral/positive
-// for the distribution chart. Mirrors the thresholds in hover.sentimentLabel.
 function sentimentBuckets(documents: DocumentItem[]) {
   const counts = { negative: 0, neutral: 0, positive: 0 };
   for (const doc of documents) {

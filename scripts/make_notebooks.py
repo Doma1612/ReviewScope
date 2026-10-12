@@ -1,9 +1,3 @@
-"""Generate the thin orchestration notebooks 10 and 11.
-
-Notebooks must contain no logic — only src calls and rendering — so they are
-written programmatically from this script to keep them reproducible.
-Run: .venv/bin/python scripts/make_notebooks.py
-"""
 import nbformat as nbf
 from pathlib import Path
 
@@ -25,7 +19,6 @@ def save(nb, name):
     print(f"wrote {path}")
 
 
-# ── 10_pipeline_comparison ────────────────────────────────────────────────────
 nb10 = nbf.v4.new_notebook()
 nb10.cells = [
     md(
@@ -116,7 +109,6 @@ nb10.cells = [
 ]
 save(nb10, "10_pipeline_comparison.ipynb")
 
-# ── 11_hitl_roundtrip ─────────────────────────────────────────────────────────
 nb11 = nbf.v4.new_notebook()
 nb11.cells = [
     md(

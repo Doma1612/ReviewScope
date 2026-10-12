@@ -1,18 +1,3 @@
-"""
-Yelp Open Dataset source adapter — the WP5 hotel benchmark.
-
-``build_benchmark_sample`` reproduces the fixed benchmark file notebook 02
-defined (Yelp reviews joined to businesses, filtered to the "Hotels" category,
-minimum 50 chars, first N matches in dataset order). The sampling decisions are
-notebook 02's; this is a faithful port so the file can be regenerated on a
-fresh checkout without Jupyter. Changing anything here invalidates every number
-in docs/technology-selection.md.
-
-The raw dump ships as ``data/raw/Yelp-JSON.zip`` containing ``yelp_dataset.tar``.
-We stream tar members directly out of the zip instead of extracting ~9 GB to
-disk; building the sample needs two sequential passes (businesses first, then
-reviews) because tar members can only be read in archive order when streaming.
-"""
 from __future__ import annotations
 
 import json
@@ -25,18 +10,10 @@ from typing import IO, Optional
 logger = logging.getLogger("reviewscope.data.yelp")
 
 RAW_ZIP_NAME = "Yelp-JSON.zip"
-# Path used by notebook 02 when the archive was extracted manually.
 RAW_EXTRACTED_TAR = Path("Yelp-JSON") / "Yelp JSON" / "yelp_dataset.tar"
 
 
 def _open_tar_member(raw_dir: Path, name_contains: str) -> tuple[IO[bytes], object]:
-    """
-    Return a binary stream for the first tar member whose name contains
-    *name_contains*, plus an opaque handle tuple to keep underlying files alive.
-
-    Prefers an extracted tar (seekable, fast); falls back to streaming the tar
-    straight out of the zip (slower, but avoids a 9 GB extraction).
-    """
     extracted = raw_dir / RAW_EXTRACTED_TAR
     if extracted.exists():
         tar = tarfile.open(extracted)
@@ -50,9 +27,7 @@ def _open_tar_member(raw_dir: Path, name_contains: str) -> tuple[IO[bytes], obje
         )
     zf = zipfile.ZipFile(zip_path)
     tar_entry = next(n for n in zf.namelist() if n.endswith(".tar"))
-    # "r|*" = forward-only streaming with compression auto-detect: the shipped
-    # yelp_dataset.tar is actually gzip-compressed despite its name, and a
-    # streaming mode avoids seeks on the (decompressing) zip stream.
+    # The .tar is gzip-compressed; streaming auto-detection avoids decompressor seeks.
     tar = tarfile.open(fileobj=zf.open(tar_entry), mode="r|*")
     for member in tar:
         if name_contains in member.name.lower():
@@ -61,7 +36,6 @@ def _open_tar_member(raw_dir: Path, name_contains: str) -> tuple[IO[bytes], obje
 
 
 def _collect_category_business_ids(raw_dir: Path, category: str) -> set[str]:
-    """Stream business.json and collect ids whose categories include *category*."""
     stream, _handles = _open_tar_member(raw_dir, "business")
     ids: set[str] = set()
     total = 0
@@ -82,19 +56,11 @@ def build_benchmark_sample(
     min_text_len: int = 50,
     output_path: Optional[Path] = None,
 ) -> Path:
-    """
-    Build ``data/cache/sample_hotels_{N}k.jsonl`` exactly as notebook 02 did:
-    stream reviews in dataset order, keep those whose business carries the
-    target category and whose text is >= *min_text_len* chars, stop at
-    *sample_size*. Idempotent: returns immediately if the file exists.
-    """
     raw_dir = project_root / "data" / "raw"
     if output_path is None:
         from ...core.cache import make_slug
 
         suffix = f"{sample_size // 1000}k" if sample_size % 1000 == 0 else str(sample_size)
-        # "Hotels" -> sample_hotels_5k.jsonl (the established benchmark name);
-        # other categories get their own namespace instead of clobbering it.
         output_path = (
             project_root / "data" / "cache"
             / f"sample_{make_slug(category)}_{suffix}.jsonl"
@@ -133,15 +99,6 @@ def build_benchmark_sample(
 
 
 def subset_sample(source: Path, target: Path, n: int) -> Path:
-    """
-    Derive a smaller benchmark file as the first *n* rows of a larger one,
-    so e.g. the 1k smoke sample is a strict prefix of the 5k benchmark and
-    results stay comparable across scales.
-
-    Corpus-independent (it only copies lines), so it works for any source
-    adapter's output — it lives here because the Yelp benchmark is what first
-    needed it.
-    """
     if target.exists():
         return target
     with open(source) as fin, open(target, "w") as fout:

@@ -348,7 +348,6 @@ async def pipeline_status(project_id: uuid.UUID, db: AsyncSession = Depends(get_
 async def project_metrics(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ProjectMetricsRead:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
     project = await _get_project_or_404(db, project_id)
-    # Stale = a manual edit happened after the run that produced these metrics.
     latest_edit = (
         await db.execute(select(func.max(ClusterEdit.created_at)).where(ClusterEdit.project_id == project_id))
     ).scalar_one_or_none()
@@ -358,11 +357,6 @@ async def project_metrics(project_id: uuid.UUID, db: AsyncSession = Depends(get_
 
 @router.get("/{project_id}/embeddings/stats", response_model=EmbeddingStats)
 async def embeddings_stats(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> EmbeddingStats:
-    """Total and noise (unclustered) point counts for the scatter.
-
-    Cheap COUNT queries so the frontend can render an honest "N noise / M total"
-    and decide whether the view is sampled, without downloading every point.
-    """
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
     project = await _get_project_or_404(db, project_id)
     model = Segment if project.unit == "sentence" else Document
@@ -375,17 +369,9 @@ async def embeddings_stats(project_id: uuid.UUID, db: AsyncSession = Depends(get
 
 @router.get("/{project_id}/embeddings", response_model=list[EmbeddingPoint])
 async def embeddings(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user), limit: int | None = None, sample: int | None = None) -> list[EmbeddingPoint]:
-    """Scatter points, one per clustered unit (segment for sentence, review for document).
-
-    ``sample`` returns a random representative subset (``ORDER BY random() LIMIT``)
-    so large projects — a sentence run is hundreds of thousands of segments — don't
-    ship a ~180 MB payload the client only downsamples for display anyway. Use
-    ``/embeddings/stats`` for the honest total/noise counts alongside a sampled fetch.
-    """
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
     project = await _get_project_or_404(db, project_id)
     if project.unit == "sentence":
-        # One point per segment (mention); document_id is the parent review.
         query = (
             select(
                 Segment.id,
@@ -465,9 +451,6 @@ async def clusters(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), cu
     project = await _get_project_or_404(db, project_id)
     sentence = project.unit == "sentence"
     result = await db.execute(select(Cluster).where(Cluster.project_id == project_id).order_by(Cluster.label))
-    # One grouped query for the per-cluster count of members that actually have a
-    # sentiment score, so the UI can show coverage ("sentiment on n of N") instead
-    # of implying the mean covers every member. Members are segments for sentence.
     if sentence:
         counts_q = (
             select(Segment.cluster_id, func.count())
@@ -513,7 +496,6 @@ async def cluster_documents(project_id: uuid.UUID, cluster_id: uuid.UUID, db: As
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
     project = await _get_project_or_404(db, project_id)
     if project.unit == "sentence":
-        # Distinct reviews that have at least one mention in this cluster.
         doc_ids = (
             await db.execute(
                 select(Segment.document_id)
@@ -656,8 +638,6 @@ async def merge_clusters(project_id: uuid.UUID, payload: ClusterMerge, db: Async
         if not source or source.project_id != project_id:
             raise HTTPException(status_code=404, detail="Source cluster not found")
         sources.append(source)
-    # Move every mention of the source clusters into the target, then refresh the
-    # affected reviews' derived primary cluster.
     segs = (await db.execute(
         select(Segment).where(Segment.project_id == project_id, Segment.cluster_id.in_(payload.source_ids))
     )).scalars().all()
@@ -676,7 +656,6 @@ async def merge_clusters(project_id: uuid.UUID, payload: ClusterMerge, db: Async
 
 @router.post("/{project_id}/clusters/from-selection", response_model=ClusterRead, status_code=status.HTTP_201_CREATED)
 async def cluster_from_selection(project_id: uuid.UUID, payload: ClusterFromSegments, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> ClusterRead:
-    """Create a cluster from a lasso selection of *segment* mentions (sentence-unit)."""
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
     _require_editable(await _get_project_or_404(db, project_id))
     cluster = Cluster(
@@ -756,20 +735,11 @@ async def delete_cluster(project_id: uuid.UUID, cluster_id: uuid.UUID, db: Async
     await db.commit()
 
 
-# Match a value safe to cast to a number, so a numeric range filter never errors on
-# a non-numeric raw_data cell (the CASE returns NULL → the row simply doesn't match).
+# Guard numeric casts: uploaded cells may contain non-numeric text.
 _NUMERIC_RE = r"^-?[0-9]+(\.[0-9]+)?$"
 
 
 def _document_filter_conditions(filters_json: str | None) -> list:
-    """Build WHERE conditions from a JSON facet spec over each doc's ``raw_data``.
-
-    ``filters`` is a JSON list of ``{column, op, value, type}`` where ``op`` is
-    ``eq``/``gte``/``lte``. Numeric ranges are cast through a regex-guarded CASE so a
-    non-numeric cell can't raise; date ranges compare ISO text lexically (which is
-    chronological); ``eq`` is an exact text match (booleans, exact values). The
-    column comes from the typed schema, but we still treat it defensively. Invalid
-    JSON / unknown ops are ignored rather than erroring the request."""
     if not filters_json:
         return []
     try:
@@ -800,7 +770,7 @@ def _document_filter_conditions(filters_json: str | None) -> list:
                     continue
                 numeric = case((text_expr.op("~")(_NUMERIC_RE), cast(text_expr, Float)), else_=None)
                 conditions.append(numeric >= bound if op == "gte" else numeric <= bound)
-            else:  # date / text — lexical comparison (ISO dates sort chronologically)
+            else:
                 conditions.append(text_expr >= str(value) if op == "gte" else text_expr <= str(value))
     return conditions
 
@@ -812,8 +782,7 @@ async def documents(project_id: uuid.UUID, cluster_id: uuid.UUID | None = None, 
     sentence = project.unit == "sentence"
     query = select(Document).where(Document.project_id == project_id)
     if cluster_id:
-        # For sentence-unit, filter to reviews with a mention in the cluster (not
-        # only those whose *primary* is the cluster) so the cluster page is complete.
+        # Include every review with a cluster mention, not just its primary cluster.
         if sentence:
             member_ids = select(Segment.document_id).where(
                 Segment.project_id == project_id, Segment.cluster_id == cluster_id
@@ -829,7 +798,7 @@ async def documents(project_id: uuid.UUID, cluster_id: uuid.UUID | None = None, 
     return [_document_read(doc, memberships.get(doc.id, [])) for doc in docs]
 
 
-# Declared before /documents/{document_id} so "count" isn't matched as a doc id.
+# Register /count before /{document_id} so "count" is not parsed as a UUID.
 @router.get("/{project_id}/documents/count", response_model=DocumentCount)
 async def documents_count(project_id: uuid.UUID, cluster_id: uuid.UUID | None = None, filters: str | None = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> DocumentCount:
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner, ProjectRole.viewer})
@@ -855,7 +824,6 @@ async def document(project_id: uuid.UUID, document_id: uuid.UUID, db: AsyncSessi
 
 @router.patch("/{project_id}/documents/{document_id}", response_model=DocumentRead)
 async def reassign_document(project_id: uuid.UUID, document_id: uuid.UUID, payload: ReviewReassign, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> DocumentRead:
-    """Move *all* of a review's mentions to one cluster (sentence-unit "move all")."""
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
     project = await _get_project_or_404(db, project_id)
     _require_editable(project)
@@ -895,7 +863,6 @@ async def reassign_document(project_id: uuid.UUID, document_id: uuid.UUID, paylo
 
 @router.post("/{project_id}/documents/reassign", response_model=BulkReassignResult)
 async def bulk_reassign_documents(project_id: uuid.UUID, payload: BulkReassign, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> BulkReassignResult:
-    """Move all mentions of each listed review to one cluster (sentence-unit)."""
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
     _require_editable(await _get_project_or_404(db, project_id))
     target_cluster_id = payload.cluster_id
@@ -907,7 +874,6 @@ async def bulk_reassign_documents(project_id: uuid.UUID, payload: BulkReassign, 
         select(Document).where(Document.project_id == project_id, Document.id.in_(payload.document_ids))
     )).scalars().all())
     doc_ids = [doc.id for doc in docs]
-    # Capture each review's old primary before the move so undo can restore it.
     before = {str(doc.id): (str(doc.cluster_id) if doc.cluster_id else None) for doc in docs}
     segs = list((await db.execute(
         select(Segment).where(Segment.project_id == project_id, Segment.document_id.in_(doc_ids))
@@ -933,7 +899,6 @@ async def bulk_reassign_documents(project_id: uuid.UUID, payload: BulkReassign, 
 
 @router.patch("/{project_id}/segments/{segment_id}", response_model=EmbeddingPoint)
 async def reassign_segment(project_id: uuid.UUID, segment_id: uuid.UUID, payload: SegmentReassign, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> EmbeddingPoint:
-    """Move a single mention (segment) to a cluster (or noise)."""
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
     _require_editable(await _get_project_or_404(db, project_id))
     seg = await db.get(Segment, segment_id)
@@ -972,7 +937,6 @@ async def reassign_segment(project_id: uuid.UUID, segment_id: uuid.UUID, payload
 
 @router.post("/{project_id}/segments/reassign", response_model=BulkReassignResult)
 async def bulk_reassign_segments(project_id: uuid.UUID, payload: BulkSegmentReassign, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)) -> BulkReassignResult:
-    """Move a lasso selection of mentions (segments) to one cluster (or noise)."""
     await require_project_role(db, project_id, current_user.id, {ProjectRole.owner})
     _require_editable(await _get_project_or_404(db, project_id))
     target_cluster_id = payload.cluster_id
@@ -1060,11 +1024,6 @@ async def list_edits(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), 
 
 
 async def _junk_cluster(db: AsyncSession, project_id: uuid.UUID, cluster: Cluster, actor_id: uuid.UUID) -> None:
-    """Mark a cluster as junk: its mentions become noise and the cluster is removed.
-
-    Sentence-unit only (guarded by callers via ``_require_editable``): moves the
-    cluster's segments to noise, refreshes the affected reviews' derived primary,
-    stages the audit row, and deletes the cluster. The caller owns the commit."""
     segs = list((await db.execute(
         select(Segment).where(Segment.project_id == project_id, Segment.cluster_id == cluster.id)
     )).scalars().all())
@@ -1121,8 +1080,6 @@ def _document_read(doc: Document, memberships: list[ClusterMembership]) -> Docum
 
 
 def _require_editable(project: Project) -> None:
-    """Editing is only supported on sentence-unit projects. Document-unit projects
-    are frozen (read-only) — re-run to upgrade them to sentence-level."""
     if project.unit != "sentence":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1131,8 +1088,6 @@ def _require_editable(project: Project) -> None:
 
 
 async def _sample_docs(db: AsyncSession, project_id: uuid.UUID, cluster_id: uuid.UUID, limit: int = 3, *, sentence: bool = False) -> list[dict]:
-    """Short member samples for a cluster card — segment texts for sentence-unit
-    projects, whole-document texts otherwise."""
     if sentence:
         result = await db.execute(
             select(Segment.id, Segment.text).where(Segment.project_id == project_id, Segment.cluster_id == cluster_id).limit(limit)
@@ -2318,8 +2273,6 @@ def _truncate(value: str, max_chars: int) -> str:
 
 
 async def _sentiment_count(db: AsyncSession, project_id: uuid.UUID, cluster_id: uuid.UUID, *, sentence: bool = False) -> int:
-    """Count of this cluster's members carrying a sentiment score (the n in the
-    "sentiment on n of N" coverage). Members are segments for sentence-unit."""
     if sentence:
         query = select(func.count()).where(
             Segment.project_id == project_id,
@@ -2337,9 +2290,6 @@ async def _sentiment_count(db: AsyncSession, project_id: uuid.UUID, cluster_id: 
 
 
 async def _document_memberships(db: AsyncSession, project_id: uuid.UUID, document_ids: list[uuid.UUID]) -> dict[uuid.UUID, list[ClusterMembership]]:
-    """Per-review cluster membership for sentence-unit projects: for each document,
-    the clusters its mentions fall into with mention counts + share (of the review's
-    segments). Noise mentions are excluded from the chips but counted in the share."""
     if not document_ids:
         return {}
     totals = dict(

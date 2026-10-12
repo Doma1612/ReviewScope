@@ -9,11 +9,6 @@ router = APIRouter()
 
 @router.get("/models", response_model=ModelsRead)
 def models() -> ModelsRead:
-    """Available embedding and LLM models (app-spec System endpoint).
-
-    In simulated mode the names are static; otherwise they come from the frozen
-    pipeline spec the seam runs (``reviewscope_ml.app.app_default_spec``).
-    """
     settings = get_settings()
     if settings.simulate_ml:
         return ModelsRead(

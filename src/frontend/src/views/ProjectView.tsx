@@ -25,13 +25,9 @@ import { StarRating } from "../ui/StarRating";
 import { WordCloud } from "../ui/WordCloud";
 import { ProjectChat } from "../ui/ProjectChat";
 
-// Sentinel select value for "noise" (cluster_id = null); the API takes null.
 const NOISE = "__noise__";
 const resolveTarget = (value: string): string | null => (value === NOISE ? null : value);
 
-// Undo: a bulk_reassign edit stores a per-doc `before` map (doc id → old
-// cluster id, null = noise). Group those docs by their original cluster so we can
-// move each group back in one bulkReassign call.
 const beforeGroups = (payload: Record<string, unknown>): [string | null, string[]][] => {
   const before = (payload.before ?? {}) as Record<string, string | null>;
   const groups = new Map<string | null, string[]>();
@@ -48,9 +44,6 @@ export function ProjectView() {
   const queryClient = useQueryClient();
   const project = useQuery({ queryKey: ["project", projectId], queryFn: () => api.project(projectId) });
   const status = useQuery({ queryKey: ["pipeline", projectId], queryFn: () => api.pipelineStatus(projectId), refetchInterval: project.data?.status === "ready" ? false : 3000 });
-  // Fetch only a display-sized sample of points (the scatter caps at POINT_CAP
-  // anyway); a sentence run is ~450k segments / ~180 MB unsampled. Honest totals
-  // come from embeddingStats so the noise count and "sampled" flag stay accurate.
   const embeddings = useQuery({ queryKey: ["embeddings", projectId], queryFn: () => api.embeddings(projectId, POINT_CAP), enabled: project.data?.status === "ready" });
   const embeddingStats = useQuery({ queryKey: ["embeddings-stats", projectId], queryFn: () => api.embeddingStats(projectId), enabled: project.data?.status === "ready" });
   const clusters = useQuery({ queryKey: ["clusters", projectId], queryFn: () => api.clusters(projectId), enabled: project.data?.status === "ready" });
@@ -60,27 +53,21 @@ export function ProjectView() {
   const [highlightedClusterId, setHighlightedClusterId] = useState<string | null>(null);
   const cardRefs = useRef<Record<string, HTMLElement | null>>({});
 
-  // Cluster-table controls: sort column + direction + free-text label filter.
   const [clusterSort, setClusterSort] = useState<"size" | "sentiment" | "cohesion" | "label">("size");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [clusterFilter, setClusterFilter] = useState("");
-  // Rows expanded to reveal summary / word cloud / sample quotes / edit actions.
   const [expandedClusterIds, setExpandedClusterIds] = useState<Set<string>>(new Set());
 
-  // Editing state (owner only).
   const isOwner = project.data?.role === "owner";
-  // Editing is segment-level and only enabled for sentence-unit projects;
-  // document-unit projects are frozen (read-only) until re-run.
   const isSentence = project.data?.unit === "sentence";
   const canEdit = isOwner && isSentence;
   const [editMode, setEditMode] = useState(false);
-  const [selectedPointIds, setSelectedPointIds] = useState<string[]>([]); // lasso selection → segment ids
+  const [selectedPointIds, setSelectedPointIds] = useState<string[]>([]);
   const [reassignTarget, setReassignTarget] = useState("");
   const [newClusterLabel, setNewClusterLabel] = useState("");
   const [selectedClusterIds, setSelectedClusterIds] = useState<Set<string>>(new Set());
   const [mergeTarget, setMergeTarget] = useState("");
 
-  // Reset the highlight + edit state when switching projects (mirrors DeckDashboard).
   useEffect(() => {
     setHighlightedClusterId(null);
     setEditMode(false);
@@ -89,27 +76,20 @@ export function ProjectView() {
     setExpandedClusterIds(new Set());
   }, [projectId]);
 
-  // Leaving edit mode drops any in-flight selections so the read-only view stays clean.
   useEffect(() => {
     if (!editMode) { setSelectedPointIds([]); setSelectedClusterIds(new Set()); }
   }, [editMode]);
 
-  // Scroll the highlighted cluster's card into view when it changes.
   useEffect(() => {
     if (highlightedClusterId) cardRefs.current[highlightedClusterId]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [highlightedClusterId]);
 
-  // Structural edits change membership/aggregates. Each mutation writes its change
-  // into the cache optimistically (onMutate), rolls back on error, and reconciles
-  // with the server's recompute via invalidateAll (onSettled). See ../optimistic.
   const onError = (_e: unknown, _v: unknown, ctx: { snapshot: Snapshot } | undefined) => {
     if (ctx) rollback(queryClient, ctx.snapshot);
   };
   const onSettled = () => invalidateAll(queryClient, projectId);
 
-  // Lasso edits act on mentions (segments). Membership fans out per review, so the
-  // document-keyed optimistic cache doesn't model it cleanly — reconcile by
-  // invalidating on settle rather than patching the cache in place.
+  // Segment moves do not fit document-keyed optimistic caches; invalidate on settle.
   const bulkReassignM = useMutation({
     mutationFn: (target: string) => api.bulkReassignSegments(projectId, selectedPointIds, resolveTarget(target)),
     onSettled,
@@ -159,9 +139,7 @@ export function ProjectView() {
     onSettled,
   });
 
-  // Invert a reversible edit by re-issuing the opposite move through the same
-  // endpoints (so the undo is itself recorded). Membership fans out per review, so
-  // we reconcile by invalidating on settle rather than patching the cache.
+  // Undo through the mutation endpoints so the undo itself is audited.
   const undoM = useMutation({
     mutationFn: async (edit: ClusterEdit) => {
       if ((edit.action === "reassign_review" || edit.action === "reassign_doc") && edit.document_id) {
@@ -185,8 +163,6 @@ export function ProjectView() {
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
-  // Header click: switch to that column (numeric columns default to descending,
-  // the name column to ascending), or flip direction if it's already active.
   const toggleSort = (key: typeof clusterSort) => {
     if (clusterSort === key) setSortDir((dir) => (dir === "asc" ? "desc" : "asc"));
     else { setClusterSort(key); setSortDir(key === "label" ? "asc" : "desc"); }
@@ -207,10 +183,6 @@ export function ProjectView() {
   };
 
   const points = embeddings.data ?? [];
-  // WebGL/render cap: sample huge projects down for display and force 2D
-  // scattergl, which renders far more smoothly than scatter3d at this scale.
-  // Points are already server-sampled to <=POINT_CAP; the true total decides
-  // whether the view is "capped" (so lasso stays disabled on big projects).
   const totalPoints = embeddingStats.data?.total ?? points.length;
   const capped = totalPoints > POINT_CAP;
   const displayPoints = useMemo(() => samplePoints(points), [points]);
@@ -221,16 +193,10 @@ export function ProjectView() {
     const muted = highlightedClusterId && point.cluster_id !== highlightedClusterId;
     return muted ? `${base}22` : base;
   });
-  // Lasso-reassign is disabled on the capped overview: the lasso only sees the
-  // sampled points, so reassigning would silently edit a subset of the region while
-  // implying the whole region. Bulk-reassign on the exact document table instead.
+  // Disable lasso on sampled views: the visible region omits points that would not be moved.
   const lassoEnabled = editMode && webglMode === "2d" && !capped;
-  // Noise = units left unclustered (cluster_id null). From embeddingStats (a COUNT
-  // over the full set), not the sampled display points, so the figure is honest.
   const noiseCount = embeddingStats.data?.noise ?? points.filter((point) => point.cluster_id == null).length;
 
-  // Cluster list: apply the label filter + chosen sort. Card colors are keyed by
-  // cluster id (clusterIndex), so reordering the display list never recolors points.
   const visibleClusters = useMemo(() => {
     const needle = clusterFilter.trim().toLowerCase();
     const list = (clusters.data ?? []).filter((cluster) => cluster.label.toLowerCase().includes(needle));
@@ -304,7 +270,6 @@ export function ProjectView() {
             onSelected={(event) => {
               if (!editMode) return;
               if (!event || !event.points) { setSelectedPointIds([]); return; }
-              // Each point is a mention; the lasso selects segment ids.
               const ids = event.points
                 .map((p) => displayPoints[(p.pointIndex ?? p.pointNumber) as number]?.segment_id)
                 .filter((id): id is string => Boolean(id));
@@ -456,9 +421,6 @@ function ClusterRow({ cluster, projectId, color, highlighted, rowRef, editMode, 
 
   return (
     <>
-      {/* Clicking anywhere on the row highlights the cluster in the plot; the
-          chevron and (in edit mode) the checkbox stop propagation so they act on
-          their own control instead. */}
       <tr className={`cluster-row ${highlighted ? "highlighted" : ""} ${expanded ? "expanded" : ""}`} ref={rowRef} onClick={onHighlight} aria-selected={highlighted}>
         {editMode && (
           <td className="col-select" onClick={(event) => event.stopPropagation()}>

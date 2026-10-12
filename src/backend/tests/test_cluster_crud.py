@@ -1,15 +1,3 @@
-"""Endpoint-logic tests for the cluster CRUD/merge/from-selection routes (api/projects.py).
-
-No real DB: the routes are plain async functions, so a fake ``AsyncSession`` that
-serves ``get``/``execute`` from in-memory objects and records ``add``/``delete``/
-``commit`` exercises the wiring directly. Editing is sentence-unit only, so every
-route first loads the project and requires ``unit == "sentence"``; membership lives
-on *segments*, so merge/junk/from-selection move ``Segment`` rows. ``recompute_clusters``
-/ ``recompute_document_primary`` / ``_sample_docs`` are DB- and ML-heavy and are
-monkeypatched — B2 already covers aggregation.
-
-Run from the backend dir:  python -m pytest tests/test_cluster_crud.py
-"""
 from __future__ import annotations
 
 import asyncio
@@ -29,7 +17,7 @@ os.environ.setdefault("SYNC_DATABASE_URL", "postgresql+psycopg://u:p@localhost:5
 os.environ.setdefault("SIMULATE_ML", "true")
 os.environ.setdefault("UPLOAD_DIR", tempfile.mkdtemp(prefix="reviewscope-test-uploads-"))
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/backend on path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi import HTTPException  # noqa: E402
 
@@ -45,8 +33,6 @@ def asyncio_test(fn):
 
     return wrapper
 
-
-# ── Fakes ──────────────────────────────────────────────────────────────────────
 
 class _FakeResult:
     def __init__(self, *, scalar=None, items=None):
@@ -64,12 +50,11 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """Serves get()/execute() from in-memory state; records mutations."""
 
     def __init__(self, *, member=None, objects=None, query_segs=None):
-        self.member = member                  # what require_project_role finds
-        self.objects = objects or {}          # (Model, id) -> instance for .get
-        self.query_segs = query_segs or []    # rows for the select(Segment)
+        self.member = member
+        self.objects = objects or {}
+        self.query_segs = query_segs or []
         self.added: list = []
         self.deleted: list = []
         self.committed = False
@@ -97,15 +82,12 @@ class _FakeSession:
 
     async def refresh(self, obj):
         self.refreshed.append(obj)
-        # Mirror the DB server_default so ClusterRead serialization sees an int.
         if isinstance(obj, Cluster) and getattr(obj, "n_mentions", None) is None:
             obj.n_mentions = 0
 
 
 @pytest.fixture(autouse=True)
 def _stub_helpers(monkeypatch):
-    """Record recompute_clusters as (project_id, {cluster_ids}); stub the
-    document-primary refresh and _sample_docs (heavy tuple query)."""
     calls: list = []
 
     async def _fake_recompute(db, project_id, cluster_ids, **kwargs):
@@ -149,12 +131,9 @@ def _seg(pid, cluster_id, doc_id=None):
 
 
 def _cluster(cid, pid, label="x", label_source="terms_fallback"):
-    # SQLAlchemy column defaults only apply at flush, so set the JSON/int defaults
-    # explicitly — the route serializes the returned cluster to ClusterRead.
+    # SQLAlchemy defaults run at flush; this fake session must set them explicitly.
     return Cluster(id=cid, project_id=pid, label=label, summary="", label_source=label_source, top_terms=[], word_frequencies={}, size=0, n_mentions=0)
 
-
-# ── Create ───────────────────────────────────────────────────────────────────
 
 @asyncio_test
 async def test_create_cluster_records_edit(_stub_helpers):
@@ -189,8 +168,6 @@ async def test_create_cluster_document_unit_frozen_409(_stub_helpers):
     assert exc.value.status_code == 409
     assert not db.committed
 
-
-# ── Merge ────────────────────────────────────────────────────────────────────
 
 @asyncio_test
 async def test_merge_moves_mentions_deletes_sources_records_edits(_stub_helpers):
@@ -240,7 +217,7 @@ async def test_merge_unknown_source_404(_stub_helpers):
 @asyncio_test
 async def test_merge_target_other_project_404(_stub_helpers):
     pid, target = uuid.uuid4(), uuid.uuid4()
-    tgt = _cluster(target, uuid.uuid4(), label="t")  # other project
+    tgt = _cluster(target, uuid.uuid4(), label="t")
     db = _FakeSession(member=_member(), objects={(Project, pid): _project(pid), (Cluster, target): tgt})
     with pytest.raises(HTTPException) as exc:
         await projects.merge_clusters(pid, ClusterMerge(source_ids=[uuid.uuid4()], target_id=target), db, _owner())
@@ -257,13 +234,11 @@ async def test_merge_document_unit_frozen_409(_stub_helpers):
     assert not db.committed
 
 
-# ── From selection (of segment mentions) ────────────────────────────────────────
-
 @asyncio_test
 async def test_from_selection_creates_cluster_and_recomputes_previous_owners(_stub_helpers):
     pid = uuid.uuid4()
     old_a, old_b = uuid.uuid4(), uuid.uuid4()
-    seg1, seg2, seg3 = _seg(pid, old_a), _seg(pid, old_b), _seg(pid, None)  # seg3 = noise mention
+    seg1, seg2, seg3 = _seg(pid, old_a), _seg(pid, old_b), _seg(pid, None)
     db = _FakeSession(member=_member(), objects={(Project, pid): _project(pid)}, query_segs=[seg1, seg2, seg3])
 
     result = await projects.cluster_from_selection(
@@ -276,12 +251,9 @@ async def test_from_selection_creates_cluster_and_recomputes_previous_owners(_st
     edit = _edits(db)[0]
     assert edit.action == "create_from_selection" and edit.cluster_id == created.id
     assert edit.payload == {"segment_ids": [str(seg1.id), str(seg2.id), str(seg3.id)]}
-    # New cluster + both previous owners recomputed; the None (noise) owner is skipped.
     assert _stub_helpers == [(pid, {created.id, old_a, old_b})]
     assert db.committed
 
-
-# ── Patch (rename / approve / junk) ────────────────────────────────────────────
 
 @asyncio_test
 async def test_patch_rename_sets_override(_stub_helpers):
@@ -294,7 +266,7 @@ async def test_patch_rename_sets_override(_stub_helpers):
     assert result.label == "new" and result.label_source == "hitl_override"
     edit = _edits(db)[0]
     assert edit.action == "rename_label" and edit.cluster_id == cid and edit.new_label == "new"
-    assert edit.payload == {"before": "old"}  # old label captured for undo
+    assert edit.payload == {"before": "old"}
     assert cluster not in db.deleted and db.committed
 
 
@@ -353,8 +325,6 @@ async def test_patch_viewer_forbidden(_stub_helpers):
         await projects.update_cluster(uuid.uuid4(), uuid.uuid4(), ClusterUpdate(label="x"), db, _owner())
     assert exc.value.status_code == 403
 
-
-# ── Delete ──────────────────────────────────────────────────────────────────
 
 @asyncio_test
 async def test_delete_cluster_nulls_mentions_and_deletes(_stub_helpers):

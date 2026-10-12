@@ -1,14 +1,3 @@
-"""
-ReviewScope ML pipeline package.
-
-Pure-Python, notebook-free implementation of the WP5 pipeline:
-ingest -> preprocess -> embed -> reduce -> cluster -> represent -> label,
-plus the evaluation harness (WP5) and HITL review loop, structured so the
-FastAPI/Celery backend can import each stage directly.
-
-Keep this package free of Jupyter dependencies: the experiment notebooks
-orchestrate it, they are not part of it.
-"""
 from .core import (
     RESULTS_COLUMNS,
     PipelineConfig,

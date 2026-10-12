@@ -39,7 +39,6 @@ class TestApplyFeedback:
         out = apply_feedback(small_run, [rec("rename_label", cluster_id=0, new_label="Pool area")])
         assert out.clusters[0].label == "Pool area"
         assert out.clusters[0].label_source == "hitl_override"
-        # original untouched
         assert small_run.clusters[0].label == "label 0"
 
     def test_approve_stamps_source(self, small_run):
@@ -56,7 +55,7 @@ class TestApplyFeedback:
     def test_mark_junk_moves_docs_to_noise(self, small_run):
         out = apply_feedback(small_run, [rec("mark_junk", cluster_id=0)])
         assert 0 not in out.clusters
-        assert (out.labels == -1).sum() == 8  # 3 original noise + 5 junked
+        assert (out.labels == -1).sum() == 8
 
     def test_reassign_doc(self, small_run):
         out = apply_feedback(
@@ -69,16 +68,15 @@ class TestApplyFeedback:
     def test_split_flat_run_flags_for_recluster(self, small_run):
         out = apply_feedback(small_run, [rec("split_cluster", cluster_id=0)])
         assert out.manifest["needs_recluster"] == [0]
-        assert 0 in out.clusters  # not destroyed, only flagged
+        assert 0 in out.clusters
 
     def test_split_two_stage_promotes_micro_clusters(self, two_stage_run):
         out = apply_feedback(two_stage_run, [rec("split_cluster", cluster_id=0, run="twostage")])
         assert 0 not in out.clusters
         new_ids = [c for c in out.clusters if c != 1]
-        assert len(new_ids) == 2  # micro 10 and 11 promoted
+        assert len(new_ids) == 2
         sizes = sorted(out.clusters[c].size for c in new_ids)
         assert sizes == [2, 2]
-        # macro cluster 1 untouched
         assert out.clusters[1].size == 2
         assert out.manifest.get("needs_recluster", []) == []
 
@@ -89,7 +87,6 @@ class TestApplyFeedback:
         assert confirmed["note"] == "looks coherent"
 
     def test_order_merge_before_rename(self, small_run):
-        # rename targets the merge survivor; both must apply
         out = apply_feedback(small_run, [
             rec("rename_label", cluster_id=0, new_label="Everything"),
             rec("merge_clusters", cluster_id=1, merge_into=0),

@@ -46,22 +46,14 @@ class Project(Base):
     owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
     status: Mapped[ProjectStatus] = mapped_column(Enum(ProjectStatus), default=ProjectStatus.uploading, nullable=False)
     doc_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    # Clustering unit for this project's persisted results: "document" (one
-    # cluster per review, the legacy shape) or "sentence" (segment-level, a review
-    # maps to several clusters via its mentions). Selects the read path; existing
-    # projects stay "document" and are frozen (read-only) until re-run.
     unit: Mapped[str] = mapped_column(Text, default="document", server_default="document", nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text)
     source_filename: Mapped[str | None] = mapped_column(Text)
     upload_path: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    # Run-level clustering-quality report (silhouette/coherence/rating-entropy/…)
-    # captured from the real ML run (null in simulated mode). metrics_run_at lets the
-    # UI flag the report as stale once manual edits change the membership.
     metrics: Mapped[dict | None] = mapped_column(JSONB)
     metrics_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Query embeddings must match the vectors persisted by the pipeline. Existing
-    # projects lack this provenance and are deliberately not RAG-ready until re-run.
+    # Query embeddings must use the model that produced the stored vectors.
     embedding_model: Mapped[str | None] = mapped_column(Text)
     embedding_instruction: Mapped[str | None] = mapped_column(Text)
     embedding_dimension: Mapped[int | None] = mapped_column(Integer)
@@ -95,20 +87,14 @@ class Cluster(Base):
     project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     label: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
-    # Label provenance: "ollama:<model>" | "terms_fallback" | "hitl_override".
-    # Lets the UI distinguish LLM labels from term-fallbacks when Ollama is down.
     label_source: Mapped[str] = mapped_column(Text, default="terms_fallback", server_default="terms_fallback", nullable=False)
     top_terms: Mapped[list[dict]] = mapped_column(JSONB, default=list, nullable=False)
     word_frequencies: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
-    # size = distinct parent reviews in the cluster (the headline count). For
-    # document-unit projects this equals the document count; for sentence-unit
-    # projects n_mentions holds the (larger) segment/mention count.
+    # size counts distinct reviews; n_mentions counts their clustered segments.
     size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     n_mentions: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     sentiment_avg: Mapped[float | None] = mapped_column(Float)
     mean_stars: Mapped[float | None] = mapped_column(Float)
-    # Cohesion = mean cosine similarity of member embeddings to the cluster centroid.
-    # Higher = tighter/more trustworthy. None when undefined (singleton/empty).
     cohesion: Mapped[float | None] = mapped_column(Float)
 
 
@@ -129,8 +115,7 @@ class Embedding(Base):
 
     document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
     vector: Mapped[list[float]] = mapped_column(JSONB, default=list, nullable=False)
-    # Unconstrained: a project records its own embedding_dimension, and models
-    # differ (MiniLM 384, mpnet 768). See migration 0008.
+    # Models have different vector widths; each project records its dimension.
     vector_pg: Mapped[list[float] | None] = mapped_column(Vector())
     umap_x: Mapped[float] = mapped_column(Float, nullable=False)
     umap_y: Mapped[float] = mapped_column(Float, nullable=False)
@@ -138,14 +123,6 @@ class Embedding(Base):
 
 
 class Segment(Base):
-    """A sentence-level mention — the clustered unit for sentence-unit projects.
-
-    One review (Document) explodes into several segments; each carries its own
-    embedding, UMAP coords and cluster membership (``cluster_id``). The parent
-    review's derived "primary" cluster lives on ``Document.cluster_id``.
-    ``segment_key`` is the deterministic ``{review_pk}#{i}`` id the ML runner
-    assigns, and is the stable identity used to replay edits across re-runs.
-    """
 
     __tablename__ = "segments"
     __table_args__ = (UniqueConstraint("project_id", "segment_key", name="uq_segments_project_key"),)
@@ -159,18 +136,14 @@ class Segment(Base):
     cluster_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("clusters.id", ondelete="SET NULL"), index=True)
     sentiment_score: Mapped[float | None] = mapped_column(Float)
     vector: Mapped[list[float]] = mapped_column(JSONB, default=list, nullable=False)
-    # Unconstrained: a project records its own embedding_dimension, and models
-    # differ (MiniLM 384, mpnet 768). See migration 0008.
+    # Models have different vector widths; each project records its dimension.
     vector_pg: Mapped[list[float] | None] = mapped_column(Vector())
     umap_x: Mapped[float] = mapped_column(Float, nullable=False)
     umap_y: Mapped[float] = mapped_column(Float, nullable=False)
     umap_z: Mapped[float | None] = mapped_column(Float)
 
 
-# Audit vocabulary for ClusterEdit.action. Mirrors reviewscope_ml's
-# hitl.feedback.ACTIONS, plus the app-only actions that have no notebook analogue
-# (bulk reassign, create-from-selection, etc.). Keep in sync with the
-# CheckConstraint below and the migration 0003_cluster_edits.
+# Keep the edit vocabulary in sync with the CHECK constraint and migrations.
 EDIT_ACTIONS = (
     "approve_label",
     "rename_label",
@@ -182,8 +155,6 @@ EDIT_ACTIONS = (
     "create_from_selection",
     "mark_junk",
     "confirm_run",
-    # Sentence-unit actions: reassign a single mention, a batch of mentions, or
-    # every mention of one review at once.
     "reassign_segment",
     "bulk_reassign_segments",
     "reassign_review",
@@ -191,12 +162,7 @@ EDIT_ACTIONS = (
 
 
 class ClusterEdit(Base):
-    """Append-only audit log of every cluster/document edit.
-
-    Subject columns are plain UUIDs, not FKs: cluster ids are regenerated on each
-    re-run and clusters get deleted, but the audit trail must outlive them so it
-    can be replayed and shown in the undo/history UI.
-    """
+    # Audit subjects are not FKs: their IDs must survive deletion and pipeline reruns.
 
     __tablename__ = "cluster_edits"
     __table_args__ = (

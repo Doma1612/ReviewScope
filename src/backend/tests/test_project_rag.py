@@ -23,7 +23,7 @@ def test_rag_messages_limit_history_and_label_evidence() -> None:
     assert "[S1]" in messages[0]["content"]
     assert "Cluster: Cleanliness" in messages[0]["content"]
     assert "Evidence: The bathroom floor was dirty on arrival." in messages[0]["content"]
-    assert len(messages) == 10  # system + most recent eight messages + question
+    assert len(messages) == 10
     assert messages[1]["content"] == "2"
     assert messages[-1] == {"role": "user", "content": "What cleanliness problems recur?"}
 

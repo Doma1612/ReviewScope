@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Run this ON the GPU server after syncing the project.
-# Usage: bash scripts/setup_gpu.sh
 
 set -euo pipefail
 
@@ -9,7 +7,6 @@ VENV="$PROJECT_ROOT/.venv"
 
 echo "==> Project root: $PROJECT_ROOT"
 
-# ── 1. Create data directories ─────────────────────────────────────────────────
 echo "==> Creating data directories..."
 mkdir -p "$PROJECT_ROOT/data/cache/embeddings"
 mkdir -p "$PROJECT_ROOT/data/cache/umap"
@@ -17,7 +14,6 @@ mkdir -p "$PROJECT_ROOT/data/cache/clustering"
 mkdir -p "$PROJECT_ROOT/data/cache/bertopic"
 mkdir -p "$PROJECT_ROOT/data/raw"
 
-# ── 2. Create virtual environment ─────────────────────────────────────────────
 if [ ! -d "$VENV" ]; then
     echo "==> Creating virtual environment..."
     python3 -m venv "$VENV"
@@ -28,7 +24,6 @@ fi
 source "$VENV/bin/activate"
 echo "==> Python: $(which python) ($(python --version))"
 
-# ── 3. Install dependencies ────────────────────────────────────────────────────
 echo "==> Upgrading pip..."
 pip install --upgrade pip --quiet
 
@@ -38,11 +33,9 @@ pip install hdbscan --quiet
 pip install InstructorEmbedding --quiet
 pip install -r "$PROJECT_ROOT/requirements.txt" --quiet
 
-# ── 4. Register venv as Jupyter kernel ────────────────────────────────────────
 echo "==> Registering Jupyter kernel..."
 python -m ipykernel install --user --name reviewscope --display-name "ReviewScope"
 
-# ── 5. Verify GPU ─────────────────────────────────────────────────────────────
 echo "==> Checking GPU..."
 python -c "
 import torch

@@ -8,8 +8,7 @@ __all__ = [
 
 
 def __getattr__(name):
-    # Lazy: report imports pipelines.runner, which imports eval.harness —
-    # importing report eagerly here would close that loop.
+    # Import report lazily to avoid the report -> runner -> harness import cycle.
     if name == "run_comparison":
         from .report import run_comparison
 

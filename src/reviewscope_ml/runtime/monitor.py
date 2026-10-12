@@ -1,16 +1,4 @@
-"""
-Per-stage runtime and memory accounting.
-
-The app's Celery workers need to know what each stage costs (wall time, RAM,
-VRAM) before we size worker pools, so every pipeline run records this per
-stage in its manifest.
-
-Caveat worth knowing: ``ru_maxrss`` is a process-lifetime high-water mark, so
-a stage's "peak RSS" can be inherited from an earlier, hungrier stage. We
-report both the global mark and the delta; only a *rising* mark proves the
-stage itself was the peak. VRAM peaks are exact per stage (torch resets the
-counter between stages).
-"""
+# ru_maxrss is a process-lifetime high-water mark, not an independent stage peak.
 from __future__ import annotations
 
 import resource
@@ -34,14 +22,6 @@ def _cuda_available() -> bool:
 
 
 class StageMonitor:
-    """Collects one record per stage; attach ``.records`` to the run manifest.
-
-    ``on_stage`` (optional) is called with the stage name the moment it starts.
-    The application's Celery worker passes a callback here to translate stage
-    transitions into ``pipeline_jobs`` progress rows (see
-    ``reviewscope_ml.app.service``); the experiment notebooks leave it None and
-    are unaffected.
-    """
 
     def __init__(self, on_stage: Optional[Callable[[str], None]] = None) -> None:
         self.records: dict[str, dict[str, Any]] = {}

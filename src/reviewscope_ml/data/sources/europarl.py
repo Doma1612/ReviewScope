@@ -1,58 +1,3 @@
-"""
-Europarl v7 source adapter — English-original parliamentary speeches.
-
-Raw input is the full source release (``data/raw/europarl.tgz`` from
-statmt.org/europarl/v7), which ships one directory of debate transcripts per
-language: ``txt/<lang>/ep-YY-MM-DD[-NNN].txt``. Each file is a sequence of
-``<CHAPTER>`` headings and ``<SPEAKER>`` blocks, with ``<P>`` paragraph marks.
-
-Identifying the English speeches
---------------------------------
-The ``LANGUAGE`` attribute on ``<SPEAKER>`` is **omitted when the speech was
-originally delivered in that file's own language**, and present (naming the
-source language) when the text is a translation. This is the inverse of the
-obvious reading, and getting it backwards silently yields a corpus of
-translationese. Measured on this dump:
-
-* ``txt/en/`` carries only **95** blocks tagged ``LANGUAGE="EN"`` out of
-  211,359 — annotation noise, not the English set.
-* 103,650 blocks in ``txt/en/`` carry **no** LANGUAGE attribute.
-* Cross-checking 600 files against ``txt/de/``: speakers 2 and 4 of
-  ``ep-00-01-17`` are untagged in ``txt/en/`` and tagged ``LANGUAGE="EN"`` in
-  ``txt/de/``; speaker 8 is tagged ``LANGUAGE="DE"`` in ``txt/en/`` and
-  untagged in ``txt/de/``. The convention holds in both directions.
-
-"Untagged in ``txt/en/``" is therefore necessary but not sufficient. Of 18,371
-untagged blocks in that 600-file sample, 34.9% were confirmed English by a
-pivot file, 58.0% were unannotated everywhere, and **6.3% were contradicted**
-— a pivot named a different source language, so they are translations whose
-English tag was simply dropped. Hence two selection modes:
-
-* ``"verified"`` (default) — untagged in ``txt/en/`` **and** explicitly tagged
-  ``LANGUAGE="EN"`` in at least one pivot language. Near-zero translationese
-  at the cost of recall, and the only mode whose output supports a claim about
-  English-original parliamentary language.
-* ``"untagged"`` — untagged in ``txt/en/``. Larger, ~11% contaminated among
-  non-chair speakers. Use when corpus size matters more than purity.
-
-Excluding the chair
--------------------
-44% of untagged blocks in the sample are the sitting President ("President",
-"President.", "President. -"), and 71% of the everywhere-unannotated group is
-the chair. These are procedural formulae — "The debate is closed", "The vote
-will take place tomorrow" — repeated thousands of times. They are unannotated
-because nobody recorded the chair's language, not because they are English,
-and at clustering time they are precisely the near-duplicate mass that forms
-the giant junk cluster ``eval.harness.failure_flags`` exists to catch. Dropped
-by default; ``exclude_chair=False`` keeps them.
-
-No ratings
-----------
-Parliamentary speech carries no star rating, so records have no rating field
-and ``load_benchmark`` yields ``stars = NaN``. Tier-3 rating entropy is
-therefore unavailable on this corpus — see ``core.metrics.category_entropy``
-for the metadata-based substitute this corpus can support instead.
-"""
 from __future__ import annotations
 
 import json
@@ -67,35 +12,26 @@ logger = logging.getLogger("reviewscope.data.europarl")
 
 RAW_TARBALL = "europarl.tgz"
 TXT_ROOT = "txt"
-# Pivot languages used to confirm an English original. More pivots = more
-# confirmations (a speech may be annotated in one file and not another); these
-# five are the largest directories, which is where the annotations are densest.
 DEFAULT_PIVOTS = ("de", "fr", "es", "it", "nl")
 
 _SPEAKER_RE = re.compile(r"^<SPEAKER\b([^>]*)>")
 _CHAPTER_RE = re.compile(r"^<CHAPTER\b[^>]*>")
 _ATTR_RE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
 _ID_RE = re.compile(r'\bID\s*=\s*"?(\d+)"?')
-# Filename -> sitting date: ep-00-01-17.txt, ep-11-03-09-010-03.txt
 _DATE_RE = re.compile(r"^ep-(\d{2})-(\d{2})-(\d{2})")
 
-# The chair, with the punctuation noise the dump actually contains
-# ("President", "President.", "President. –", "President. -", " President").
-# Matched on the normalised name, so "President-in-Office of the Council" — a
-# substantive Council speaker, not the chair — is deliberately NOT caught.
 _CHAIR_NAMES = {"president", "the president", "presidente"}
 
 
 @dataclass
 class Speech:
-    """One ``<SPEAKER>`` block."""
 
-    speech_id: str          # "ep-00-01-17#2" — file stem + speaker id
+    speech_id: str
     text: str
     speaker: str
-    date: str               # ISO sitting date derived from the filename
-    chapter: Optional[str]  # enclosing agenda item, when one was seen
-    language: Optional[str] # source-language attribute; None = original here
+    date: str
+    chapter: Optional[str]
+    language: Optional[str]
     source_file: str
 
     @property
@@ -104,12 +40,10 @@ class Speech:
 
 
 def _normalise_name(name: str) -> str:
-    """'President. –' -> 'president'; strips trailing punctuation and spaces."""
     return name.strip().rstrip(".-–—− ").strip().lower()
 
 
 def _file_date(stem: str) -> str:
-    """'ep-00-01-17' -> '2000-01-17'. Europarl v7 spans 1996-2011."""
     m = _DATE_RE.match(stem)
     if not m:
         return ""
@@ -118,10 +52,7 @@ def _file_date(stem: str) -> str:
     return f"{year:04d}-{mm:02d}-{dd:02d}"
 
 
-# ── Parsing ───────────────────────────────────────────────────────────────────
-
 def parse_transcript(path: Path) -> Iterator[Speech]:
-    """Parse one ``ep-*.txt`` transcript into :class:`Speech` records."""
     stem = path.stem
     date = _file_date(stem)
     chapter: Optional[str] = None
@@ -142,8 +73,7 @@ def parse_transcript(path: Path) -> Iterator[Speech]:
             speaker=attrs.get("NAME", ""),
             date=date,
             chapter=chapter,
-            # LANGUAGE="" (15,593 blocks) is an empty annotation, not a source
-            # language; treat it as unannotated rather than as a language.
+            # An empty LANGUAGE annotation is unannotated, not a source language.
             language=attrs.get("LANGUAGE") or None,
             source_file=path.name,
         )
@@ -174,7 +104,6 @@ def parse_transcript(path: Path) -> Iterator[Speech]:
             if not stripped or stripped == "<P>":
                 continue
             if expecting_chapter_title:
-                # The line after <CHAPTER> is the agenda item's title.
                 chapter = stripped
                 expecting_chapter_title = False
                 continue
@@ -186,11 +115,6 @@ def parse_transcript(path: Path) -> Iterator[Speech]:
 
 
 def _english_ids_from_pivot(pivot_dir: Path) -> set[tuple[str, str]]:
-    """``{(file stem, speaker id)}`` this pivot language tags as English.
-
-    Only ``<SPEAKER>`` lines are inspected — the speech bodies are irrelevant
-    here and skipping them keeps a full-directory scan to a few seconds.
-    """
     confirmed: set[tuple[str, str]] = set()
     for path in pivot_dir.glob("*.txt"):
         stem = path.stem
@@ -210,14 +134,7 @@ def _english_ids_from_pivot(pivot_dir: Path) -> set[tuple[str, str]]:
     return confirmed
 
 
-# ── Building the benchmark sample ─────────────────────────────────────────────
-
 def ensure_extracted(raw_dir: Path, languages: tuple[str, ...]) -> Path:
-    """Extract the ``txt/<lang>/`` directories we need from the tarball.
-
-    Idempotent and incremental: a language already on disk is never re-read out
-    of the 1.5 GB archive, and only the members actually wanted are extracted.
-    """
     txt_root = raw_dir / TXT_ROOT
     missing = [l for l in languages if not (txt_root / l).is_dir()]
     if not missing:
@@ -249,24 +166,6 @@ def build_europarl_sample(
     min_text_len: int = 50,
     output_path: Optional[Path] = None,
 ) -> Path:
-    """
-    Write ``data/cache/sample_europarl-en_{N}k.jsonl``: English-original
-    European Parliament speeches in sitting-date order.
-
-    Parameters
-    ----------
-    selection : "verified" | "untagged"
-        How an English original is identified — see the module docstring.
-        "verified" additionally requires a pivot language to tag the speech
-        ``LANGUAGE="EN"``.
-    exclude_chair : bool
-        Drop the sitting President's procedural boilerplate (default True).
-
-    Deterministic and idempotent: files are visited in sorted (chronological)
-    order and the function returns immediately if the output already exists,
-    so the sample is reproducible on a fresh checkout and a 1k subset is a
-    strict prefix of the 5k one.
-    """
     if selection not in ("verified", "untagged"):
         raise ValueError(
             f"Unknown selection {selection!r}; choose 'verified' or 'untagged'"
@@ -274,8 +173,7 @@ def build_europarl_sample(
     raw_dir = project_root / "data" / "raw"
     if output_path is None:
         suffix = f"{sample_size // 1000}k" if sample_size % 1000 == 0 else str(sample_size)
-        # Hyphen, not underscore: PipelineConfig.corpus_slug splits the stem on
-        # its LAST underscore, so "europarl-en" round-trips as one token.
+        # Use a hyphen: corpus_slug splits on the final underscore.
         output_path = project_root / "data" / "cache" / f"sample_europarl-en_{suffix}.jsonl"
     if output_path.exists():
         logger.info("europarl sample already exists: %s", output_path)
@@ -296,14 +194,12 @@ def build_europarl_sample(
 
     kept: list[str] = []
     scanned = n_translated = n_chair = n_short = n_unconfirmed = 0
-    # Chronological, not alphabetical: the corpus spans 1996-2011 and a plain
-    # filename sort puts "ep-00-..." (2000) ahead of "ep-96-..." (1996), which
-    # would make "the first N speeches" a confusing slice of the timeline.
+    # Sort by date: two-digit filename years put 2000 before 1996 lexically.
     for path in sorted(en_dir.glob("*.txt"), key=lambda p: (_file_date(p.stem), p.name)):
         for speech in parse_transcript(path):
             scanned += 1
             if speech.language is not None:
-                n_translated += 1          # tagged = translated into English
+                n_translated += 1          # A language tag means translated into English, not originally English.
                 continue
             if exclude_chair and speech.is_chair:
                 n_chair += 1

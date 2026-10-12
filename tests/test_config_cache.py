@@ -9,7 +9,6 @@ class TestConfig:
     def test_data_file_derived_from_sample_size(self):
         assert load_config(sample_size=1_000).data_file == "sample_hotels_1k.jsonl"
         assert load_config(sample_size=50_000).data_file == "sample_hotels_50k.jsonl"
-        # non-round sizes must not silently truncate to a misleading name
         assert load_config(sample_size=1_500).data_file == "sample_hotels_1500.jsonl"
 
     def test_data_file_override(self):

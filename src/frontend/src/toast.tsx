@@ -1,8 +1,5 @@
 import { useSyncExternalStore } from "react";
 
-// Minimal app-wide toast store (no provider needed). Edits call `showToast` to
-// surface a transient confirmation with an optional inline "Undo" action; the
-// <Toaster /> mounted at the app root renders them and auto-dismisses each.
 export type Toast = { id: number; message: string; actionLabel?: string; onAction?: () => void };
 
 let toasts: Toast[] = [];

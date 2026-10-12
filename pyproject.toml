@@ -19,9 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Tier-2 coherence + BERTopic baseline pipeline
 eval = ["gensim>=4.3", "bertopic>=0.16", "matplotlib>=3.7"]
-# Human-in-the-loop review GUI
 hitl = ["streamlit>=1.30", "plotly>=5.0"]
 dev = ["pytest>=7.0"]
 

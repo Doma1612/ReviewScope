@@ -1,15 +1,3 @@
-"""
-Input adapter: an uploaded CSV/JSONL + a confirmed :class:`UploadSchema`
--> the in-memory :class:`~reviewscope_ml.data.ingest.ReviewSet` every pipeline
-stage consumes, plus the per-document raw rows the app stores in
-``documents.raw_data``.
-
-This is the production counterpart to ``data.ingest.load_benchmark`` (which
-only knows the fixed Yelp benchmark). It implements app-spec Celery steps
-1 (Ingest: parse against schema, validate types + PK uniqueness, reject on
-error) and 2 (Preprocess: clean text, dedup by primary key, drop very short
-documents) — the same "minimal" preprocessing notebook 02 selected.
-"""
 from __future__ import annotations
 
 import csv
@@ -25,18 +13,10 @@ from ..core.config import get_preprocessor
 from ..data.ingest import ReviewSet
 from .schema import NUMERIC_TYPES, ColumnSpec, UploadSchema
 
-# Match the benchmark's 50-char floor (methodology §1): drop documents too
-# short to embed/cluster meaningfully. Configurable per call.
 DEFAULT_MIN_TEXT_LEN = 50
 
 
 class IngestError(ValueError):
-    """Raised when an uploaded file fails validation against its schema.
-
-    ``errors`` is a list of human-readable issues (row + column + reason), so
-    the API can surface them inline exactly as the upload modal expects
-    ("validation runs on submit — errors block submit, no auto-fixing").
-    """
 
     def __init__(self, errors: list[str]):
         self.errors = errors
@@ -47,20 +27,17 @@ class IngestError(ValueError):
 
 @dataclass
 class UploadedCorpus:
-    """An ingested upload: the pipeline input plus the rows for ``raw_data``."""
 
-    reviews: ReviewSet                 # ids = primary-key values, texts preprocessed
-    raw_rows: list[dict[str, Any]]     # all original columns, aligned with reviews.ids
+    reviews: ReviewSet
+    raw_rows: list[dict[str, Any]]
     schema: UploadSchema
-    n_dropped_short: int               # documents removed by the min-length filter
-    n_dropped_duplicate: int           # documents removed by primary-key dedup
+    n_dropped_short: int
+    n_dropped_duplicate: int
 
     @property
     def n_documents(self) -> int:
         return len(self.reviews)
 
-
-# ── Public entry point ────────────────────────────────────────────────────────
 
 def reviewset_from_upload(
     file_path: str | Path,
@@ -69,12 +46,6 @@ def reviewset_from_upload(
     preprocessor: str = "minimal",
     min_text_len: int = DEFAULT_MIN_TEXT_LEN,
 ) -> UploadedCorpus:
-    """
-    Parse and validate *file_path* against *schema*, returning an
-    :class:`UploadedCorpus`. Raises :class:`IngestError` (with a per-row error
-    list) if any value violates its declared type or the primary key is not
-    unique. No auto-fixing — invalid input is rejected, per the app spec.
-    """
     schema.validate()
     path = Path(file_path)
     rows = list(_read_rows(path))
@@ -85,8 +56,6 @@ def reviewset_from_upload(
     preprocess = get_preprocessor(preprocessor)
 
     errors: list[str] = []
-    # Validate every typed column up front so the user sees all problems at once
-    # (bounded — the API may cap how many it renders).
     for i, row in enumerate(rows):
         if text_col not in row or _is_blank(row.get(text_col)):
             errors.append(f"row {i + 1}: text column {text_col!r} is empty")
@@ -126,7 +95,7 @@ def reviewset_from_upload(
 
         pk_val = str(row[pk_col]) if pk_col is not None else str(i)
         if pk_col is not None:
-            if pk_val in pk_seen:   # dedup by primary key (exact re-uploads)
+            if pk_val in pk_seen:
                 n_dup += 1
                 continue
             pk_seen[pk_val] = i
@@ -148,8 +117,6 @@ def reviewset_from_upload(
         n_dropped_duplicate=n_dup,
     )
 
-
-# ── File reading ──────────────────────────────────────────────────────────────
 
 def _read_rows(path: Path) -> Iterator[dict[str, Any]]:
     suffix = path.suffix.lower()
@@ -181,8 +148,6 @@ def _read_csv(path: Path) -> Iterator[dict[str, Any]]:
         yield from csv.DictReader(f)
 
 
-# ── Type coercion ─────────────────────────────────────────────────────────────
-
 _TRUE = {"true", "1", "yes", "y", "t"}
 _FALSE = {"false", "0", "no", "n", "f"}
 
@@ -192,20 +157,19 @@ def _is_blank(value: Any) -> bool:
 
 
 def _coerce(value: Any, type_: str) -> tuple[bool, Any]:
-    """Return (ok, coerced_value). Blank values are considered valid (-> None)."""
     if _is_blank(value):
         return True, None
     try:
         if type_ == "text":
             return True, str(value)
         if type_ == "integer":
-            if isinstance(value, bool):       # bool is an int subclass — reject for a number column
+            if isinstance(value, bool):
                 return False, None
             if isinstance(value, int):
                 return True, value
             if isinstance(value, float):
                 return (True, int(value)) if value.is_integer() else (False, None)
-            return True, int(str(value).strip())   # ValueError on "3.5" -> caught below
+            return True, int(str(value).strip())
         if type_ == "float":
             if isinstance(value, bool):
                 return False, None
@@ -227,11 +191,9 @@ def _coerce(value: Any, type_: str) -> tuple[bool, Any]:
 
 
 def _parse_date(value: Any) -> str:
-    """Validate a date and return it normalised to ISO (yyyy-mm-dd...) as a string."""
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     s = str(value).strip()
-    # ISO first (covers date and datetime); then a couple of common formats.
     try:
         return datetime.fromisoformat(s).isoformat()
     except ValueError:
@@ -250,11 +212,6 @@ def _rating_value(value: Any) -> float:
 
 
 def _typed_row(row: dict[str, Any], schema: UploadSchema) -> dict[str, Any]:
-    """Coerce a raw row to declared types for clean, JSON-serialisable raw_data.
-
-    Columns absent from the schema are passed through untouched; declared
-    columns are normalised (ints as ints, dates as ISO strings, …).
-    """
     out: dict[str, Any] = {}
     for key, value in row.items():
         col: ColumnSpec | None = schema.column(key)

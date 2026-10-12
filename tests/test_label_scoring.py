@@ -23,7 +23,7 @@ def rec(labeler, variant, cid, label):
 
 RECORDS = [
     rec("qwen3:4b", "v1", 3, "Casino in Reno"),
-    rec("gemma3:4b", "v1", 3, "casino in reno"),   # same words, different case
+    rec("gemma3:4b", "v1", 3, "casino in reno"),
     rec("phi4-mini", "v1", 3, "Food"),
     rec("qwen3:4b", "v1", 7, "Breakfast Quality"),
     rec("gemma3:4b", "v1", 7, "Room Cleanliness"),
@@ -39,18 +39,15 @@ class TestBuildScoringItems:
 
     def test_distinct_labels_stay_separate(self):
         items = build_scoring_items(RECORDS)
-        assert len(items[3]) == 2  # "Casino in Reno" + "Food"
+        assert len(items[3]) == 2
         assert len(items[7]) == 2
 
     def test_order_is_stable_across_calls(self):
-        # A reviewer reloading the page must not be shown a reshuffled list.
         a = [i.label for i in build_scoring_items(RECORDS)[3]]
         b = [i.label for i in build_scoring_items(RECORDS)[3]]
         assert a == b
 
     def test_order_does_not_follow_input_order(self):
-        # Blind means no positional advantage; with enough labels the shuffle
-        # must actually move something.
         many = [rec("m", "v1", 1, f"label {i}") for i in range(12)]
         shown = [i.label for i in build_scoring_items(many)[1]]
         assert shown != [r["label"] for r in many]
@@ -104,8 +101,8 @@ class TestScoreByLabeler:
     def test_averages_across_reviewers_then_across_clusters(self):
         items = build_scoring_items(RECORDS)
         scores = {
-            (3, "casino in reno"): {"ann": 4, "bob": 2},   # mean 3
-            (7, "breakfast quality"): {"ann": 5},          # mean 5
+            (3, "casino in reno"): {"ann": 4, "bob": 2},
+            (7, "breakfast quality"): {"ann": 5},
         }
         row = next(
             r for r in score_by_labeler(items, scores) if r["labeler"] == "qwen3:4b"
@@ -120,7 +117,7 @@ class TestScoreByLabeler:
             r for r in score_by_labeler(items, scores) if r["labeler"] == "qwen3:4b"
         )
         assert row["human_score"] == 4.0
-        assert row["n_clusters"] == 1  # cluster 7 unscored, not averaged in as 0
+        assert row["n_clusters"] == 1
 
 
 class TestCoverage:
@@ -154,8 +151,6 @@ class TestAgreement:
         assert krippendorff_alpha(scores) < 0
 
     def test_alpha_is_none_when_everyone_used_one_value(self):
-        # No variance: perfectly consistent but the statistic is undefined,
-        # and reporting 1.0 there would be a lie about reliability.
         scores = {(1, "a"): {"ann": 4, "bob": 4}, (2, "b"): {"ann": 4, "bob": 4}}
         assert krippendorff_alpha(scores) is None
 
@@ -174,7 +169,7 @@ class TestAgreement:
         scores = {
             (1, "a"): {"ann": 3, "bob": 3},
             (2, "b"): {"ann": 5, "bob": 4},
-            (3, "c"): {"ann": 2},            # bob never scored this one
+            (3, "c"): {"ann": 2},
         }
         (row,) = pairwise_agreement(scores)
         assert (row["a"], row["b"], row["n"]) == ("ann", "bob", 2)
@@ -192,8 +187,6 @@ class TestSelectExemplars:
         assert set(out[1]) <= {"t3", "t4", "t5"}
 
     def test_is_deterministic_and_order_dependent(self):
-        # The generator advances once per cluster, so the sheet and the GUI
-        # must iterate `chosen` identically — this pins that contract.
         labels = np.array([0] * 10 + [1] * 10)
         texts = [f"t{i}" for i in range(20)]
         a = select_exemplars(labels, texts, [0, 1], seed=42, k=3)

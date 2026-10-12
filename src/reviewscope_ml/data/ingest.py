@@ -1,15 +1,3 @@
-"""
-Benchmark data loading.
-
-``load_benchmark`` reads a benchmark JSONL — whatever corpus produced it — into
-the in-memory shape every pipeline stage consumes. The files themselves are
-written by the adapters in ``data.sources`` (Yelp hotel reviews, Europarl
-English speeches); this module knows only the common record shape and nothing
-about any vendor's archive format.
-
-The Yelp builders are re-exported here so the notebooks and
-``scripts/make_notebooks.py`` keep their existing import paths.
-"""
 from __future__ import annotations
 
 import json
@@ -24,13 +12,7 @@ from .sources.yelp import build_benchmark_sample, subset_sample
 
 logger = logging.getLogger("reviewscope.data")
 
-# Per-document key, in priority order. Corpora name their identifier after
-# their own unit ("review_id", "speech_id"); the pipeline only needs *a*
-# stable per-document key, and falls back to the row index if none is present.
 DOC_ID_FIELDS = ("review_id", "speech_id", "doc_id", "id")
-# Optional numeric rating. Absent on corpora that have none (Europarl), in
-# which case `stars` is all-NaN and every rating-derived metric reports None
-# rather than a fabricated number.
 RATING_FIELDS = ("stars", "rating", "score")
 
 __all__ = [
@@ -40,23 +22,17 @@ __all__ = [
 
 @dataclass
 class ReviewSet:
-    """The benchmark sample in the shape all pipeline stages consume."""
 
-    ids: list[str]            # stable per-document key
-    texts: list[str]          # preprocessed text (default: "minimal" variant)
-    raw_texts: list[str]      # untouched text, for human inspection artifacts
-    stars: np.ndarray         # numeric rating per document; NaN if the corpus has none
+    ids: list[str]
+    texts: list[str]
+    raw_texts: list[str]
+    stars: np.ndarray
 
     def __len__(self) -> int:
         return len(self.texts)
 
     @property
     def has_ratings(self) -> bool:
-        """False for corpora without a rating column (Europarl, plain text dumps).
-
-        Callers use this to skip rating-derived reporting entirely instead of
-        printing a metric computed from an all-NaN column.
-        """
         return bool(self.stars.size) and not bool(np.isnan(self.stars).all())
 
 
@@ -68,11 +44,6 @@ def _first_present(obj: dict, fields: tuple[str, ...]):
 
 
 def load_benchmark(cfg: PipelineConfig, preprocessor: str = "minimal") -> ReviewSet:
-    """
-    Load ``cfg.data_path`` (e.g. sample_hotels_5k.jsonl or
-    sample_europarl-en_5k.jsonl), capped at ``cfg.sample_size`` rows and
-    preprocessed with the variant notebook 02 chose.
-    """
     if not cfg.data_path.exists():
         raise FileNotFoundError(
             f"Benchmark file missing: {cfg.data_path}\n"

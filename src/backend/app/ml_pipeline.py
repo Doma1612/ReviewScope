@@ -1,12 +1,3 @@
-"""
-Real ML pipeline Celery task — the counterpart to ``tasks.run_simulated_pipeline``.
-
-Selected by ``create_project`` when ``settings.simulate_ml`` is false. It drives
-the framework-agnostic ``reviewscope_ml`` seam (``run_from_upload``), reporting
-progress through :class:`DbProgressSink` and persisting the resulting DTOs with
-:func:`persist_run_result`. ``reviewscope_ml`` is imported lazily so the heavy ML
-dependency tree only loads on this path, never for the simulated worker or tests.
-"""
 from __future__ import annotations
 
 import uuid
@@ -47,7 +38,7 @@ def run_ml_pipeline(project_id: str) -> None:
 
     claim = _claim_device(settings)
     try:
-        # Lazy import: only this path needs torch / sentence-transformers / umap.
+        # Keep heavy ML dependencies off the simulated worker and API import paths.
         from reviewscope_ml.app import IngestError, run_from_upload
 
         try:
@@ -61,10 +52,7 @@ def run_ml_pipeline(project_id: str) -> None:
                 device=claim.device if claim else "cpu",
                 label_clusters=True,
                 corpus_profile=corpus_profile_for(source_filename),
-                # A project's run directory is keyed on project id + variant,
-                # so a completed run would otherwise be reloaded wholesale and
-                # any changed pipeline parameter silently ignored. Re-running a
-                # project means recompute; the stage caches keep it cheap.
+                # Force reruns: the fixed project run name otherwise reloads stale parameters.
                 force=True,
             )
         except IngestError as exc:
@@ -72,15 +60,10 @@ def run_ml_pipeline(project_id: str) -> None:
             return
 
         with SyncSessionLocal() as session:
-            # Snapshot the human-curated membership *before* persist wipes it, then
-            # replay the edit log over the fresh rows so manual work survives the
-            # re-run. Replay runs after persist so re-applied human labels win.
+            # Snapshot before replacing rows; replay afterward so human edits survive reruns.
             snapshot = snapshot_membership(session, pid)
             persist_run_result(session, result)
             replay_edits(session, pid, snapshot)
-            # Capture the run-level quality report (silhouette/coherence/etc.) the ML
-            # run already computed, so the UI can surface it (R17). metrics_run_at
-            # marks when it was valid; edits after this make it stale.
             metrics = getattr(result, "metrics", None)
             session.execute(
                 update(Project)

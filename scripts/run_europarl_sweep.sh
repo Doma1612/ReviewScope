@@ -1,29 +1,4 @@
 #!/usr/bin/env bash
-# Europarl (English-original) sentence-level embedding sweep — unattended.
-#
-# The WP5 experiment repeated on the Phase-2 corpus: every registry candidate
-# under the same fixed downstream pipeline, so the embedding model is again the
-# only manipulated variable. 5,000 verified English-original speeches ->
-# 58,230 segments (the 5k Hotels benchmark was 43,012, so the two rankings are
-# comparable in scale).
-#
-# Written to be started and walked away from. Cleanup runs from an EXIT trap,
-# so it happens on success, on failure and on Ctrl-C alike:
-#   - every GPU is handed back (process exit frees VRAM; we verify and report)
-#   - the 2.3 GB of extracted Europarl language directories are deleted; they
-#     are pure intermediates, re-derivable from data/raw/europarl.tgz, and the
-#     benchmark JSONL they produced is already on disk
-#   - a status file says what finished and where the report is
-#
-# Kept deliberately: europarl.tgz (the source of truth), the sample JSONLs, and
-# the embedding/UMAP/clustering caches — those ARE the expensive artifacts and
-# make any re-run nearly free.
-#
-# GPU etiquette: --gpus 2 claims at most two *idle* devices (busy ones are
-# never taken), leaving half the shared box for whoever else turns up.
-#
-# Usage:  tmux new-session -d -s revscope-europarl "bash scripts/run_europarl_sweep.sh"
-#         tail -f data/runs/europarl_sweep.log
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -41,8 +16,7 @@ cleanup() {
     local rc=$?
     say "─── cleanup (exit code $rc) ───"
 
-    # Re-derivable intermediates: the sample JSONL is built, so the 2.3 GB of
-    # extracted transcripts have no further use. europarl.tgz regenerates them.
+    # Only remove extracted intermediates; europarl.tgz can regenerate them.
     if [ -d "$EXTRACTS" ]; then
         local freed
         freed=$(du -sh "$EXTRACTS" 2>/dev/null | cut -f1)

@@ -22,7 +22,6 @@ def make_cluster(cid: int, size: int, label: str = None, micro=()) -> ClusterInf
 
 @pytest.fixture
 def small_run() -> RunArtifacts:
-    """12 docs: cluster 0 (5 docs), cluster 1 (4), noise (3)."""
     labels = np.array([0] * 5 + [1] * 4 + [-1] * 3)
     n = len(labels)
     return RunArtifacts(
@@ -39,7 +38,6 @@ def small_run() -> RunArtifacts:
 
 @pytest.fixture
 def two_stage_run() -> RunArtifacts:
-    """Macro cluster 0 made of micro 10+11, macro 1 made of micro 12."""
     labels = np.array([0, 0, 0, 0, 1, 1, -1])
     micro = np.array([10, 10, 11, 11, 12, 12, -1])
     n = len(labels)

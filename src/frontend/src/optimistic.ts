@@ -2,13 +2,8 @@ import type { QueryClient } from "@tanstack/react-query";
 
 import type { Cluster, DocumentItem, EmbeddingPoint } from "./api";
 
-// Optimistic cache helpers. Every cluster/document edit touches the same set
-// of project-scoped queries; these helpers cancel + snapshot them, mutate the cache
-// in place so the UI reacts before the server responds, and roll back on error.
-// `onSettled` then `invalidateAll` to reconcile with the server's recomputed truth.
 
-// Prefix filters (no page/cluster suffix) so setQueriesData/invalidate hit every
-// matching query — e.g. all paginated ["documents", projectId, …] pages at once.
+// Prefix keys include every paginated query for the project.
 const affectedKeys = (projectId: string): readonly unknown[][] => [
   ["clusters", projectId],
   ["embeddings", projectId],
@@ -20,8 +15,7 @@ const affectedKeys = (projectId: string): readonly unknown[][] => [
 
 export type Snapshot = Array<[readonly unknown[], unknown]>;
 
-// Cancel in-flight refetches (so they can't clobber our optimistic write) and
-// snapshot current data for rollback. Call before applying an optimistic mutation.
+// Cancel refetches before optimistic writes so late responses cannot overwrite them.
 export async function beginOptimistic(qc: QueryClient, projectId: string): Promise<Snapshot> {
   const keys = affectedKeys(projectId);
   await Promise.all(keys.map((queryKey) => qc.cancelQueries({ queryKey })));
@@ -54,8 +48,6 @@ export function applyRename(qc: QueryClient, projectId: string, clusterId: strin
   );
 }
 
-// Fold every source cluster into the target: repoint their points/docs and add
-// their sizes to the target, then drop the source cards.
 export function applyMerge(
   qc: QueryClient,
   projectId: string,
@@ -83,7 +75,6 @@ export function applyMerge(
   qc.setQueriesData<DocumentItem[]>({ queryKey: ["cluster-docs", projectId] }, patch);
 }
 
-// Mark a cluster as junk: its documents become noise and the card disappears.
 export function applyJunk(qc: QueryClient, projectId: string, clusterId: string): void {
   qc.setQueriesData<EmbeddingPoint[]>({ queryKey: ["embeddings", projectId] }, (points) =>
     points?.map((point) =>

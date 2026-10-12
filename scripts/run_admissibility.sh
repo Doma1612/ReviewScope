@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# Admissibility + cost probe over the whole embedding registry.
-#
-# Verifies the hard constraints on the actual box (plain sentence-transformers,
-# no trust_remote_code, fp32 inside the VRAM slice) and measures comparable
-# throughput / peak VRAM per candidate on one pinned idle GPU.
-#
-# Long-running (downloads several GB of weights on first run) — meant for tmux.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

@@ -1,9 +1,3 @@
-"""Unit tests for GET /{project_id}/embeddings (rich hover payload).
-
-Mirrors the lightweight fake-session approach used by test_cluster_crud.py: the
-route function is driven directly with an in-memory session so we can assert the
-row→EmbeddingPoint transformation (snippet capping, noise→null label) without a DB.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -21,7 +15,7 @@ os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://u:p@localhost:5432/t
 os.environ.setdefault("SYNC_DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/test")
 os.environ.setdefault("SIMULATE_ML", "true")
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/backend on path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.api import projects  # noqa: E402
 from app.models import Document, Project, ProjectMember, ProjectRole  # noqa: E402
@@ -48,10 +42,6 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """Answers the role check + project lookup, then serves the embeddings join rows.
-
-    Serves a document-unit project so the endpoint takes the legacy
-    (Document→Embedding) branch these tests exercise."""
 
     def __init__(self, *, member=None, rows=None, unit="document"):
         self.member = member
@@ -71,7 +61,6 @@ class _FakeSession:
 
 
 def _row(*, cluster_id=None, text="hello", pk="1", sentiment=0.5, label=None):
-    # Tuple order matches the select() in the embeddings route.
     return (uuid.uuid4(), cluster_id, 1.0, 2.0, 3.0, text, pk, sentiment, label)
 
 
@@ -90,13 +79,13 @@ async def test_embeddings_populates_rich_fields():
     points = await projects.embeddings(pid, db=session, current_user=SimpleNamespace(id=uuid.uuid4()))
 
     clustered, noise = points
-    assert len(clustered.snippet) == 120  # capped server-side
+    assert len(clustered.snippet) == 120
     assert clustered.primary_key_value == "A1"
     assert clustered.sentiment_score == 0.9
     assert clustered.cluster_label == "Praise"
 
     assert noise.cluster_id is None
-    assert noise.cluster_label is None  # noise points carry no label
+    assert noise.cluster_label is None
     assert noise.snippet == "noisy"
 
 

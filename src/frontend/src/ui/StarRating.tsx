@@ -1,6 +1,3 @@
-// Star rating for `cluster.mean_stars`. Renders five stars with a gold
-// overlay clipped to the average (assumed 5-point review scale) plus the numeric
-// value. Returns null when there is no rating, so callers can render it bare.
 export function StarRating({ value, compact = false }: { value: number | null | undefined; compact?: boolean }) {
   if (value == null) return null;
   const fill = Math.min(100, Math.max(0, (value / 5) * 100));

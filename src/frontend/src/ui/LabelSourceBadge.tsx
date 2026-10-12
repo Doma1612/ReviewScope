@@ -1,9 +1,3 @@
-// Label provenance badge. Distinguishes how a cluster's label was produced:
-//   ollama:<model>  → AI-generated (LLM)
-//   terms_fallback  → keyword fallback (LLM was unavailable)
-//   hitl_override   → human-edited
-//   hitl_approved   → human-approved (machine label confirmed)
-// So a keyword guess is never mistaken for an AI label or a vetted human one.
 type Provenance = { text: string; tier: string; title: string };
 
 function describe(labelSource: string): Provenance {

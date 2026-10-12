@@ -1,44 +1,3 @@
-"""
-Apply reviewer feedback to a run — the "flow back" half of the HITL loop.
-
-Exact semantics per feedback type
----------------------------------
-
-``approve_label``    Stamps the cluster as human-approved
-                     (``label_source="hitl_approved"``). Nothing else changes;
-                     the value is the recorded approval.
-``rename_label``     Overrides the cluster label directly
-                     (``label_source="hitl_override"``). LLM output never
-                     overwrites a human label on later re-labeling passes.
-``merge_clusters``   Post-hoc mapping: every document of the source cluster is
-                     reassigned to the target; term lists and word frequencies
-                     are recomputed from the merged membership when texts are
-                     available, otherwise unioned. Merges survive re-runs as a
-                     cluster-level mapping, not as document constraints.
-``mark_junk``        The cluster's documents become noise (-1). Junk is a
-                     human judgment ("boilerplate, not a theme"), so this is
-                     irreversible only in the derived artifact — the original
-                     run stays on disk.
-``split_cluster``    Two cases. For two-stage runs the macro cluster is split
-                     back into its constituent micro-clusters (promoted to
-                     top-level clusters) — this is why the micro->macro
-                     hierarchy is preserved in the artifact. For flat runs the
-                     cluster is tagged in ``needs_recluster`` in the manifest;
-                     the next pipeline run re-clusters exactly that subset
-                     (targeted re-clustering; a must-link/cannot-link solver
-                     would be the heavier alternative and is not needed yet).
-``reassign_doc``     Moves one document to the target cluster (or -1). Treated
-                     as a hard assignment: applied after every other rule.
-``confirm_run``      Writes reviewer + timestamp into the manifest as
-                     ``human_confirmed`` — the machine-readable basis for the
-                     sentence "a human reviewed the clusters of the winning
-                     pipeline and confirmed they are thematically coherent".
-
-Order of application: merges -> junk -> splits -> label actions ->
-doc reassignments -> confirmation, each group in timestamp order. The result
-is saved as a NEW run directory (``<run>__reviewed``) so the unreviewed
-artifact remains for comparison.
-"""
 from __future__ import annotations
 
 import logging
@@ -60,7 +19,7 @@ def apply_feedback(
     records: list[FeedbackRecord],
     reviews: Optional[ReviewSet] = None,
 ) -> RunArtifacts:
-    """Return a new RunArtifacts with all *records* applied (see module doc)."""
+    # Apply structural edits before labels and hard document overrides; later records win.
     labels = art.labels.copy()
     clusters = {cid: _copy_info(info) for cid, info in art.clusters.items()}
     manifest = dict(art.manifest)
@@ -70,7 +29,6 @@ def apply_feedback(
     def by_action(action: str) -> list[FeedbackRecord]:
         return [r for r in records if r.action == action]
 
-    # 1) merges
     for r in by_action("merge_clusters"):
         src, dst = r.cluster_id, r.merge_into
         if src is None or dst is None or src not in clusters or dst not in clusters:
@@ -86,7 +44,6 @@ def apply_feedback(
         del clusters[src]
         applied.append(f"merge {src}->{dst}")
 
-    # 2) junk
     for r in by_action("mark_junk"):
         cid = r.cluster_id
         if cid not in clusters:
@@ -95,7 +52,6 @@ def apply_feedback(
         del clusters[cid]
         applied.append(f"junk {cid}")
 
-    # 3) splits
     for r in by_action("split_cluster"):
         cid = r.cluster_id
         if cid not in clusters:
@@ -108,7 +64,6 @@ def apply_feedback(
                 needs_recluster.append(cid)
             applied.append(f"split {cid} flagged for targeted re-clustering")
 
-    # 4) label actions (later record wins by iteration order)
     for r in by_action("approve_label"):
         if r.cluster_id in clusters:
             clusters[r.cluster_id].label_source = "hitl_approved"
@@ -119,7 +74,6 @@ def apply_feedback(
             clusters[r.cluster_id].label_source = "hitl_override"
             applied.append(f"rename {r.cluster_id} -> {r.new_label!r}")
 
-    # 5) doc reassignments (hard overrides)
     id_index = {doc_id: i for i, doc_id in enumerate(art.doc_ids)}
     for r in by_action("reassign_doc"):
         i = id_index.get(r.doc_id)
@@ -133,7 +87,6 @@ def apply_feedback(
             clusters[r.target_cluster_id].size += 1
         applied.append(f"reassign {r.doc_id} {old}->{r.target_cluster_id}")
 
-    # 6) confirmation
     for r in by_action("confirm_run"):
         manifest["human_confirmed"] = {
             "reviewer": r.reviewer,
@@ -142,7 +95,6 @@ def apply_feedback(
         }
         applied.append(f"confirmed by {r.reviewer}")
 
-    # Recompute term representations for structurally changed clusters.
     if reviews is not None and any(
         a.startswith(("merge", "split", "junk")) for a in applied
     ):
@@ -172,7 +124,6 @@ def apply_feedback(
 
 
 def _split_via_micro(art, labels, clusters, cid):
-    """Promote a macro cluster's micro-clusters to top-level clusters."""
     info = clusters.pop(cid)
     next_id = max(max(clusters, default=0), int(labels.max())) + 1
     for micro_id in info.micro_cluster_ids:
@@ -205,7 +156,6 @@ def _copy_info(info):
 
 
 def apply_run_feedback(run_dir: Path, feedback_dir: Path, reviews=None) -> Path:
-    """Load run + all its feedback, apply, save ``<run>__reviewed`` next to it."""
     art = load_run(run_dir)
     records = load_feedback(feedback_dir, art.run_name)
     if not records:

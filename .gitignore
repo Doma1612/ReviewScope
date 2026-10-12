@@ -1,14 +1,9 @@
-# Data — large files, never commit raw datasets
 data/raw/
 data/processed/
 data/cache/
 
-# Notebook checkpoints and outputs
 notebooks/.ipynb_checkpoints/
-# Use `nbstripout` to strip outputs before committing notebooks:
-#   pip install nbstripout && nbstripout --install
 
-# Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -16,39 +11,31 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Virtual environments
 .venv/
 venv/
 env/
 
-# OS
 .DS_Store
 Thumbs.db
 
-# IDE
 .vscode/settings.json
 .idea/
 
-# Build artifacts
 dist/
 build/
 *.egg-info/
 
-# Secrets
 .env
 .env.local
 *.pem
 
-# Application runtime files
 data/uploads/
 
-# Frontend
 node_modules/
 frontend/dist/
 src/frontend/node_modules/
 src/frontend/dist/
 src/frontend/tsconfig.app.tsbuildinfo
 
-# Pipeline run artifacts — regenerable, keep out of git (feedback JSONL stays tracked)
 data/runs/
 data/backups/

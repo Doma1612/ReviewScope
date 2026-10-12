@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
-# Manage the rootless Ollama server on the shared GPU box.
-#
-#   scripts/ollama-server.sh start    # pinned + context-capped, detached
-#   scripts/ollama-server.sh stop     # stop server AND model runner (frees all VRAM)
-#   scripts/ollama-server.sh status   # process + VRAM view
-#
-# Facts worth knowing:
-# - The server holds GPU memory ONLY while a model is loaded; it unloads
-#   10 min after the last request (OLLAMA_KEEP_ALIVE) -> 0 VRAM when idle.
-# - Without a CUDA pin ollama spreads one small model across ALL visible
-#   GPUs (~26 GB observed) — never start it unpinned on this box.
-# - "[o]llama" pgrep patterns so this script never kills its own shell.
+# Pin Ollama to one GPU; otherwise it can spread across every shared device.
+# [o]llama patterns avoid matching this script's own shell command line.
 set -euo pipefail
 
 OLLAMA=${OLLAMA_BIN:-$HOME/ollama/bin/ollama}

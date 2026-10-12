@@ -1,36 +1,3 @@
-"""Replay manual edits over a fresh run so re-processing never destroys
-human work.
-
-``persist_run_result`` (``ml_mapping.py``) wipes and rewrites a project's clusters
-and documents from scratch on every run. Cluster ids are regenerated and any
-human-only cluster (created from a selection, or by hand) is gone. This module is
-the app analogue of ``reviewscope_ml.hitl.apply_feedback.apply_run_feedback``: it
-takes the project's :class:`ClusterEdit` audit log and re-applies the human
-*decisions* on top of the new run — keeping the better base clustering while
-restoring renames, reassignments and human-made clusters.
-
-Two stable identities bridge the runs:
-
-* **Documents** by ``primary_key_value`` — cluster ids change, doc ids change, but
-  the upload's primary key is stable. Because the edit log stores *old* document
-  UUIDs, a pre-persist snapshot (:func:`snapshot_membership`, taken before
-  ``persist_run_result`` deletes the old rows) maps each old doc UUID to its
-  ``primary_key_value``, which then maps to the freshly inserted document.
-* **Clusters** have no stable id, so an old cluster UUID is resolved to a new one
-  by membership: the new cluster holding the plurality of the old cluster's
-  members (from the same snapshot, against the fresh run's base assignment).
-  Human-created clusters are tracked in ``remap`` as they are recreated.
-
-Application order mirrors ``apply_feedback``: creates → merges → junk → splits →
-label actions → doc reassignments → confirm, each group in ``created_at`` order
-(creates run first because later merges/reassignments may target them; splits and
-confirm have no app-side artifact yet and are logged + skipped). Affected clusters
-are recomputed afterwards.
-
-``label_source == "hitl_override"`` protection: replay runs *after* persist, so a
-human rename re-applied here always wins over the run's machine label. Any future
-LLM relabel pass must likewise skip ``hitl_override`` clusters.
-"""
 from __future__ import annotations
 
 import logging
@@ -56,23 +23,15 @@ logger = logging.getLogger("reviewscope.replay")
 
 @dataclass(frozen=True)
 class MembershipSnapshot:
-    """Pre-persist state needed to bridge old ids onto the fresh run."""
 
     doc_pk_by_id: dict[str, str] = field(default_factory=dict)
-    """old document UUID (str) -> primary_key_value"""
     cluster_members: dict[uuid.UUID, list[str]] = field(default_factory=dict)
-    """old cluster UUID -> primary_key_values that belonged to it (document unit)"""
     seg_key_by_id: dict[str, str] = field(default_factory=dict)
-    """old segment UUID (str) -> segment_key (sentence unit)"""
     seg_cluster_members: dict[uuid.UUID, list[str]] = field(default_factory=dict)
-    """old cluster UUID -> segment_keys that belonged to it (sentence unit)"""
 
 
 def snapshot_membership(session, project_id: uuid.UUID) -> MembershipSnapshot:
-    """Capture document/segment/cluster membership **before**
-    ``persist_run_result`` wipes the old rows. Must be called inside the same
-    session, prior to persist. Snapshots both units; the empty maps are harmless
-    for whichever unit the project isn't."""
+    # Snapshot in the same session before persist_run_result deletes the old rows.
     doc_pk_by_id: dict[str, str] = {}
     cluster_members: dict[uuid.UUID, list[str]] = {}
     rows = session.execute(
@@ -106,12 +65,6 @@ def snapshot_membership(session, project_id: uuid.UUID) -> MembershipSnapshot:
 
 
 def replay_edits(session, project_id: uuid.UUID, snapshot: MembershipSnapshot) -> None:
-    """Re-apply the project's :class:`ClusterEdit` log onto the freshly persisted
-    rows. The caller owns the surrounding transaction/commit (``run_ml_pipeline``
-    calls this after persist, before the ``status=ready`` commit).
-
-    Dispatches on the just-persisted project ``unit``: sentence-unit runs replay
-    edits over segments, document-unit runs over documents (legacy)."""
     project = session.get(Project, project_id)
     if project is not None and project.unit == "sentence":
         _replay_sentence(session, project_id, snapshot)
@@ -122,8 +75,7 @@ def replay_edits(session, project_id: uuid.UUID, snapshot: MembershipSnapshot) -
 def _replay_document(session, project_id: uuid.UUID, snapshot: MembershipSnapshot) -> None:
     docs = list(session.execute(select(Document).where(Document.project_id == project_id)).scalars().all())
     doc_by_pk: dict[str, Document] = {d.primary_key_value: d for d in docs}
-    # The fresh run's base assignment — the anchor for resolving old clusters by
-    # membership. Captured before any edit mutates it so resolution stays stable.
+    # Resolve old clusters against the untouched base assignment, before replay mutates it.
     base_cluster_by_pk: dict[str, uuid.UUID | None] = {d.primary_key_value: d.cluster_id for d in docs}
 
     clusters = list(session.execute(select(Cluster).where(Cluster.project_id == project_id)).scalars().all())
@@ -135,7 +87,7 @@ def _replay_document(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
         ).scalars().all()
     )
 
-    remap: dict[uuid.UUID, uuid.UUID] = {}  # old human-cluster UUID -> recreated UUID
+    remap: dict[uuid.UUID, uuid.UUID] = {}
     ml_cache: dict[uuid.UUID, uuid.UUID | None] = {}
     affected: set[uuid.UUID] = set()
 
@@ -161,8 +113,6 @@ def _replay_document(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
         new_cid = remap.get(old_cluster_id)
         if new_cid is None:
             new_cid = resolve_ml(old_cluster_id)
-        # Could resolve onto a cluster deleted earlier in this replay (e.g. a merge
-        # source); treat that as unresolvable.
         return new_cid if new_cid in cluster_by_id else None
 
     def by_action(*actions: str) -> list[ClusterEdit]:
@@ -191,7 +141,7 @@ def _replay_document(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
         if target is not None:
             affected.add(target)
 
-    # 1) creates (app-only; must precede merges/reassignments that target them)
+    # Create targets before replaying merges and reassignments.
     for e in by_action("create_cluster", "create_from_selection"):
         c = new_cluster(e.new_label)
         remap[e.cluster_id] = c.id
@@ -200,7 +150,6 @@ def _replay_document(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
             if doc is not None:
                 move_doc(doc, c.id)
 
-    # 2) merges
     for e in by_action("merge_clusters"):
         src, dst = resolve(e.cluster_id), resolve(e.target_cluster_id)
         if src is None or dst is None or src == dst:
@@ -212,7 +161,6 @@ def _replay_document(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
         session.delete(cluster_by_id.pop(src))
         affected.discard(src)
 
-    # 3) junk — the cluster's documents become noise and the cluster is removed
     for e in by_action("mark_junk"):
         cid = resolve(e.cluster_id)
         if cid is None:
@@ -223,11 +171,9 @@ def _replay_document(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
         session.delete(cluster_by_id.pop(cid))
         affected.discard(cid)
 
-    # 4) splits — no app-side artifact yet (would need micro-labels / re-cluster)
     for e in by_action("split_cluster"):
         logger.info("replay: split_cluster %s not replayable yet — skipping", e.cluster_id)
 
-    # 5) label actions (approve then rename, matching apply_feedback)
     for e in by_action("approve_label"):
         cid = resolve(e.cluster_id)
         if cid is not None:
@@ -240,7 +186,6 @@ def _replay_document(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
             cluster_by_id[cid].label_source = "hitl_override"
             affected.add(cid)
 
-    # 6) doc reassignments (hard overrides; interleaved in timestamp order)
     for e in by_action("reassign_doc", "bulk_reassign"):
         target = resolve(e.target_cluster_id)
         if e.action == "reassign_doc":
@@ -253,7 +198,6 @@ def _replay_document(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
                 if doc is not None:
                     move_doc(doc, target)
 
-    # 7) confirm_run — no app-side manifest yet; skipped (logged for traceability)
     for e in by_action("confirm_run"):
         logger.info("replay: confirm_run by %s has no app artifact yet — skipping", e.actor_id)
 
@@ -262,13 +206,6 @@ def _replay_document(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
 
 
 def _replay_sentence(session, project_id: uuid.UUID, snapshot: MembershipSnapshot) -> None:
-    """Sentence-unit replay: re-apply edits over the fresh run's *segments*.
-
-    Mirrors :func:`_replay_document` but the moved unit is the segment. Old cluster
-    UUIDs resolve to new ones by *segment-key* plurality; segment-level actions
-    resolve by ``segment_key``; review-level actions (``reassign_review`` and the
-    legacy ``reassign_doc``/``bulk_reassign``) move *all* of a review's current
-    segments to the target, which survives re-segmentation."""
     segs = list(session.execute(select(Segment).where(Segment.project_id == project_id)).scalars().all())
     seg_by_key: dict[str, Segment] = {s.segment_key: s for s in segs}
     base_cluster_by_segkey: dict[str, uuid.UUID | None] = {s.segment_key: s.cluster_id for s in segs}
@@ -349,7 +286,7 @@ def _replay_sentence(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
         for seg in segs_by_doc.get(doc.id, []):
             move_seg(seg, target)
 
-    # 1) creates (app-only; must precede merges/reassignments that target them)
+    # Create targets before replaying merges and reassignments.
     for e in by_action("create_cluster", "create_from_selection"):
         c = new_cluster(e.new_label)
         remap[e.cluster_id] = c.id
@@ -358,7 +295,6 @@ def _replay_sentence(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
             if seg is not None:
                 move_seg(seg, c.id)
 
-    # 2) merges — move every segment of the source cluster into the target
     for e in by_action("merge_clusters"):
         src, dst = resolve(e.cluster_id), resolve(e.target_cluster_id)
         if src is None or dst is None or src == dst:
@@ -370,7 +306,6 @@ def _replay_sentence(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
         session.delete(cluster_by_id.pop(src))
         affected.discard(src)
 
-    # 3) junk — the cluster's segments become noise and the cluster is removed
     for e in by_action("mark_junk"):
         cid = resolve(e.cluster_id)
         if cid is None:
@@ -381,11 +316,9 @@ def _replay_sentence(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
         session.delete(cluster_by_id.pop(cid))
         affected.discard(cid)
 
-    # 4) splits — no app-side artifact yet
     for e in by_action("split_cluster"):
         logger.info("replay: split_cluster %s not replayable yet — skipping", e.cluster_id)
 
-    # 5) label actions (approve then rename, matching apply_feedback)
     for e in by_action("approve_label"):
         cid = resolve(e.cluster_id)
         if cid is not None:
@@ -398,8 +331,7 @@ def _replay_sentence(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
             cluster_by_id[cid].label_source = "hitl_override"
             affected.add(cid)
 
-    # 6) reassignments (hard overrides; segment- and review-level interleaved in
-    #    timestamp order). Legacy document actions are replayed as review-level.
+    # Interleave segment/review overrides in timestamp order; legacy moves affect whole reviews.
     for e in by_action(
         "reassign_segment", "bulk_reassign_segments", "reassign_review",
         "reassign_doc", "bulk_reassign",
@@ -417,10 +349,9 @@ def _replay_sentence(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
         elif e.action == "bulk_reassign":
             for old_doc_id in (e.payload or {}).get("document_ids", []):
                 move_review(old_doc_id, target)
-        else:  # reassign_review / legacy reassign_doc
+        else:
             move_review(e.document_id, target)
 
-    # 7) confirm_run — skipped
     for e in by_action("confirm_run"):
         logger.info("replay: confirm_run by %s has no app artifact yet — skipping", e.actor_id)
 
@@ -430,15 +361,10 @@ def _replay_sentence(session, project_id: uuid.UUID, snapshot: MembershipSnapsho
 
 
 def _recompute_clusters_sync(session, project_id: uuid.UUID, cluster_ids: list[uuid.UUID]) -> None:
-    """Sync counterpart of ``recompute.recompute_clusters`` for the Celery worker.
-
-    Reuses the pure aggregate/term helpers from :mod:`app.services.recompute`;
-    branches on the project ``unit`` (segments for sentence, documents for
-    document). The term recompute imports the heavy ML stack lazily."""
     rating_col = _rating_column_sync(session, project_id)
     project = session.get(Project, project_id)
     sentence = bool(project is not None and project.unit == "sentence")
-    for cluster_id in dict.fromkeys(cluster_ids):  # de-dup, keep order
+    for cluster_id in dict.fromkeys(cluster_ids):
         cluster = session.get(Cluster, cluster_id)
         if cluster is None or cluster.project_id != project_id:
             continue
@@ -489,8 +415,6 @@ def _recompute_clusters_sync(session, project_id: uuid.UUID, cluster_ids: list[u
 
 
 def _recompute_document_primary_sync(session, project_id: uuid.UUID, document_ids: list[uuid.UUID]) -> None:
-    """Sync counterpart of ``recompute.recompute_document_primary``: refresh each
-    touched review's derived primary cluster from its segments' plurality."""
     for document_id in dict.fromkeys(document_ids):
         rows = session.execute(
             select(Segment.cluster_id).where(

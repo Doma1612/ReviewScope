@@ -1,45 +1,3 @@
-"""
-Curated embedding-model candidates for the clustering benchmark.
-
-Hard constraints (a candidate that fails any one is inadmissible regardless of
-leaderboard position — recorded in the admissibility report, not silently
-dropped; see ``eval/cost_probe.py``, which *verifies* these on the box):
-
-- loadable with plain sentence-transformers, **no trust_remote_code**, so the
-  Celery worker needs no custom code paths;
-- fp32 weights + activations fit the ~6 GB VRAM slice we may claim on a shared
-  TITAN X Pascal (rules out the 4B/7B instruction embedders);
-- Pascal (sm_61) has no flash-attention — models that *prefer* FA2 (ModernBERT
-  class) must run eager, which works but costs throughput. torch stays pinned at
-  2.7.1+cu126: wheels >= 2.8 dropped Pascal cubins.
-
-Selection criteria (August 2026 re-review, sentence/segment unit)
------------------------------------------------------------------
-The downstream task is density-based clustering of short, single-aspect text
-spans, so candidates are weighted on the MTEB **Clustering** and **STS** task
-groups rather than the overall average — holding up on sentence-length input is
-not the same competence as document retrieval, and the overall average is
-dominated by retrieval datasets.
-
-The long-context argument, which justified bge-m3 / gte-modernbert at document
-level (~10% of hotel reviews exceed mpnet's 384-token window and are silently
-truncated, docs/methodology.md §3), **weakens considerably at segment
-granularity**: an 8k window buys nothing when the unit is one sentence. Those
-models are therefore re-weighted here on clustering quality per unit of compute.
-Multilingual capacity stays a forward-looking criterion for EuroParl Phase 2
-only — it does not earn a candidate a slot on the Hotels benchmark.
-
-Considered and rejected on the trust_remote_code constraint (verified against
-transformers 5.10.1 / sentence-transformers 5.5.1, not assumed):
-``Alibaba-NLP/gte-large-en-v1.5`` (needs Alibaba-NLP/new-impl) and
-``jinaai/jina-embeddings-v3`` (needs jinaai/xlm-roberta-flash-implementation).
-``nomic-ai/nomic-embed-text-v1.5`` *was* in that group and no longer is:
-transformers now ships NomicBertModel natively, so it is admissible again.
-
-This list feeds ``python -m reviewscope_ml.eval.model_sweep``; the three-tier
-verdict (not raw silhouette) decides, and the comparison harness re-validates
-the winner end to end.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -49,31 +7,18 @@ from typing import Optional
 @dataclass(frozen=True)
 class EmbeddingCandidate:
     model: str
-    params_m: int            # parameters, millions
+    params_m: int
     dim: int
-    max_seq: int             # tokens the model *supports*
-    instruction: str = "no_inst"   # primary instruction slug for this model
+    max_seq: int
+    instruction: str = "no_inst"
     gated: bool = False      # needs HF license acceptance + token
     notes: str = ""
-    # VRAM-safe encode settings for a 12 GB TITAN X. batch_hint caps the
-    # requested batch size; encode_seq caps the sequence length at encode time
-    # (None = model native). Long-context models NEED the cap: bge-m3 padding
-    # a batch to 8k tokens allocates activations no 12 GB card can hold —
-    # 2048 tokens still covers >99.9% of reviews un-truncated.
     batch_hint: int = 64
     encode_seq: Optional[int] = None
-    # Additional instruction slugs to evaluate this model under. Instruction and
-    # no-instruction runs stay SEPARATE rows in the sweep: an instruction
-    # mechanically reshapes the space and inflates silhouette without moving
-    # coherence (notebook 04), so averaging them would hide exactly the effect
-    # we are testing for.
     extra_instructions: tuple[str, ...] = field(default_factory=tuple)
-    # Set when a later candidate makes this one redundant; kept in the registry
-    # so the selection history stays auditable rather than being edited away.
     superseded_by: str = ""
 
     def instruction_variants(self) -> tuple[str, ...]:
-        """Every instruction slug this candidate is evaluated under."""
         return (self.instruction, *self.extra_instructions)
 
 
@@ -160,8 +105,6 @@ CANDIDATES: list[EmbeddingCandidate] = [
 
 
 def encode_settings(model_name: str, requested_batch: int) -> tuple[int, Optional[int]]:
-    """(safe batch size, sequence cap) for a model — registry hint wins when
-    smaller than the requested batch; unknown models pass through unchanged."""
     for c in CANDIDATES:
         if c.model == model_name:
             return min(requested_batch, c.batch_hint), c.encode_seq

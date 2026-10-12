@@ -1,29 +1,3 @@
-"""
-Empirical admissibility + cost probe for embedding candidates.
-
-The registry's hard constraints (``embed/models.py``) are claims about models;
-this module *verifies* them on the actual box instead of trusting model cards:
-
-- **loadable under our constraints** — plain ``sentence-transformers``, no
-  ``trust_remote_code``, fp32 weights. A model that needs custom code paths is
-  inadmissible however well it scores, because the Celery worker must stay free
-  of them; a gated repo without accepted licence terms fails here too, visibly.
-- **fits the VRAM slice** — peak allocated/reserved bytes during a real encode,
-  measured with torch's per-device counters, not estimated from parameter count
-  (activations, not weights, are what actually blow the 6 GB slice).
-- **cost per unit of throughput** — segments/second on a *fixed* probe batch.
-
-Why a separate probe rather than timing the sweep's own encode: the sweep reads
-through an on-disk embedding cache, so ``embed_with_cache`` returns 0.0 seconds
-on a hit. A ranking table whose runtime column is "0.000" for every previously
-run model is not evidence. The probe always re-encodes the same fixed texts on
-a single pinned device, so its numbers are comparable across candidates and
-across invocations, independent of what happens to be cached.
-
-Single device is deliberate: the sweep's embed stage may fan out across every
-idle GPU, which makes wall-clock a function of how many neighbours were away
-that afternoon rather than of the model.
-"""
 from __future__ import annotations
 
 import logging
@@ -33,8 +7,6 @@ from typing import Optional
 
 logger = logging.getLogger("reviewscope.cost_probe")
 
-# Fixed probe size: large enough that per-batch overhead does not dominate,
-# small enough that probing the whole registry costs minutes, not hours.
 PROBE_TEXTS = 2_048
 
 
@@ -71,13 +43,6 @@ def probe_model(
     vram_fraction: Optional[float] = None,
     instructions: Optional[dict[str, Optional[str]]] = None,
 ) -> ProbeResult:
-    """
-    Load *model_name* under the hard constraints and measure one encode.
-
-    Never raises: an inadmissible model is a *result* (``admissible=False`` plus
-    the error), because "this candidate cannot be used here" is exactly the
-    finding the selection write-up needs to record.
-    """
     from ..embed.sentence_transformer import SentenceTransformerEmbedder
 
     res = ProbeResult(
@@ -101,9 +66,7 @@ def probe_model(
         batch_size=batch_size, show_progress=False, max_seq=max_seq,
         instructions=instructions,
     )
-    # Pin to one device: the embedder fans out across every visible CUDA device,
-    # which would make throughput depend on how many GPUs were idle, not on the
-    # model. _target_devices is overridden rather than patched globally.
+    # Measure one device so throughput does not depend on how many GPUs are idle.
     embedder._target_devices = lambda: [device]  # type: ignore[method-assign]
 
     try:
@@ -117,12 +80,7 @@ def probe_model(
         res.params_m = round(n_params / 1e6, 1)
         res.weights_fp32_mb = round(n_params * 4 / 1024**2, 1)
 
-        # Warm-up, excluded from the timing. CUDA context creation, kernel
-        # autotuning and cuBLAS handle setup all land on the first encode of
-        # the process — without this the FIRST candidate probed is charged for
-        # them and looks slower than models several times its size (observed:
-        # MiniLM-L6 "slower" than mpnet). Peak-memory counters are reset after
-        # it so VRAM reflects steady-state encoding, not the warm-up path.
+        # Exclude first-encode CUDA setup from timing and peak-memory measurements.
         embedder.encode(texts[: min(len(texts), 2 * batch_size)])
         if torch is not None and torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -156,11 +114,6 @@ def probe_model(
 
 
 def probe_texts(cfg, sentence_level: bool = True, n: int = PROBE_TEXTS) -> list[str]:
-    """A deterministic slice of the real corpus — same texts for every candidate.
-
-    Real segments, not synthetic strings: throughput and peak activation memory
-    both depend on the actual length distribution, and hotel mentions are short.
-    """
     from ..data.ingest import load_benchmark
 
     reviews = load_benchmark(cfg)
@@ -174,7 +127,6 @@ def probe_texts(cfg, sentence_level: bool = True, n: int = PROBE_TEXTS) -> list[
 
 
 def render_report(rows: list[ProbeResult], header: str, n_texts: int = PROBE_TEXTS) -> str:
-    """Markdown admissibility table — admissible first, then the rejections."""
     ok = [r for r in rows if r.admissible]
     bad = [r for r in rows if not r.admissible]
 
@@ -233,7 +185,6 @@ if __name__ == "__main__":
     if args.device == "cuda":
         from ..runtime.gpu import claim_gpu
 
-        # One device only — the probe measures per-device cost by design.
         claim = claim_gpu(require_gpu=True, max_gpus=1)
         overrides.update(device=claim.device, gpu_ids=claim.gpu_ids)
     cfg = load_config(**overrides)

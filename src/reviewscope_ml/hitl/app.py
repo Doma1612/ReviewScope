@@ -1,19 +1,3 @@
-"""
-HITL review GUI (Streamlit).
-
-Launch from the repo root::
-
-    streamlit run src/reviewscope_ml/hitl/app.py
-
-Deliberately decoupled from the React frontend: the *feedback JSONL format*
-(``feedback.py``) is the contract, this app is just the cheapest possible way
-for a reviewer to produce it. It loads a finished run's artifacts, shows each
-cluster with its label, terms, random samples and the 2-D scatter, and writes
-every action append-only to ``data/feedback/``.
-
-This file is the one place in the package allowed to import streamlit, and it
-is an entry point — never imported by pipeline code.
-"""
 from __future__ import annotations
 
 import re
@@ -23,8 +7,6 @@ from pathlib import Path
 import numpy as np
 import streamlit as st
 
-# Entry-point bootstrapping: streamlit runs this file as a script, so the
-# package import path must be set up explicitly when not pip-installed.
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -45,12 +27,9 @@ def _load_run(run_dir: str):
 
 @st.cache_resource
 def _load_unit_data(sample_size: int, data_file: str, unit: str):
-    """id -> text and id -> star maps for the run's unit (docs or segments)."""
     cfg = load_config(sample_size=sample_size, data_file=data_file)
     reviews = load_benchmark(cfg)
     if unit == "sentence":
-        # Segmentation is deterministic, so segment ids in the artifact
-        # resolve against a re-derived segment set.
         from reviewscope_ml.data.segment import segment_reviews
 
         reviews = segment_reviews(reviews)
@@ -67,19 +46,7 @@ def _candidate_clusters(
     sentence_level: bool,
     data_file: str | None = None,
 ):
-    """Rebuild one candidate's clustering from the sweep's caches.
-
-    Cheap because everything is cached by the sweep — no model is loaded and
-    nothing is re-embedded; this reads the same arrays the ranking was computed
-    from, so what the reviewer inspects IS what the table scored.
-
-    ``data_file`` chooses the corpus; omitting it keeps the hotels benchmark
-    that ``sample_size`` implies. It has to be passed whenever the report being
-    read is not a hotels report: ``build_clusters`` keys the embedding cache on
-    ``cfg.corpus_slug``, which is derived from this filename, so the default
-    quietly rebuilds *hotel* clusters underneath a Europarl ranking rather than
-    failing.
-    """
+    # Pass the report's corpus filename; the default silently selects hotel caches.
     from reviewscope_ml.eval.label_sweep import build_clusters
     from reviewscope_ml.represent.terms import ctfidf_terms
 
@@ -93,19 +60,11 @@ def _candidate_clusters(
 
 
 def _benchmarks(cfg) -> list[tuple[str, str, int]]:
-    """Every benchmark sample on disk, as ``(data_file, corpus_slug, size)``.
-
-    Discovered rather than read off the corpus registry: a profile says how to
-    talk about a corpus, not which samples were actually built, and offering a
-    file that is not there costs the reviewer a stack trace.
-    """
     found: list[tuple[str, str, int]] = []
     for path in sorted(cfg.cache_dir.glob("sample_*.jsonl")):
         stem = path.stem[len("sample_"):]
         if "_" not in stem:
             continue
-        # Same split as PipelineConfig.corpus_slug, so the slug shown here is
-        # the one the cache keys will actually use.
         slug, size_token = stem.rsplit("_", 1)
         try:
             size = (
@@ -124,16 +83,8 @@ def _preferred_benchmark(
     report: Path,
     default_size: int | None = None,
 ) -> int:
-    """Index of the benchmark whose corpus and size a report's name states.
-
-    Report names are ``model_sweep_<size>[_<corpus>][_sent][_<tag>].md`` with
-    the corpus tag omitted for hotels, the historical default — so "no slug
-    matched" means hotels rather than "no idea". Names that carry no size at
-    all (``label_quality_sent.json``) fall back to *default_size*.
-    """
     name = report.name
-    # Longest slug first: "europarl-en" and a future "europarl" would both
-    # match the same report name, and the more specific one is the right read.
+    # Match the longest corpus slug first to avoid ambiguous prefixes.
     by_slug = sorted(
         (i for i, (_, slug, _) in enumerate(benchmarks) if f"_{slug}" in name),
         key=lambda i: -len(benchmarks[i][1]),
@@ -154,14 +105,6 @@ def _preferred_benchmark(
 def _benchmark_picker(
     cfg, key: str, prefer: Path | None = None, default_size: int | None = None
 ) -> tuple[str, int]:
-    """Corpus + sample the inspection rebuilds from, as ``(data_file, size)``.
-
-    One control for both, because the pair is what identifies a cached
-    artifact: a size that has no sample under the chosen corpus is not a
-    narrower search, it is a cache miss. *prefer* preselects the benchmark the
-    report on screen was produced from — reading a Europarl ranking while
-    inspecting hotel clusters is the mistake this picker exists to prevent.
-    """
     benchmarks = _benchmarks(cfg)
     if not benchmarks:
         st.error(
@@ -195,10 +138,6 @@ def _benchmark_picker(
     return data_file, size
 
 
-# Report families in data/runs, in the order the selection argument is made:
-# what was admissible, how the embeddings ranked, how the labelers scored, and
-# the sheet the humans fill in. Grouping them beats one flat glob because the
-# directory also accumulates per-run subdirectories and raw logs.
 _REPORT_KINDS = {
     "Admissibility (hard constraints + cost)": "admissibility_*.md",
     "Embedding sweep (ranking)": "model_sweep_*.md",
@@ -208,16 +147,6 @@ _REPORT_KINDS = {
 
 
 def _report_browser(cfg, key: str) -> Path | None:
-    """Every generated report, browsable in the app that acts on them.
-
-    Returns the selected report so a caller can default the rest of the page to
-    the corpus it was produced from.
-
-    These are the documents the technology-selection decision cites. Reading
-    them next to the clusters they describe is the whole point — a reviewer who
-    has to alt-tab to a text editor to see the metrics will score the labels
-    without them.
-    """
     found = {
         kind: sorted(cfg.runs_dir.glob(pattern))
         for kind, pattern in _REPORT_KINDS.items()
@@ -241,14 +170,6 @@ def _report_browser(cfg, key: str) -> Path | None:
 
 
 def _model_selection_view(cfg) -> None:
-    """Pair the sweep's quantitative ranking with qualitative inspection.
-
-    Tier 1 alone is not a decision (methodology §8): instruction-tuned models
-    mechanically inflate silhouette by reshaping the space toward the
-    instruction without moving coherence. The only way to catch that is to read
-    the clusters a candidate actually produces, so the ranking table and the
-    exemplar mentions live on the same page.
-    """
     st.title("Embedding model selection")
 
     report = _report_browser(cfg, key="modelsel")
@@ -303,8 +224,7 @@ def _model_selection_view(cfg) -> None:
             + ", ".join(w for w, _ in terms.get(cid, [])[:5])
         ):
             st.caption("Top terms: " + ", ".join(w for w, _ in terms.get(cid, [])[:10]))
-            # Random members, never centroid-nearest: centroid samples flatter
-            # the cluster and hide exactly the fringe that reveals a bad model.
+            # Random members expose fringe cases that centroid-nearest samples hide.
             pick = rng.choice(idx, size=min(6, len(idx)), replace=False)
             for i in pick:
                 st.markdown(f"> {units.texts[i][:300]}")
@@ -323,12 +243,6 @@ def _model_selection_view(cfg) -> None:
 def _labeler_clustering(
     sample_size: int, model: str, instruction: str, data_file: str | None = None
 ):
-    """The fixed clustering the labelers were judged on, with terms.
-
-    Same cached arrays the labeler sweep used, so the clusters a reviewer reads
-    here are byte-for-byte the ones the labels were generated for — which only
-    holds if the corpus matches too, hence ``data_file``.
-    """
     return _candidate_clusters(sample_size, model, instruction, True, data_file)
 
 
@@ -340,7 +254,6 @@ def _scoring_context(
     instruction: str,
     data_file: str | None = None,
 ):
-    """Everything the scoring page needs: items, exemplars, terms, sizes."""
     from reviewscope_ml.eval.label_scoring import (
         build_scoring_items,
         load_label_records,
@@ -354,9 +267,7 @@ def _scoring_context(
     )
 
     sizes = {int(c): int((labels == c).sum()) for c in set(labels.tolist()) if c != -1}
-    # The sheet's exemplar RNG is advanced once per cluster in size-descending
-    # order, so the same order has to be reproduced here or the reviewer sees
-    # different mentions than the exported sheet shows.
+    # Preserve the sheet's cluster order: the exemplar RNG advances once per cluster.
     chosen = sorted(
         (cid for cid in sizes if cid in items), key=lambda c: -sizes[c]
     )
@@ -365,19 +276,6 @@ def _scoring_context(
 
 
 def _labeler_scoring_view(cfg) -> None:
-    """Blind human scoring of candidate labels — the qualitative half.
-
-    `label_quality.md` ranks labelers on format compliance, discrimination and
-    grounding. All three are proxies: a label can satisfy every one of them and
-    still be useless to a reader ("Guest Experience Reviews" over a cluster
-    about parking). Usefulness is the property the label exists for and the one
-    no metric sees, so it is scored here by people and recorded in the same
-    append-only trail as every other human decision.
-
-    Blind by construction — the producing model is hidden while scoring, and
-    the presentation order is shuffled per cluster. The exported markdown sheet
-    could not do either: it prints the labeler's name in the row.
-    """
     from reviewscope_ml.eval.label_scoring import (
         collect_scores,
         coverage,
@@ -401,18 +299,13 @@ def _labeler_scoring_view(cfg) -> None:
     with st.sidebar:
         report = st.selectbox("Labeler run", reports, format_func=lambda p: p.name)
         st.caption("Clustering the labels were generated for:")
-        # 5,000 is the size every labeler sweep has run at; a scoring campaign
-        # aggregates across reviewers, so silently defaulting to a different
-        # clustering would make two reviewers score different exemplars under
-        # one campaign name.
+        # Match the labeler sweep size so reviewers score the same exemplars.
         data_file, sample_size = _benchmark_picker(
             cfg, key="labelsel", prefer=report, default_size=5_000
         )
         model = st.text_input("Embedding model", value=SENTENCE_EMBEDDING)
         instruction = st.text_input("Instruction", value="no_inst")
 
-    # One scoring campaign per labeler run, so every reviewer's session file
-    # aggregates into the same set and agreement can be computed across them.
     run_name = f"label_scoring__{report.stem}"
     st.session_state["run_name"] = run_name
     if st.session_state.get("session_run") != run_name:
@@ -492,7 +385,6 @@ def _labeler_scoring_view(cfg) -> None:
 
 
 def _scoring_tab(items, chosen, sizes, terms, exemplars, units, labels, scores, reviewer):
-    """One cluster at a time: read the mentions, score every candidate label."""
     if not chosen:
         st.error(
             "The labeler run's cluster ids are not present in this clustering — "
@@ -521,9 +413,6 @@ def _scoring_tab(items, chosen, sizes, terms, exemplars, units, labels, scores, 
         st.markdown(f"> {text}")
 
     with st.expander("Draw more members (use when the five above are unclear)"):
-        # Five mentions are enough to score a good label and not always enough
-        # to convict a bad one, so a reviewer can keep sampling. The draw is
-        # seeded per press so it is reproducible from the record if questioned.
         draw = st.session_state.get(f"draw_{cid}", 0)
         if st.button("Draw 10 more", key=f"more_{cid}"):
             st.session_state[f"draw_{cid}"] = draw + 1
@@ -610,13 +499,6 @@ def _back_to_overview() -> None:
 
 
 def _detail_view(art, texts: dict, stars: dict) -> None:
-    """
-    Drill-down: every data point of the selected cluster(s) with full
-    metadata, plus the cluster actions (rename/approve/junk/merge) so a
-    reviewer can investigate and act in one place. Like everything in this
-    app, actions only append feedback records — artifacts change on
-    apply_feedback, never live.
-    """
     import pandas as pd
 
     ids = [c for c in st.session_state.get("detail_ids", []) if c in art.clusters]
@@ -638,7 +520,6 @@ def _detail_view(art, texts: dict, stars: dict) -> None:
             f"Terms: {', '.join(w for w, _ in (tuple(t) for t in info.top_terms[:8]))}"
         )
 
-    # ── Datentabelle: alle Punkte der ausgewählten Cluster ────────────────
     mask = np.isin(art.labels, ids)
     idxs = np.flatnonzero(mask)
     has_sentiment = art.sentiment_scores is not None
@@ -675,7 +556,6 @@ def _detail_view(art, texts: dict, stars: dict) -> None:
     st.caption(f"{len(df):,} data points (sort by clicking the column headers)")
     st.dataframe(df, height=480, width="stretch", hide_index=True)
 
-    # ── Aktionen ──────────────────────────────────────────────────────────
     st.subheader("Actions")
     if len(ids) > 1:
         mcol1, mcol2 = st.columns([2, 1])
@@ -725,14 +605,10 @@ def main() -> None:
     st.session_state["reviewer"] = reviewer
 
     if mode == "Label scoring":
-        # Its own campaign name is set inside the view, keyed to the labeler
-        # run being scored so several reviewers' sessions aggregate.
         _labeler_scoring_view(cfg)
         return
 
     if mode == "Model selection":
-        # Technology selection is not tied to one pipeline run, but its sign-off
-        # still belongs in the same append-only trail.
         st.session_state["run_name"] = "model_selection"
         if st.session_state.get("session_run") != "model_selection":
             st.session_state["session_file"] = session_file(
@@ -786,11 +662,7 @@ def main() -> None:
 
     left, right = st.columns([1, 1])
 
-    # ── 2-D scatter ───────────────────────────────────────────────────────
-    # Performance rules (sentence runs have 40k+ points and crashed browsers):
-    # WebGL traces only (Scattergl, never SVG), exactly two traces regardless
-    # of cluster count, a hard cap on displayed points, and hover payloads
-    # built only for the points actually shown.
+    # Cap points and use two WebGL traces; large sentence runs otherwise crash browsers.
     MAX_PLOT_POINTS = 12_000
 
     with left:
@@ -816,7 +688,7 @@ def main() -> None:
 
         n = len(art.doc_ids)
         if n > MAX_PLOT_POINTS:
-            rng = np.random.default_rng(42)  # stable sample across reruns
+            rng = np.random.default_rng(42)
             idx = np.sort(rng.choice(n, size=MAX_PLOT_POINTS, replace=False))
         else:
             idx = np.arange(n)
@@ -889,7 +761,6 @@ def main() -> None:
         if st.button("Reassign") and doc_id:
             _record("reassign_doc", doc_id=doc_id, target_cluster_id=int(target))
 
-    # ── Cluster list (follows the focus selection from the scatter) ──────
     with right:
         focused = st.session_state.get("focus_clusters") or []
         shown_ids = focused if focused else art.cluster_ids

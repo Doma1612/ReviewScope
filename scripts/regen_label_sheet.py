@@ -1,15 +1,3 @@
-"""
-Regenerate the human scoring sheet from a completed label sweep's JSON.
-
-Useful when the sheet needs re-rendering without paying for LLM generation
-again — the labels, their model and their prompt hash are all in
-``label_quality_<unit>.json``; only the surrounding cluster context (sizes,
-c-TF-IDF terms, random exemplar mentions) has to be rebuilt, and that comes
-from caches.
-
-    python scripts/regen_label_sheet.py --sample-size 5000 \
-        --embedding-model sentence-transformers/all-MiniLM-L6-v2
-"""
 from __future__ import annotations
 
 import argparse
@@ -44,8 +32,7 @@ cluster_ids = sorted({r["cluster_id"] for r in records},
                      key=lambda c: -int((labels == c).sum()))
 sizes = {cid: int((labels == cid).sum()) for cid in cluster_ids}
 
-# Same seed and same draw order as the sweep, so the sheet shows the same
-# exemplars a reviewer would have seen there.
+# Match the sweep seed and draw order to reproduce its exemplars.
 rng = np.random.default_rng(cfg.seed)
 exemplars = {}
 for cid in cluster_ids:

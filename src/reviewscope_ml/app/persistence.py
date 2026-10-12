@@ -1,19 +1,4 @@
-"""
-Persistence mapper: a finished :class:`~reviewscope_ml.pipelines.artifacts.RunArtifacts`
-(+ the embedding matrix + the originating :class:`UploadedCorpus`) ->
-a :class:`~reviewscope_ml.app.dto.RunResult` of DB-ready records.
-
-This is pure translation — no compute. It is the one place that knows how the
-pipeline's arrays line up with the spec's ``documents`` / ``embeddings`` /
-``clusters`` tables, so the backend never has to.
-
-Alignment contract (document-level variants only)
---------------------------------------------------
-``RunArtifacts.doc_ids``, ``.labels``, ``.coords_2d/3d``, ``.sentiment_scores``
-and the embedding matrix are all in the same order — the order of the
-``ReviewSet`` passed to the runner. Document text / raw_data / stars are looked
-up by primary-key value, so the mapping is robust even if that ever changes.
-"""
+# Artifact arrays and embeddings share the input ReviewSet order.
 from __future__ import annotations
 
 from collections import Counter, OrderedDict, defaultdict
@@ -32,14 +17,6 @@ def to_records(
     artifacts: RunArtifacts,
     embeddings: np.ndarray,
 ) -> RunResult:
-    """Map one finished run to the backend's persistence DTOs.
-
-    Two shapes, keyed off the run manifest's ``unit``:
-    - ``document`` — one document + one embedding per review (the legacy path).
-    - ``sentence`` — ``artifacts.doc_ids`` are segment ids; each is a clustered
-      mention (a SegmentRecord), and reviews are grouped back into one
-      DocumentRecord carrying a derived "primary" cluster.
-    """
     n = len(artifacts.doc_ids)
     if embeddings.shape[0] != n:
         raise ValueError(
@@ -61,12 +38,6 @@ def _sentiment_at(artifacts: RunArtifacts, i: int) -> float | None:
 
 
 def _cluster_records(artifacts: RunArtifacts, *, sentence: bool) -> list[ClusterRecord]:
-    """ClusterRecords shared by both paths.
-
-    ``size`` is the distinct-review count (``n_documents`` for sentence runs,
-    else the member count); ``n_mentions`` is always the raw member/segment
-    count (equal to ``size`` for document runs).
-    """
     out: list[ClusterRecord] = []
     for cid in artifacts.cluster_ids:
         info = artifacts.clusters[cid]
@@ -108,7 +79,7 @@ def _document_records(
             primary_cluster_id=cluster_id,
             n_segments=1,
         ))
-        # 3-D UMAP projection drives x/y/z; the 2-D scatter uses (x, y).
+        # x/y/z use the 3-D projection; the 2-D scatter displays its x/y axes.
         x3, y3, z3 = (float(v) for v in artifacts.coords_3d[i])
         embedding_records.append(EmbeddingRecord(
             primary_key_value=pk,
@@ -134,13 +105,10 @@ def _sentence_records(
     reviews = corpus.reviews
     text_by_pk = dict(zip(reviews.ids, reviews.texts))
     raw_by_pk = dict(zip(reviews.ids, corpus.raw_rows))
-    # Re-derive segment texts deterministically; segment_reviews produced the
-    # exact ids the runner clustered, so this maps id -> text with no drift.
     seg_units = segment_reviews(reviews)
     text_by_segid = dict(zip(seg_units.ids, seg_units.texts))
 
     segments: list[SegmentRecord] = []
-    # Per-review accumulators (insertion order = first appearance of the review).
     label_counts: dict[str, Counter] = OrderedDict()
     seg_sentiments: dict[str, list[float]] = defaultdict(list)
     for i, segid in enumerate(artifacts.doc_ids):
@@ -165,12 +133,10 @@ def _sentence_records(
         if sentiment is not None:
             seg_sentiments[parent].append(sentiment)
 
-    # Total segments per review (incl. noise) — n_segments; label_counts holds
-    # only the non-noise labels used to pick the plurality "primary" cluster.
     seg_totals: Counter = Counter(parent_id(s) for s in artifacts.doc_ids)
     documents: list[DocumentRecord] = []
     for parent, counts in label_counts.items():
-        primary = counts.most_common(1)[0][0] if counts else None  # noise never wins
+        primary = counts.most_common(1)[0][0] if counts else None
         sentiments = seg_sentiments.get(parent, [])
         documents.append(DocumentRecord(
             primary_key_value=parent,

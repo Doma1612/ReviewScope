@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Run this LOCALLY to push code and data to the GPU server.
-# Usage: bash scripts/sync_to_gpu.sh
 
 set -euo pipefail
 
@@ -31,7 +29,6 @@ rsync -avz --progress \
 
 echo ""
 echo "==> Uploading sample data files..."
-# Create remote cache dir first
 ssh $SSH_OPTS "${REMOTE_USER}@${GPU_HOST}" "mkdir -p ${REMOTE_DIR}/data/cache"
 
 rsync -avz --progress \

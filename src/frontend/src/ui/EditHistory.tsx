@@ -3,13 +3,7 @@ import { useState } from "react";
 
 import { api, Cluster, ClusterEdit } from "../api";
 
-// Surface the cluster-edit audit log (GET /edits) as a collapsible
-// history panel, newest-first, with an Undo button on the reversible actions.
 
-// Undo is feasible only where the edit records enough "before" state to invert it:
-// single reassign stores the doc's old cluster, bulk reassign stores a per-doc
-// `before` map, and rename stores the previous label. Merges/junk/creates are
-// destructive (membership is fanned out) and stay non-undoable for v1.
 export function isUndoable(edit: ClusterEdit): boolean {
   switch (edit.action) {
     case "reassign_doc":
@@ -84,8 +78,7 @@ export function EditHistory({
   const edits = useQuery({ queryKey: ["edits", projectId], queryFn: () => api.edits(projectId), enabled: open });
   const members = useQuery({ queryKey: ["members", projectId], queryFn: () => api.members(projectId), enabled: open });
 
-  // Cluster ids are regenerated on re-run and deleted clusters drop out of the
-  // list, so resolution falls back to the edit's stored label, then a short id.
+  // Reruns regenerate cluster IDs; fall back to the historical label when resolving edits.
   const labelById = new Map(clusters.map((c) => [c.id, c.label]));
   const clusterLabel = (id: string | null): string => (id == null ? NOISE_LABEL : labelById.get(id) ?? `cluster ${id.slice(0, 8)}`);
   const actorById = new Map((members.data ?? []).map((m) => [m.user_id, m.email]));

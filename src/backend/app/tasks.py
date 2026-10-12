@@ -137,8 +137,6 @@ def _pick_primary_key(rows: list[dict]) -> str | None:
 
 
 def _mock_segments(text: str) -> list[str]:
-    """Naive sentence split for simulated sentence-unit runs (no ML deps): keep up
-    to 3 clauses of ≥20 chars, else the whole text as a single mention."""
     parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text) if len(p.strip()) >= 20]
     if not parts:
         stripped = text.strip()
@@ -147,10 +145,7 @@ def _mock_segments(text: str) -> list[str]:
 
 
 async def _persist_mock_results(db, project_id: uuid.UUID, rows: list[dict], text_column: str, primary_key: str | None) -> None:
-    """Simulated sentence-unit run: one review → several mention (segment) rows, each
-    clustered, with the review's derived primary cluster on ``Document.cluster_id``."""
-    # Synthetic vectors are eight-dimensional random values and must never be
-    # exposed through semantic retrieval after a project is re-run in mock mode.
+    # Synthetic vectors must never be exposed through semantic retrieval.
     await db.execute(
         update(Project).where(Project.id == project_id).values(
             retrieval_ready=False,
@@ -183,8 +178,6 @@ async def _persist_mock_results(db, project_id: uuid.UUID, rows: list[dict], tex
         clusters.append(cluster)
     await db.flush()
 
-    # Mirror the recompute service: pull the rating column from the project schema
-    # so simulated clusters carry a real mean_stars (drives the StarRating UI).
     schema = await db.get(ProjectSchema, project_id)
     rating_col = derive_roles(schema.columns)[1] if schema else None
 
@@ -228,7 +221,7 @@ async def _persist_mock_results(db, project_id: uuid.UUID, rows: list[dict], tex
             grouped_sentiment[cluster.id].append(sentiment)
             grouped_reviews[cluster.id].add(doc_id)
             if rating is not None:
-                grouped_stars[cluster.id].setdefault(doc_id, rating)  # one rating per review
+                grouped_stars[cluster.id].setdefault(doc_id, rating)
             seg_index += 1
         primary = member_counts.most_common(1)[0][0] if member_counts else None
         db.add(
@@ -247,8 +240,8 @@ async def _persist_mock_results(db, project_id: uuid.UUID, rows: list[dict], tex
         terms = grouped_terms[cluster.id].most_common(20)
         sentiments = grouped_sentiment[cluster.id]
         stars = list(grouped_stars[cluster.id].values())
-        cluster.size = len(grouped_reviews[cluster.id])   # distinct reviews
-        cluster.n_mentions = len(sentiments)               # segment mentions
+        cluster.size = len(grouped_reviews[cluster.id])
+        cluster.n_mentions = len(sentiments)
         cluster.sentiment_avg = round(sum(sentiments) / len(sentiments), 3) if sentiments else None
         cluster.mean_stars = round(sum(stars) / len(stars), 3) if stars else None
         cluster.top_terms = [{"term": term, "score": count} for term, count in terms[:10]]

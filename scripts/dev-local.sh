@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# One-command local dev: Postgres + Redis in Docker, API + Celery worker +
-# frontend native. Reads the repo-root .env. Ctrl-C stops everything.
-#
-#   scripts/dev-local.sh
-#
-# Prereqs (one-time): a repo-root .env, src/backend/.venv with requirements
-# installed, and `npm install` in src/frontend. See src/backend/README.md.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

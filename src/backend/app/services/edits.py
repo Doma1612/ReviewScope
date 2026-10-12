@@ -1,9 +1,3 @@
-"""Helper for writing the cluster-edit audit log.
-
-Callers invoke ``record_edit`` inside their mutation transactions; it only stages
-the row (``db.add``) — the caller is responsible for committing so the edit shares
-the transaction with the change it describes.
-"""
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,9 +13,7 @@ def record_edit(
     action: str,
     **fields,
 ) -> ClusterEdit:
-    """Stage a ``ClusterEdit`` row. Accepts the optional subject columns
-    (``cluster_id``, ``target_cluster_id``, ``document_id``, ``new_label``,
-    ``note``, ``payload``) as keyword arguments."""
+    # Stage the audit row in the mutation transaction; the caller commits.
     if action not in EDIT_ACTIONS:
         raise ValueError(f"Unknown edit action {action!r}; known: {EDIT_ACTIONS}")
     edit = ClusterEdit(project_id=project_id, actor_id=actor_id, action=action, **fields)

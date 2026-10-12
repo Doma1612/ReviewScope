@@ -1,12 +1,3 @@
-"""
-Pure-logic tests for the cluster-edit audit helper (app/services/edits.py).
-
-No DB: ``record_edit`` only stages a row via ``db.add`` (the caller commits), so a
-tiny fake session that captures added objects is enough. Mirrors the no-DB
-approach used in test_ml_integration.py.
-
-Run from the backend dir:  python -m pytest tests/test_cluster_edits.py
-"""
 from __future__ import annotations
 
 import os
@@ -20,19 +11,17 @@ os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://u:p@localhost:5432/test")
 os.environ.setdefault("SYNC_DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/test")
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/backend on path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.models import EDIT_ACTIONS, ClusterEdit  # noqa: E402
 from app.services.edits import record_edit  # noqa: E402
 
-# The reviewscope_ml feedback vocabulary the app vocabulary must be a superset of.
 import importlib.util  # noqa: E402
 
 _FEEDBACK = Path(__file__).resolve().parents[2] / "reviewscope_ml" / "hitl" / "feedback.py"
 
 
 class _FakeSession:
-    """Captures objects handed to .add() without a database."""
 
     def __init__(self) -> None:
         self.added: list = []
@@ -44,7 +33,7 @@ class _FakeSession:
 def test_edit_actions_superset_of_feedback_actions():
     spec = importlib.util.spec_from_file_location("_fb", _FEEDBACK)
     fb = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = fb  # @dataclass resolves cls.__module__ via sys.modules
+    sys.modules[spec.name] = fb  # dataclass resolves cls.__module__ through sys.modules.
     spec.loader.exec_module(fb)
     assert set(fb.ACTIONS).issubset(set(EDIT_ACTIONS))
 

@@ -31,7 +31,6 @@ export function DeckDashboard() {
   const readyProjects = projects.data?.filter((project) => project.status === "ready").length ?? 0;
   const totalDocs = projects.data?.reduce((sum, project) => sum + project.doc_count, 0) ?? 0;
   const clusterLookup = new Map((clusters.data ?? []).map((cluster, index) => [cluster.id, { cluster, color: clusterColor(index) }]));
-  // Honest count from the full-set COUNT, not the sampled display points.
   const noiseCount = embeddingStats.data?.noise ?? (embeddings.data ?? []).filter((point) => point.cluster_id == null).length;
   const totalPoints = embeddingStats.data?.total ?? (embeddings.data ?? []).length;
 
@@ -130,8 +129,6 @@ function Metric({ label, value }: { label: string; value: number }) {
 }
 
 function PointCloud({ points, total, clusters, highlightedClusterId, simulated }: { points: EmbeddingPoint[]; total: number; clusters: Cluster[]; highlightedClusterId: string | null; simulated: boolean }) {
-  // Cap the rendered DOM nodes. `points` is already a server-side sample of the
-  // `total` units; we further downsample for the DOM and report against `total`.
   const bounds = getBounds(points);
   const displayPoints = samplePoints(points);
   const capped = total > displayPoints.length;

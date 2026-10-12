@@ -1,23 +1,3 @@
-"""
-Labeler comparison driver: score every candidate LLM on the same mention clusters.
-
-Holds the clustering fixed (one embedding model, one seed, one set of clusters)
-and varies only the labeler and the prompt variant, so differences are
-attributable to the language model and the prompt — the same controlled design
-the embedding sweep uses.
-
-Produces three artifacts:
-
-- ``label_quality_<unit>.md`` — the quantitative comparison table;
-- ``label_sheet_<unit>.md``  — notebook 08's human scoring sheet, populated;
-- ``label_quality_<unit>.json`` — every label with its model and prompt hash,
-  which is the tech-selection requirement ("reproducibility of generated text").
-
-CLI::
-
-    python -m reviewscope_ml.eval.label_sweep --sample-size 5000 \
-        --models llama3.2:1b llama3.2:latest qwen3:4b --n-clusters 20
-"""
 from __future__ import annotations
 
 import json
@@ -41,7 +21,6 @@ logger = logging.getLogger("reviewscope.label_sweep")
 
 
 def build_clusters(cfg, embedding_model: str, instruction: str, sentence_level: bool):
-    """Rebuild the fixed clustering the labelers are judged on."""
     from ..core.cache import embedding_path
     from ..data.ingest import load_benchmark
     from ..pipelines.runner import _cluster_cached, _reduce_cached
@@ -100,14 +79,10 @@ def run(
     centroids, centroid_ids = cluster_centroids(embeddings, labels)
     logger.info("%d units, %d clusters", len(units.texts), len(centroid_ids))
 
-    # Largest clusters first: they carry the most of the corpus, so a bad label
-    # there costs the most, and they are the ones a reviewer sees first.
     sizes = {cid: int((labels == cid).sum()) for cid in centroid_ids}
     chosen = sorted(centroid_ids, key=lambda c: -sizes[c])[:n_clusters]
     terms = ctfidf_terms(units.texts, labels, top_n=10)
 
-    # Exemplars for the human sheet. Shared with the scoring GUI so a reviewer
-    # in the app judges a label against the same mentions the sheet prints.
     from .label_scoring import select_exemplars
 
     exemplars = select_exemplars(labels, units.texts, chosen, cfg.seed, k=5)
@@ -117,8 +92,6 @@ def run(
     labels_by_model: dict[str, dict[int, str]] = {}
     records: list[dict] = []
 
-    # Embed labels in the same space as the clusters, so "nearest centroid" is
-    # a meaningful question. One embedder, loaded once, reused for all models.
     from ..embed import SentenceTransformerEmbedder
     from ..embed.models import encode_settings
 
@@ -132,8 +105,7 @@ def run(
     try:
         for model in labeler_models:
             for variant in variants:
-                # Key stays exactly two "|"-separated parts — both renderers
-                # split on it — so the nothink marker rides in the variant.
+                # Keep the two-part key format expected by both renderers.
                 variant_name = variant + ("+nothink" if think is False else "")
                 key = f"{model}|{variant_name}"
                 labeler = OllamaLabeler(

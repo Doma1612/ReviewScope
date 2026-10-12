@@ -1,4 +1,3 @@
-"""Corpus profiles, prompt resolution, and the Europarl source adapter."""
 import json
 import math
 from pathlib import Path
@@ -22,8 +21,6 @@ class TestCorpusProfiles:
         assert profile_for("europarl-en") is EUROPARL_EN
 
     def test_unregistered_falls_back_to_neutral(self):
-        # Every application upload gets its own proj-<id> slug, so this is the
-        # common case and must never raise.
         assert profile_for("proj-deadbeef") is NEUTRAL
         assert profile_for("") is NEUTRAL
 
@@ -32,8 +29,6 @@ class TestCorpusProfiles:
             assert p.instructions["no_inst"] is None
 
     def test_hotel_instructions_are_frozen(self):
-        # docs/technology-selection.md's numbers were produced under exactly
-        # these strings; changing one silently invalidates that table.
         assert HOTELS.instructions["generic"] == (
             "Represent the hotel review for topic clustering:"
         )
@@ -57,7 +52,6 @@ class TestPromptResolution:
         label, summary = resolve_prompts("neutral", "speeches in the European Parliament")
         assert "speeches in the European Parliament" in label
         assert "{domain}" not in label and "{domain}" not in summary
-        # The caller still has to fill these in, so they must not be consumed.
         assert "{docs}" in label
         assert "{docs}" in summary and "{label}" in summary
 
@@ -68,7 +62,6 @@ class TestPromptResolution:
         assert (label, summary) == ("L {docs}", "S {docs}")
 
     def test_half_an_override_is_ignored(self):
-        # Only one of the pair supplied -> fall back to the named variant.
         label, _ = resolve_prompts("v1", label_prompt="L {docs}")
         assert label == PROMPT_VARIANTS["v1"][0]
 
@@ -108,17 +101,14 @@ class TestEuroparlParsing:
         assert [s.speech_id for s in speeches] == [
             "ep-00-01-17#1", "ep-00-01-17#2", "ep-00-01-17#3",
         ]
-        # <P> is a paragraph mark, not content, and the parts are joined.
         assert speeches[0].text == (
             "I declare resumed the session. Please rise for a minute of silence."
         )
 
     def test_language_attribute_semantics(self, tmp_path):
         speeches = self.parse(tmp_path)
-        # Untagged = originally English (the inverse of the obvious reading).
         assert speeches[0].language is None
         assert speeches[1].language is None
-        # Tagged = translated FROM that language, so not an English original.
         assert speeches[2].language == "DE"
 
     def test_chapter_title_attached_not_treated_as_speech(self, tmp_path):
@@ -136,11 +126,10 @@ class TestEuroparlParsing:
         assert _normalise_name(name) == "president"
 
     def test_president_in_office_is_not_the_chair(self):
-        # A Council representative is a substantive speaker, not the chair.
         assert _normalise_name("President-in-Office of the Council") != "president"
 
     @pytest.mark.parametrize("stem,expected", [
-        ("ep-96-04-15", "1996-04-15"),      # two-digit years straddle 2000
+        ("ep-96-04-15", "1996-04-15"),
         ("ep-00-01-17", "2000-01-17"),
         ("ep-11-03-09-010-03", "2011-03-09"),
     ])
@@ -170,8 +159,6 @@ class TestRatinglessCorpus:
         assert all(math.isnan(s) for s in rs.stars)
 
     def test_corpus_slug_round_trips_through_the_hyphen(self, tmp_path):
-        # corpus_slug splits the stem on its LAST underscore, so the corpus
-        # token must not contain one — "europarl-en", never "europarl_en".
         cfg = self.write(tmp_path, [{"speech_id": "x#1", "text": "t"}])
         assert cfg.corpus_slug == "europarl-en"
 
@@ -196,8 +183,6 @@ class TestSweepRankingWithoutRatings:
         ]
         used = _mean_ranks(rows)
         assert "rating_entropy" not in used
-        # Each row is 1st on one metric and 2nd on the other -> mean 1.5.
-        # Had rating_entropy been scored as a tie at last place it would be 1.67.
         assert rows[0]["_mean_rank"] == 1.5
         assert rows[1]["_mean_rank"] == 1.5
 
@@ -210,17 +195,10 @@ class TestSweepRankingWithoutRatings:
 
 
 class TestBenchmarkPicker:
-    """The HITL app's corpus selector.
-
-    Its whole reason to exist is that ``load_config(sample_size=...)`` resolves
-    to the *hotels* file, so inspecting a Europarl ranking without choosing the
-    corpus silently rebuilds hotel clusters. These cover the discovery and the
-    default that prevents that pairing.
-    """
 
     @staticmethod
     def _app():
-        pytest.importorskip("streamlit")  # hitl is an optional extra
+        pytest.importorskip("streamlit")
         from reviewscope_ml.hitl import app
 
         return app
@@ -236,8 +214,8 @@ class TestBenchmarkPicker:
             "sample_europarl-en_1k.jsonl",
             "sample_europarl-en_5k.jsonl",
             "sample_europarl-en_26391.jsonl",
-            "europarl-en_verified_full.jsonl",  # not a sample — must be ignored
-            "sample_broken.jsonl",              # no size token — must be ignored
+            "europarl-en_verified_full.jsonl",
+            "sample_broken.jsonl",
         ):
             (cache / name).write_text("")
         return load_config(project_root=tmp_path)
@@ -254,8 +232,6 @@ class TestBenchmarkPicker:
         ]
 
     def test_slug_matches_config(self, cfg):
-        # The slug shown in the picker must be the one the cache keys use, or
-        # the reviewer picks a corpus and reads another's embeddings.
         for data_file, slug, _ in self._app()._benchmarks(cfg):
             assert load_config(data_file=data_file).corpus_slug == slug
 
@@ -264,8 +240,6 @@ class TestBenchmarkPicker:
         [
             ("model_sweep_5000_europarl-en_sent.md", ("europarl-en", 5_000)),
             ("model_sweep_1000_europarl-en_sent.md", ("europarl-en", 1_000)),
-            # No corpus tag means hotels — the historical default the sweep
-            # omits from the filename.
             ("model_sweep_5000_sent.md", ("hotels", 5_000)),
             ("model_sweep_50000_sent_finalists.md", ("hotels", 50_000)),
         ],
@@ -277,9 +251,6 @@ class TestBenchmarkPicker:
         assert found[idx][1:] == expected
 
     def test_sizeless_report_uses_the_default(self, cfg):
-        # label_quality_*.json carries neither corpus nor size; scoring
-        # campaigns aggregate across reviewers, so the fallback has to be the
-        # size the labeler sweep ran at rather than the first file found.
         app = self._app()
         found = app._benchmarks(cfg)
         idx = app._preferred_benchmark(found, Path("label_quality_sent.json"), 5_000)

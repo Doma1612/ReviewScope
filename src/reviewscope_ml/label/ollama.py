@@ -1,22 +1,3 @@
-"""
-LLM cluster labeling via Ollama (notebook 08's strategies).
-
-Context strategy: centroid-nearest documents (notebook 08 strategy A) — the
-most *average* members describe what the cluster is mostly about, which suits
-a 3-6 word label. Prompt templates are notebook 08's verbatim; the prompt
-hash and model name are stored with every label (tech-selection requirement:
-reproducibility of generated text).
-
-Honesty over availability: if Ollama is not reachable, we do NOT fail the
-pipeline and do NOT silently fake an LLM. Each cluster falls back to a
-term-based label (top c-TF-IDF words) and the artifact records
-``label_source="terms_fallback"`` so the HITL reviewer and the report can see
-that no language model stood behind these labels.
-
-LLM labels are also a known hallucination risk (the model sees 5 documents,
-not the cluster) — they are *proposals*, and approving/renaming them is one
-of the documented human-in-the-loop steps.
-"""
 from __future__ import annotations
 
 import hashlib
@@ -29,7 +10,6 @@ import numpy as np
 
 logger = logging.getLogger("reviewscope.label")
 
-# Notebook 08 templates (v1 label prompt + summary prompt), verbatim.
 LABEL_PROMPT = """You are analyzing customer reviews. The following reviews all belong to the same topic cluster.
 
 Reviews:
@@ -46,15 +26,6 @@ Representative reviews:
 Write a 2-3 sentence summary of what customers in this cluster are saying.
 Be specific and factual. Do not repeat the label."""
 
-# ── Mention-level variants (v2) ───────────────────────────────────────────────
-# The sentence_level pipeline hands the labeler *mentions*, not whole reviews:
-# single sentences about one aspect, so a cluster is far tighter and more
-# single-topic than a document cluster. v1 says "reviews" and asks what they
-# "have in common", which invites the model to hedge toward a generic theme that
-# covers a diverse document cluster — the wrong instinct when every member is
-# already one aspect. v2 names the unit, asks for the aspect itself, and forbids
-# the sentiment-only labels ("Great Experience") that short evaluative mentions
-# tempt a model into.
 LABEL_PROMPT_MENTION = """The following sentences are all taken from customer reviews of hotels. They were grouped together because they discuss the same specific aspect.
 
 Sentences:
@@ -72,14 +43,6 @@ Sentences:
 Write 2-3 sentences summarising what customers say about this aspect, including
 where they disagree. Be specific and factual. Do not repeat the label."""
 
-# ── Domain-neutral variant ────────────────────────────────────────────────────
-# v1 and v2_mention hard-code "customer reviews" and "customers"; applied to a
-# parliamentary debate they ask the model to frame legislation as consumer
-# feedback. This pair keeps v2's proven structure — name the unit, ask for the
-# aspect, forbid sentiment-only labels — and takes the domain as a parameter
-# instead of baking one in. ``{domain}`` is substituted from the corpus
-# profile's ``domain_description`` BEFORE the ``{docs}`` substitution; see
-# ``resolve_prompts``.
 LABEL_PROMPT_NEUTRAL = """The following excerpts are all taken from {domain}. They were grouped together because they discuss the same specific topic.
 
 Excerpts:
@@ -110,22 +73,6 @@ def resolve_prompts(
     label_prompt: Optional[str] = None,
     summary_prompt: Optional[str] = None,
 ) -> tuple[str, str]:
-    """Return the (label, summary) prompt pair actually to be used.
-
-    Resolution order, narrowest first:
-
-    1. ``label_prompt`` / ``summary_prompt`` — a free-text override supplied per
-       project by the application. Always wins; it is what "configurable from
-       the backend" means. Passed through ``prompt_hash`` like any other pair,
-       so an artifact still records exactly which text produced it.
-    2. ``variant`` — a named entry in :data:`PROMPT_VARIANTS`. This is the path
-       the research harness sweeps over (``eval.label_sweep``), which only works
-       because the variants are a closed, named set.
-
-    ``{domain}`` in a template is filled from *domain_description* here, so the
-    caller's later ``.format(docs=...)`` sees a template with only the
-    placeholders it supplies.
-    """
     if label_prompt is not None and summary_prompt is not None:
         pair = (label_prompt, summary_prompt)
     else:
@@ -136,20 +83,13 @@ def resolve_prompts(
                 f"Unknown prompt_variant {variant!r}; "
                 f"known: {list(PROMPT_VARIANTS)}"
             ) from None
-    # str.replace, not str.format: the templates also contain {docs} and
-    # {label}, which must survive untouched for the caller to substitute.
+    # Replace only {domain}; {docs} and {label} must survive for the caller.
     return tuple(t.replace("{domain}", domain_description) for t in pair)
 
 
 def prompt_hash(
     label_prompt: Optional[str] = None, summary_prompt: Optional[str] = None
 ) -> str:
-    """Identifies the exact prompt pair used — stored next to every label.
-
-    Defaults to the v1 pair so existing artifacts keep their historical hash;
-    pass the prompts explicitly when using a variant, or the hash would claim a
-    provenance the text does not have.
-    """
     label_prompt = LABEL_PROMPT if label_prompt is None else label_prompt
     summary_prompt = SUMMARY_PROMPT if summary_prompt is None else summary_prompt
     return hashlib.sha256((label_prompt + summary_prompt).encode()).hexdigest()[:8]
@@ -160,7 +100,7 @@ class ClusterLabel:
     cluster_id: int
     label: str
     summary: str
-    source: str          # "ollama:<model>" | "terms_fallback"
+    source: str
     prompt_hash: Optional[str] = None
 
 
@@ -172,7 +112,6 @@ def centroid_docs(
     n: int = 5,
     max_chars: int = 300,
 ) -> list[str]:
-    """The n documents nearest the cluster centroid in embedding space."""
     mask = labels == cluster_id
     cluster_embs = embeddings[mask]
     cluster_texts = [t for t, m in zip(texts, mask) if m]
@@ -193,22 +132,10 @@ class OllamaLabeler:
     )
     n_docs: int = 5
     timeout_s: int = 120
-    # Prompt pair to use. "v1" is notebook 08's document-level pair (the
-    # historical default); "v2_mention" is the hotel sentence/mention pair;
-    # "neutral" is the domain-parameterised pair used by every other corpus.
     prompt_variant: str = "v1"
-    # Corpus description substituted into a {domain} placeholder, from
-    # CorpusProfile.domain_description. Ignored by variants without one.
     domain_description: str = "documents"
-    # Free-text override supplied per project by the application layer. Both
-    # must be set together; they win over prompt_variant entirely. This is the
-    # "configurable from the backend" path — provenance is preserved because
-    # the resulting text is hashed into every label like any other pair.
     label_prompt_override: Optional[str] = None
     summary_prompt_override: Optional[str] = None
-    # None = leave the model's default (thinking models think); False = ask the
-    # server to disable reasoning. Labeling is a short structured-output task,
-    # so reasoning buys little and costs a lot of latency.
     think: Optional[bool] = None
     _available: Optional[bool] = field(default=None, repr=False)
 
@@ -244,19 +171,13 @@ class OllamaLabeler:
 
         payload: dict = {"model": self.model, "prompt": prompt, "stream": False}
         if self.think is not None:
-            # Reasoning models (qwen3 and friends) think by default. For a
-            # 3-6 word label the reasoning is pure cost — it multiplies latency
-            # and its tokens can leak into the answer — so the labeler must be
-            # able to turn it off. Servers that do not know the field ignore it.
             payload["think"] = self.think
         r = requests.post(
             f"{self.base_url}/api/generate", json=payload, timeout=self.timeout_s,
         )
         r.raise_for_status()
         body = r.json()
-        # When thinking is on, ollama returns reasoning in a separate field —
-        # but some builds inline it in <think> tags, which would otherwise be
-        # scored as part of the label.
+        # Some Ollama builds inline reasoning tags instead of using a separate field.
         text = body.get("response", "")
         if "</think>" in text:
             text = text.rsplit("</think>", 1)[1]
@@ -269,11 +190,6 @@ class OllamaLabeler:
         embeddings: np.ndarray,
         terms: dict[int, list[tuple[str, float]]],
     ) -> dict[int, ClusterLabel]:
-        """
-        Label + summary per cluster. Falls back to term labels per-cluster on
-        request failure and globally when Ollama is down; the ``source`` field
-        always says which path produced the text.
-        """
         cluster_ids = sorted(int(c) for c in set(labels) if c != -1)
         use_llm = self.available()
         if not use_llm:
@@ -308,7 +224,6 @@ class OllamaLabeler:
 def term_fallback_label(
     cid: int, terms: dict[int, list[tuple[str, float]]]
 ) -> ClusterLabel:
-    """Top-3 c-TF-IDF terms joined — crude but honest, and clearly flagged."""
     words = [w for w, _ in terms.get(cid, [])][:3]
     label = " / ".join(words) if words else f"cluster {cid}"
     return ClusterLabel(

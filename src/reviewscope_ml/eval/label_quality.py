@@ -1,47 +1,3 @@
-"""
-LLM cluster-label quality scoring — notebook 08's unfinished experiment.
-
-Notebook 08 chose the centroid context strategy and the v1 prompt on informal
-reading; its human scoring sheet was never filled in, so docs/methodology.md §7
-has carried "the centroid/v1 choice rests on informal reading" as an open
-weakness ever since. Ollama being down then made it worse: every label in every
-artifact is ``terms_fallback``, so no language model has ever actually been
-judged on this corpus.
-
-This module scores labelers on the three axes the tech-selection requirement
-names, and writes the human sheet alongside so the qualitative call can finally
-be made:
-
-1. **Format compliance** — deterministic. The prompt asks for a 3-6 word label,
-   nothing else; a model that answers "Sure! Here's a label: \"Clean Rooms\"."
-   is unusable in a UI regardless of how apt the words are. Measured, not
-   eyeballed, because this is the one axis with a ground truth.
-
-2. **Faithfulness to the cluster** — a label is faithful if it describes *this*
-   cluster and not a neighbouring one. We embed the label with the same model
-   that produced the space and check whether its own cluster's centroid is the
-   nearest one (``discrimination@1``) and by what margin. This is an automatic
-   analogue of the methodology's intruder test: a label that cannot pick its own
-   cluster out of the lineup does not identify it.
-
-3. **Hallucination** — content words in the label that occur in *no* member
-   mention. Deliberately a lexical check: the failure mode is the model
-   inventing specifics it never saw ("Rooftop Infinity Pool" for a cluster about
-   bathrooms), and that shows up as vocabulary with no support in the text.
-
-Honest limits of these proxies, which the report repeats so no one over-reads it:
-
-- Lexical grounding penalises *correct paraphrase*. "Breakfast" as a label for
-  mentions that all say "morning buffet" is a good label and scores as
-  ungrounded. The metric is a tripwire for invention, not a quality score, and
-  it must be read next to the human sheet.
-- Discrimination@1 rewards distinctive labels, which usually means faithful
-  ones — but a cluster that genuinely overlaps its neighbour caps the score
-  through no fault of the labeler.
-- None of the three measures whether a label is *useful* to a human. That is
-  what the scoring sheet is for, and why label approval stays a mandatory HITL
-  step (methodology §9).
-"""
 from __future__ import annotations
 
 import logging
@@ -54,15 +10,12 @@ import numpy as np
 
 logger = logging.getLogger("reviewscope.label_quality")
 
-# Preambles and wrappers a chat-tuned model adds when it ignores "label only".
 _META_PREFIX = re.compile(
     r"^\s*(sure|certainly|here(?:'s| is)|okay|ok|label|topic|answer|aspect)\b[:,!]?\s*",
     re.IGNORECASE,
 )
 _WORD = re.compile(r"[A-Za-z']+")
 
-# Words that carry no topical content, so their presence or absence says
-# nothing about grounding.
 _STOPWORDS = frozenset("""
 a an the and or of for to in on at by with from about into over after is are was
 were be been being this that these those it its their there here very quite
@@ -92,16 +45,6 @@ class LabelScore:
 
 
 def check_format(raw: str) -> tuple[str, bool, list[str]]:
-    """(cleaned label, compliant?, issues). Compliance is judged on the RAW
-    string; the cleaned label is what a UI would have to salvage.
-
-    Cleaning is iterative because the wrappers nest: "Sure! Here is a label:
-    \"Clean Rooms\"." carries a preamble, a nested second preamble, quotes and a
-    full stop, and a single pass would leave most of it in place. That matters
-    beyond tidiness — the cleaned label is what gets embedded for the
-    faithfulness metric, so leftover boilerplate would drag a model's
-    discrimination score down for a formatting sin it is already charged for.
-    """
     issues: list[str] = []
     label = raw.strip()
     if not label:
@@ -111,7 +54,6 @@ def check_format(raw: str) -> tuple[str, bool, list[str]]:
         issues.append("multi-line")
         label = label.split("\n")[0].strip()
 
-    # Peel preambles and quoting until the string stops shrinking.
     for _ in range(5):
         before = label
         if _META_PREFIX.match(label):
@@ -153,7 +95,6 @@ def score_label(
     centroid_ids: Optional[list[int]] = None,
     gen_s: Optional[float] = None,
 ) -> LabelScore:
-    """Score one label on format, faithfulness and grounding."""
     label, ok, issues = check_format(raw_label)
     score = LabelScore(
         cluster_id=cluster_id, label=label, raw_label=raw_label,
@@ -161,7 +102,6 @@ def score_label(
         format_issues=issues, gen_s=gen_s,
     )
 
-    # Lexical grounding: does each content word occur in any member mention?
     haystack = " ".join(member_texts).lower()
     words = _content_words(label)
     score.content_words = len(words)
@@ -171,7 +111,6 @@ def score_label(
         score.grounding_rate = round(grounded / len(words), 3)
         score.hallucinated = grounded < len(words)
 
-    # Faithfulness: is this cluster's centroid the nearest one to the label?
     if label_vec is not None and centroids is not None and centroid_ids:
         norms = np.linalg.norm(centroids, axis=1) * np.linalg.norm(label_vec)
         sims = (centroids @ label_vec) / np.maximum(norms, 1e-12)
@@ -187,7 +126,6 @@ def score_label(
 
 
 def aggregate(scores: list[LabelScore]) -> dict[str, Any]:
-    """Per-model summary over its labels."""
     def mean(vals):
         vals = [v for v in vals if v is not None]
         return round(float(np.mean(vals)), 4) if vals else None
@@ -213,7 +151,6 @@ def aggregate(scores: list[LabelScore]) -> dict[str, Any]:
 def cluster_centroids(
     embeddings: np.ndarray, labels: np.ndarray
 ) -> tuple[np.ndarray, list[int]]:
-    """Mean embedding per non-noise cluster, plus the matching cluster ids."""
     ids = sorted(int(c) for c in set(labels.tolist()) if c != -1)
     mat = np.vstack([embeddings[labels == cid].mean(axis=0) for cid in ids])
     return mat, ids
@@ -225,13 +162,9 @@ def render_report(
     header: str,
     notes: list[str],
 ) -> str:
-    """Markdown comparison table, ranked by a compliance-weighted composite."""
     def fmt(v):
         return "—" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
 
-    # Composite: a label must be well-formed to be usable at all, must identify
-    # its own cluster, and must not invent specifics. Equal weights, stated
-    # openly as a convention — the raw columns are right there to re-weight.
     def composite(m: dict[str, Any]) -> float:
         parts = [
             m.get("format_compliance") or 0.0,
@@ -269,12 +202,6 @@ def render_human_sheet(
     exemplars: dict[int, list[str]],
     labels_by_model: dict[str, dict[int, str]],
 ) -> str:
-    """Notebook 08's scoring sheet, finally generated.
-
-    Blind-ish by construction: the models are columns, so a reviewer scores the
-    labels side by side against the same exemplars rather than reading one
-    model's output in isolation and grading on vibes.
-    """
     lines = [
         "# LLM label quality — human scoring sheet",
         "",
@@ -298,7 +225,7 @@ def render_human_sheet(
         lines += ["", "| labeler | prompt | label | score 1-5 | note |",
                   "|---|---|---|---|---|"]
         for key, labels in labels_by_model.items():
-            # The key is "model|variant"; a literal pipe would split the cell.
+            # Escape the key separator so it does not split Markdown table cells.
             model, _, variant = key.rpartition("|")
             label = str(labels.get(cid, "—")).replace("|", "\\|")
             lines.append(f"| `{model}` | {variant} | {label} |  |  |")

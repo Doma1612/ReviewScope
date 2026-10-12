@@ -11,7 +11,6 @@ from reviewscope_ml.pipelines.spec import PipelineSpec
 
 class TestScaledMinClusterSize:
     def test_anchored_to_notebook_decision(self):
-        # 0.3% of 5k = 15 — exactly the notebook 06 choice
         assert scaled_min_cluster_size(5_000) == 15
 
     def test_scales_to_50k(self):
@@ -31,9 +30,6 @@ class TestScaledMinSamples:
         assert scaled_min_samples(150) == 50
 
     def test_caps_the_smoothing_parameter(self):
-        # EuroParl 26k sentence run: 352,924 segments -> mcs 1059. Uncapped
-        # this was ms=353, which collapsed the run to 2 clusters holding 98%
-        # of all segments.
         assert scaled_min_samples(1_059) == 50
 
     def test_floor_protects_smoke_runs(self):
@@ -48,7 +44,7 @@ class TestAutoBackendResolution:
         )
         b = _make_backend(spec, seed=42, n_units=50_000)
         assert b.min_cluster_size == 150
-        assert b.min_samples == 50  # at the cap, so unchanged by it
+        assert b.min_samples == 50
 
     def test_explicit_values_respected(self):
         spec = PipelineSpec(
@@ -60,7 +56,6 @@ class TestAutoBackendResolution:
         assert b.min_samples == 7
 
     def test_min_samples_is_capped_at_sentence_scale(self):
-        # The shape that produced the 2-cluster EuroParl run.
         spec = PipelineSpec(
             variant="sentence_level",
             cluster={"min_cluster_size": "auto", "min_samples": "auto"},
@@ -77,7 +72,7 @@ class TestAutoBackendResolution:
         )
         b = _make_backend(spec, seed=42, n_units=50_000)
         assert b.micro_min_cluster_size == 50
-        assert b.micro_min_samples == 30  # 0.6 ratio, below the cap
+        assert b.micro_min_samples == 30
 
     def test_two_stage_micro_samples_capped(self):
         spec = PipelineSpec(
@@ -87,7 +82,7 @@ class TestAutoBackendResolution:
         )
         b = _make_backend(spec, seed=42, n_units=352_924)
         assert b.micro_min_cluster_size == 353
-        assert b.micro_min_samples == 50  # would be 212 uncapped
+        assert b.micro_min_samples == 50
 
     def test_benchmark_scale_matches_notebook_defaults(self):
         spec = PipelineSpec(
@@ -99,7 +94,6 @@ class TestAutoBackendResolution:
 
 
 def three_groups(seed=0):
-    """Six tight micro-blobs arranged as three well-separated pairs."""
     rng = np.random.default_rng(seed)
     centers = [(0, 0), (1, 0), (10, 10), (11, 10), (20, 0), (21, 0)]
     return np.vstack([rng.normal(c, 0.15, (25, 2)) for c in centers])
@@ -113,7 +107,6 @@ class TestTwoStage:
 
         micro = backend.micro_labels_
         mapping = backend.micro_to_macro_
-        # every non-noise document's macro label equals its micro's mapping
         for doc_micro, doc_macro in zip(micro, labels):
             if doc_micro == -1:
                 assert doc_macro == -1
@@ -130,7 +123,6 @@ class TestTwoStage:
         X = three_groups()
         backend = TwoStageBackend(micro_min_cluster_size=5, n_macro=3)
         labels = backend.fit_predict(X)
-        # the two micro-blobs of each pair must land in the same macro topic
         for pair_start in (0, 50, 100):
             a = labels[pair_start:pair_start + 25]
             b = labels[pair_start + 25:pair_start + 50]
@@ -147,5 +139,5 @@ class TestTwoStage:
     def test_degenerate_single_micro_cluster(self):
         X = np.random.default_rng(0).normal(0, 0.1, (30, 2))
         backend = TwoStageBackend(micro_min_cluster_size=5)
-        labels = backend.fit_predict(X)  # must not crash
+        labels = backend.fit_predict(X)
         assert set(labels) <= {-1, 0}

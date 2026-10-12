@@ -1,7 +1,3 @@
-// Cluster cohesion confidence chip. `cohesion` is the mean cosine similarity
-// of member embeddings to the cluster centroid (0–1; higher = tighter). We bucket
-// it into High / Medium / Low so the user gets a confidence signal at a glance, and
-// keep the raw value + an explanatory tooltip for those who want the number.
 export function CohesionChip({ value, compact = false }: { value: number | null; compact?: boolean }) {
   if (value == null) return null;
   const tier = value >= 0.5 ? "high" : value >= 0.25 ? "medium" : "low";

@@ -6,20 +6,15 @@ import { api, Cluster, DocumentFilter, SchemaColumn } from "../api";
 import { invalidateAll } from "../optimistic";
 
 const PAGE_SIZE = 50;
-// Sentinel select value for "noise" (Document.cluster_id IS NULL) — the API takes null.
 const NOISE = "__noise__";
 const resolveTarget = (value: string): string | null => (value === NOISE ? null : value);
 
-// Render any raw_data cell value as a string; objects/arrays fall back to JSON.
 function formatCell(value: unknown): string {
   if (value == null) return "";
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
 
-// Turn the per-column facet inputs into the typed filter list the API expects.
-// Numeric/date columns contribute a gte (min/from) and/or lte (max/to); booleans an
-// eq. Keys are `${column}:${bound}` where bound ∈ {min,max,from,to,eq}.
 function buildFilters(columns: SchemaColumn[], values: Record<string, string>): DocumentFilter[] {
   const out: DocumentFilter[] = [];
   for (const col of columns) {
@@ -41,7 +36,6 @@ function buildFilters(columns: SchemaColumn[], values: Record<string, string>): 
   return out;
 }
 
-// One facet control, rendered per typed schema column.
 function DocumentFacet({ column, values, onChange }: { column: SchemaColumn; values: Record<string, string>; onChange: (key: string, value: string) => void }) {
   if (column.type === "integer" || column.type === "float") {
     return (
@@ -61,7 +55,6 @@ function DocumentFacet({ column, values, onChange }: { column: SchemaColumn; val
       </span>
     );
   }
-  // boolean
   return (
     <span className="documents-facet">
       <label>{column.name}</label>
@@ -74,26 +67,17 @@ function DocumentFacet({ column, values, onChange }: { column: SchemaColumn; val
   );
 }
 
-// Full document table whose columns come from the project schema. Used
-// project-wide on ProjectView and cluster-scoped on ClusterDetail (via clusterId).
-// Server-side pagination through GET /documents' limit/offset.
-// When `editable` (owner + edit mode), each row gets a select-checkbox and a
-// "move to cluster" dropdown, plus a bulk-reassign toolbar — wired to B3's single
-// (reassignDocument) and bulk (bulkReassign) endpoints.
 export function DocumentsTable({ projectId, clusterId, editable = false, clusters = [], sentence = false }: { projectId: string; clusterId?: string; editable?: boolean; clusters?: Cluster[]; sentence?: boolean }) {
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkTarget, setBulkTarget] = useState("");
   const [showIds, setShowIds] = useState(false);
-  // Facet filter values keyed by `${column}:${bound}` (bound = min/max/from/to/eq).
   const [facetValues, setFacetValues] = useState<Record<string, string>>({});
   const offset = page * PAGE_SIZE;
   const queryClient = useQueryClient();
 
   const schema = useQuery({ queryKey: ["schema", projectId], queryFn: () => api.getSchema(projectId), retry: false });
 
-  // Build the typed filter list (R8) from the schema columns + facet inputs. Sent
-  // to the server so filtering spans the whole dataset, not just the current page.
   const facetColumns = (schema.data?.columns ?? []).filter((col) => ["integer", "float", "date", "boolean"].includes(col.type));
   const filters = useMemo(() => buildFilters(facetColumns, facetValues), [facetColumns, facetValues]);
   const filtersKey = JSON.stringify(filters);
@@ -103,19 +87,14 @@ export function DocumentsTable({ projectId, clusterId, editable = false, cluster
     queryFn: () => api.documents(projectId, { clusterId, limit: PAGE_SIZE, offset, filters }),
     placeholderData: keepPreviousData,
   });
-  // Real total so the pager shows "of N" and "Next" never leads to an empty page.
   const count = useQuery({ queryKey: ["documents-count", projectId, clusterId ?? null, filtersKey], queryFn: () => api.documentsCount(projectId, { clusterId, filters }) });
 
-  // Changing a facet can shrink the result below the current page — snap to page 0.
   useEffect(() => { setPage(0); }, [filtersKey]);
 
-  // Look up a document's cluster for the per-row link (project-wide view only).
   const clusterById = new Map(clusters.map((cluster) => [cluster.id, cluster]));
   const showClusterColumn = !clusterId && clusters.length > 0;
 
-  // Reassigning a review moves *all* its mentions to one cluster. Membership fans
-  // out per review, so we reconcile by invalidating on settle rather than patching
-  // the document-keyed cache in place.
+  // Review moves affect multiple mentions; invalidate rather than patch document-keyed caches.
   const onSettled = () => invalidateAll(queryClient, projectId);
   const moveOne = useMutation({
     mutationFn: ({ id, target }: { id: string; target: string }) => api.reassignReview(projectId, id, resolveTarget(target)),
@@ -128,21 +107,14 @@ export function DocumentsTable({ projectId, clusterId, editable = false, cluster
   });
 
   const rows = documents.data ?? [];
-  // Prefer the saved schema; if none exists yet, derive columns from the first row.
   const allColumns = schema.data?.columns?.length
     ? schema.data.columns
     : Object.keys(rows[0]?.raw_data ?? {}).map((name) => ({ name, type: "text", is_primary_key: false }));
-  // Identifier columns (the primary key, anything named id or *_id) are hidden
-  // by default: they carry no meaning for a reader working through documents,
-  // and on wide schemas they push the text column off screen. Kept behind a
-  // toggle rather than dropped, since reassignment and bug reports need them.
   const idColumns = allColumns.filter((col) => col.is_primary_key || /^id$|_id$/i.test(col.name));
   const columns = showIds || idColumns.length === allColumns.length
     ? allColumns
     : allColumns.filter((col) => !idColumns.includes(col));
   const total = count.data?.total;
-  // With a known total, "Next" is enabled only while more rows remain; fall back to
-  // the page-full heuristic while the count is still loading.
   const hasNext = total != null ? offset + rows.length < total : rows.length === PAGE_SIZE;
   const allOnPageSelected = rows.length > 0 && rows.every((doc) => selected.has(doc.id));
 

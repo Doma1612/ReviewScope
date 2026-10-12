@@ -1,24 +1,3 @@
-"""
-Common artifact schema every pipeline variant emits.
-
-The point of this module is the contract in the mission brief and app spec:
-whichever pipeline wins, the application consumes the SAME files —
-per-document cluster assignment + 2D/3D coords, per-cluster terms/label/
-summary, and a manifest with provenance. The four pipeline variants differ
-only in how they fill these files in.
-
-Layout of one run directory (``data/runs/<run_name>/``)::
-
-    manifest.json      provenance: spec, seed, sample size, stage timings,
-                       peak memory, label source, applied feedback files
-    assignments.csv    doc_id, cluster_id, micro_cluster_id, x2/y2, x3/y3/z3
-    clusters.json      per cluster: label, summary, label_source, terms,
-                       word_frequencies, size, mean_stars, sample_doc_ids
-    metrics.json       three-tier metrics incl. noise-incl/excl variants
-
-Plain CSV/JSON on purpose: artifacts must be diffable, inspectable without
-pandas/pyarrow, and trivially loadable by the FastAPI backend.
-"""
 from __future__ import annotations
 
 import csv
@@ -37,19 +16,16 @@ class ClusterInfo:
     size: int
     label: str
     summary: str
-    label_source: str                       # "ollama:<model>" | "terms_fallback" | "hitl_override"
-    top_terms: list[list]                   # [[term, score], ...] c-TF-IDF
-    tfidf_terms: list[list]                 # [[term, score], ...] plain TF-IDF
-    word_frequencies: dict[str, int]        # word-cloud counts
-    sample_doc_ids: list[str]               # RANDOM sample, not nearest-centroid
+    label_source: str
+    top_terms: list[list]
+    tfidf_terms: list[list]
+    word_frequencies: dict[str, int]
+    sample_doc_ids: list[str]               # Random members, not centroid-nearest exemplars.
     mean_stars: Optional[float] = None
     prompt_hash: Optional[str] = None
-    micro_cluster_ids: list[int] = field(default_factory=list)  # two-stage only
-    # Sentence-level runs: `size` counts mentions (segments); this counts the
-    # distinct parent reviews, deduplicated. None for document-level runs.
+    micro_cluster_ids: list[int] = field(default_factory=list)
+    # size counts mentions; n_documents counts distinct parent reviews.
     n_documents: Optional[int] = None
-    # Sentiment (tweet-RoBERTa, score = P(pos) - P(neg), labels at ±0.2):
-    # mean score over the cluster's units + share of negative/neutral/positive.
     sentiment_avg: Optional[float] = None
     sentiment_dist: Optional[dict[str, float]] = None
 
@@ -59,14 +35,14 @@ class RunArtifacts:
     run_name: str
     manifest: dict[str, Any]
     doc_ids: list[str]
-    labels: np.ndarray                      # cluster id per doc, -1 noise
-    coords_2d: np.ndarray                   # (n, 2)
-    coords_3d: np.ndarray                   # (n, 3)
+    labels: np.ndarray
+    coords_2d: np.ndarray
+    coords_3d: np.ndarray
     clusters: dict[int, ClusterInfo]
     metrics: dict[str, Any]
-    micro_labels: Optional[np.ndarray] = None  # two-stage only
-    sentiment_scores: Optional[np.ndarray] = None   # per unit, [-1, 1]
-    sentiment_labels: Optional[list[str]] = None    # per unit, thresholded
+    micro_labels: Optional[np.ndarray] = None
+    sentiment_scores: Optional[np.ndarray] = None
+    sentiment_labels: Optional[list[str]] = None
 
     @property
     def cluster_ids(self) -> list[int]:
@@ -112,7 +88,6 @@ def save_run(run_dir: Path, art: RunArtifacts) -> Path:
 
 
 def _json_default(obj):
-    """Numpy scalars sneak into cluster payloads (ids, counts) — unwrap them."""
     if isinstance(obj, np.integer):
         return int(obj)
     if isinstance(obj, np.floating):
@@ -141,7 +116,6 @@ def load_run(run_dir: Path) -> RunArtifacts:
                 micro.append(-1)
             c2.append([float(row["x2"]), float(row["y2"])])
             c3.append([float(row["x3"]), float(row["y3"]), float(row["z3"])])
-            # Sentiment columns are optional (runs predating the stage).
             if row.get("sentiment_score"):
                 has_sentiment = True
                 sent_scores.append(float(row["sentiment_score"]))

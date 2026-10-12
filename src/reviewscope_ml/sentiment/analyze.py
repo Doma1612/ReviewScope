@@ -1,27 +1,3 @@
-"""
-Per-unit sentiment scoring (app-spec Celery step 6).
-
-Model: ``cardiffnlp/twitter-roberta-base-sentiment-latest`` — RoBERTa-base
-fine-tuned on ~124M tweets (TweetEval). Tweet-length training is exactly the
-mention regime of the sentence-level pipeline; on whole reviews it still
-works but mixes the aspects the review mixes.
-
-Score and label:
-- ``score = P(positive) - P(negative)`` in [-1, 1]
-- label thresholds (team decision): negative < -0.2, neutral in [-0.2, 0.2],
-  positive > 0.2. Stored as named constants so the report can cite them.
-
-Architectural rule, enforced by placement: sentiment is metadata *about*
-clusters, never an input *to* clustering. Tier 3 (rating entropy) exists to
-punish sentiment-driven clusters — feeding sentiment into the embedding or
-clustering stage would sabotage our own quality criterion. This stage
-depends only on the texts and joins the artifacts at assembly time.
-
-Compared to star ratings (Tier 3's source): stars are per *review*, this is
-per *unit* — at sentence level that surfaces the negative breakfast mention
-inside a 4-star review, which no star column can. On the benchmark both
-exist, which doubles as a sanity check (score should correlate with stars).
-"""
 from __future__ import annotations
 
 import logging
@@ -51,7 +27,6 @@ def score_to_label(score: float) -> str:
 
 
 class SentimentScorer:
-    """Lazy-loading, batched, device-aware; ``close`` frees the weights."""
 
     def __init__(
         self,
@@ -66,18 +41,9 @@ class SentimentScorer:
         self.batch_size = batch_size
         self.max_length = max_length
         self.show_progress = show_progress
-        # One (model, tokenizer) replica per device, loaded lazily. On CUDA the
-        # replicas span every visible card so score() is data-parallel across GPUs
-        # (CUDA_VISIBLE_DEVICES is already pinned to idle cards upstream).
         self._replicas: dict[str, tuple] = {}
 
     def _target_devices(self) -> list[str]:
-        """Devices to shard across: every visible CUDA card, else the one device.
-
-        Mirrors the embedder (embed/sentence_transformer.py::_target_devices):
-        CUDA_VISIBLE_DEVICES is pinned to idle cards upstream, so using all of
-        them is safe. RoBERTa-base is small (~0.5 GB), so a replica per card is cheap.
-        """
         if self.device != "cuda":
             return [self.device]
         import torch
@@ -93,20 +59,13 @@ class SentimentScorer:
 
             tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             model = AutoModelForSequenceClassification.from_pretrained(
-                self.model_name, torch_dtype=torch.float32  # Pascal: no bf16
+                self.model_name, torch_dtype=torch.float32  # Pascal has no bf16 support.
             ).to(device)
             model.eval()
             self._replicas[device] = (model, tokenizer)
         return self._replicas[device]
 
     def score(self, texts: list[str]) -> np.ndarray:
-        """Signed sentiment score per text: P(positive) - P(negative).
-
-        Sharded across every visible GPU — contiguous slices, one model replica
-        per card, threads (torch releases the GIL inside CUDA kernels) — then
-        reassembled in order. Single-device work (CPU, one GPU, or a tiny batch)
-        stays on one card. Mirrors the embedder's in-process data-parallel encode.
-        """
         devices = self._target_devices()
         logger.info(
             "scoring sentiment for %d texts (%s, batch %d, devices %s)",
@@ -121,8 +80,7 @@ class SentimentScorer:
         shards = [(dev, a, b) for dev, a, b in zip(devices, bounds[:-1], bounds[1:]) if b > a]
         scores = np.empty(len(texts), dtype=np.float32)
         with ThreadPoolExecutor(max_workers=len(shards)) as pool:
-            # Only the first shard draws a bar — parallel bars would interleave;
-            # shards are equal-sized, so one is representative (mirrors the embedder).
+            # Show one progress bar to avoid interleaving bars from parallel shards.
             futures = {
                 pool.submit(self._score_on, dev, texts[a:b], progress=(self.show_progress and i == 0)): (a, b)
                 for i, (dev, a, b) in enumerate(shards)
@@ -132,7 +90,6 @@ class SentimentScorer:
         return scores
 
     def _score_on(self, device: str, texts: list[str], progress: bool = False) -> np.ndarray:
-        """Score one contiguous shard on a single device."""
         import torch
 
         model, tokenizer = self._load(device)
@@ -150,7 +107,7 @@ class SentimentScorer:
                     max_length=self.max_length, return_tensors="pt",
                 ).to(device)
                 probs = torch.softmax(model(**enc).logits, dim=-1)
-                # TweetEval label order: 0=negative, 1=neutral, 2=positive
+                # TweetEval label order: negative, neutral, positive.
                 scores[start:start + len(chunk)] = (
                     (probs[:, 2] - probs[:, 0]).float().cpu().numpy()
                 )
@@ -168,10 +125,6 @@ def sentiment_with_cache(
     device: str = "cpu",
     prefix_extra: str = "",
 ) -> tuple[np.ndarray, float]:
-    """
-    Score *texts* through the on-disk cache (same namespacing convention as
-    embeddings: corpus + unit + size). Returns (scores, seconds).
-    """
     corpus = cfg.corpus_slug
     prefix = ("" if corpus == "hotels" else f"{corpus}__") + prefix_extra
     k = f"{len(texts) // 1000}k" if len(texts) % 1000 == 0 else str(len(texts))
@@ -194,7 +147,6 @@ def sentiment_with_cache(
 def aggregate_cluster_sentiment(
     scores: np.ndarray, labels: np.ndarray, cluster_id: int
 ) -> tuple[Optional[float], Optional[dict[str, float]]]:
-    """(mean score, label-share dict) for one cluster's units."""
     mask = labels == cluster_id
     if not mask.any():
         return None, None

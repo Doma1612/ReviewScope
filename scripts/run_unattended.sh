@@ -1,24 +1,4 @@
 #!/usr/bin/env bash
-# Unattended completion of the WP5 technology-selection run, then full cleanup.
-#
-# Written to be started and walked away from: it waits for work already in
-# flight, runs what is left, and then RELEASES THE BOX — our Ollama server is
-# stopped and every GPU is handed back. The shared box must not be left with a
-# model resident in VRAM just because nobody was watching.
-#
-# Sequence:
-#   0. wait for the in-flight labeler sweep (started separately) to finish
-#   1. regenerate the human scoring sheet (pipe-escaping fix)
-#   2. fair re-run of qwen3 with reasoning disabled
-#   3. confirm the finalists at 50k (MiniLM + arctic) — the long one, hours
-#   4. cleanup: stop OUR ollama, end tmux sessions, report GPU state
-#
-# Cleanup runs from an EXIT trap, so it happens on success, on failure, and on
-# Ctrl-C alike. It never touches the root-owned system ollama (pid from a
-# different user) — only processes under $HOME/ollama.
-#
-# Usage:  tmux new-session -d -s revscope-night "bash scripts/run_unattended.sh"
-#         tail -f data/runs/unattended.log
 
 cd "$(dirname "$0")/.."
 REPO="$PWD"
@@ -30,13 +10,7 @@ exec > >(tee -a "$LOG") 2>&1
 
 say() { echo "[$(date '+%F %T')] $*"; }
 
-# PIDs whose *executable* lives under our rootless ollama install.
-#
-# Matching on the command STRING is not safe here: any shell whose command line
-# happens to contain the pattern matches itself, which is how `pkill -f "ollama
-# serve"` famously kills the shell that ran it. Resolving /proc/<pid>/exe asks
-# what the process actually IS, so a shell mentioning the path can never
-# qualify — and root's /bin/ollama never qualifies either.
+# Match executable paths so cleanup cannot kill a shell mentioning Ollama or another install.
 our_ollama_pids() {
     local pid exe
     for pid in $(pgrep -f "ollama" 2>/dev/null || true); do
@@ -86,7 +60,6 @@ cleanup() {
         ls -1 "$REPO/data/runs"/label_quality_*.md 2>/dev/null || true
     } > "$STATUS"
     say "status written to $STATUS"
-    # End the other sessions last, so their logs are already flushed.
     for s in revscope-label revscope-stab revscope-sweep revscope-probe; do
         tmux kill-session -t "$s" 2>/dev/null && say "closed tmux session $s" || true
     done
@@ -99,13 +72,8 @@ export HF_HUB_DISABLE_PROGRESS_BARS=1
 export TOKENIZERS_PARALLELISM=false
 
 
-# ── 0. wait for the in-flight labeler sweep ──────────────────────────────────
 say "step 0: waiting for the in-flight labeler sweep"
-# Bounded: qwen3 in thinking mode can hit the labeler's 120s per-request
-# timeout on every cluster, so an unbounded wait risks the whole chain
-# stalling behind it and the 50k run never starting. If it overruns, carry on
-# and let the two share the box — the 50k job's numbers are about cluster
-# structure, not throughput.
+# Bound the wait so slow reasoning requests cannot stall the entire chain.
 STEP0_MAX_S=7200
 waited=0
 if tmux has-session -t revscope-label 2>/dev/null; then
@@ -122,18 +90,11 @@ else
     say "no labeler session in flight"
 fi
 
-# ── 1. regenerate the human scoring sheet ────────────────────────────────────
-# The sweep that produced it imported the pre-fix renderer, which emitted an
-# unescaped '|' inside table cells.
 say "step 1: regenerating the human scoring sheet"
 python -W ignore scripts/regen_label_sheet.py \
     --sample-size 5000 \
     --embedding-model sentence-transformers/all-MiniLM-L6-v2 || say "WARN: sheet regen failed"
 
-# ── 2. fair qwen3 comparison, reasoning disabled ─────────────────────────────
-# qwen3 thinks by default; for a 3-6 word label that is pure latency and its
-# reasoning can leak into the answer. Scoring it only with thinking on would
-# report a configuration artifact as a model verdict.
 say "step 2: qwen3 with reasoning disabled"
 timeout 3600 python -W ignore -m reviewscope_ml.eval.label_sweep \
     --sample-size 5000 --device cuda \
@@ -142,14 +103,10 @@ timeout 3600 python -W ignore -m reviewscope_ml.eval.label_sweep \
     --n-clusters 20 2>&1 | grep -viE "^(Batches|Loading weights)" \
     || say "WARN: qwen3 nothink run failed or timed out"
 
-# ── 3. free the labeler GPU before the long job ──────────────────────────────
 say "step 3: stopping ollama before the 50k run (nothing left needs it)"
 stop_our_ollama
 sleep 5
 
-# ── 4. the long one: confirm finalists at 50k ────────────────────────────────
-# 50,000 reviews = 454,493 segments. The seeded UMAP fit is single-threaded by
-# construction and dominates; this is hours, not minutes.
 say "step 4: 50k finalists (MiniLM + arctic) — expect hours"
 python -W ignore -m reviewscope_ml.eval.model_sweep \
     --sample-size 50000 --device cuda --gpus 2 --sentence-level \

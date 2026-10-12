@@ -1,14 +1,3 @@
-"""Endpoint-logic tests for GET/POST /api/projects/{id}/schema (api/projects.py).
-
-No real DB: the routes are plain async functions, so a fake ``AsyncSession`` that
-serves ``get`` from in-memory objects and records ``add``/``commit`` exercises the
-wiring directly. The "exactly one PK" / "known type" rules live on the Pydantic
-request models, so FastAPI surfaces them as 422 before the route runs — they are
-asserted here as ``ValidationError`` on the schema, which is what produces that 422.
-Mirrors the no-DB approach of test_cluster_crud.py.
-
-Run from the backend dir:  python -m pytest tests/test_project_schema.py
-"""
 from __future__ import annotations
 
 import asyncio
@@ -28,7 +17,7 @@ os.environ.setdefault("SYNC_DATABASE_URL", "postgresql+psycopg://u:p@localhost:5
 os.environ.setdefault("SIMULATE_ML", "true")
 os.environ.setdefault("UPLOAD_DIR", tempfile.mkdtemp(prefix="reviewscope-test-uploads-"))
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/backend on path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi import HTTPException  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
@@ -55,7 +44,6 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """Serves require_project_role's ProjectMember query and get(); records mutations."""
 
     def __init__(self, *, member=None, objects=None):
         self.member = member
@@ -94,8 +82,6 @@ def _cols(*, two_pks=False):
     ]
 
 
-# ── GET ─────────────────────────────────────────────────────────────────────
-
 @asyncio_test
 async def test_get_schema_returns_stored_columns():
     pid = uuid.uuid4()
@@ -124,8 +110,6 @@ async def test_get_schema_requires_membership():
     assert exc.value.status_code == 403
 
 
-# ── POST ────────────────────────────────────────────────────────────────────
-
 @asyncio_test
 async def test_post_schema_inserts_when_absent():
     pid = uuid.uuid4()
@@ -150,7 +134,7 @@ async def test_post_schema_upserts_existing():
 
     assert [c["name"] for c in existing.columns] == ["id", "review"]
     assert result.columns == existing.columns
-    assert not [o for o in db.added if isinstance(o, ProjectSchema)]  # updated in place, not re-added
+    assert not [o for o in db.added if isinstance(o, ProjectSchema)]
     assert db.committed
 
 
@@ -162,8 +146,6 @@ async def test_post_schema_viewer_forbidden():
     assert exc.value.status_code == 403
     assert not db.committed
 
-
-# ── Validation (surfaced by FastAPI as 422) ─────────────────────────────────
 
 def test_two_primary_keys_rejected():
     with pytest.raises(ValidationError):

@@ -99,8 +99,6 @@ function UploadModal({ onClose, onSubmit, error }: { onClose: () => void; onSubm
     setColumns(buildColumns(text, nextFile.name.endsWith(".jsonl")));
   }
 
-  // Validation is submit-time only (no auto-fixing): editing a field clears the
-  // stale error banner so the user re-validates on their next submit.
   const setType = (index: number, type: string) => { setErrors([]); setColumns((cs) => cs.map((c, i) => (i === index ? { ...c, type } : c))); };
   const setPrimaryKey = (index: number) => { setErrors([]); setColumns((cs) => cs.map((c, i) => ({ ...c, is_primary_key: i === index }))); };
 
@@ -145,9 +143,6 @@ function UploadModal({ onClose, onSubmit, error }: { onClose: () => void; onSubm
   );
 }
 
-// ── Schema detection ────────────────────────────────────────────────────────────
-// Sample the head of the file and infer each column's type + the primary key from
-// real values, rather than defaulting everything to text / the first column.
 const SAMPLE_ROWS = 50;
 const BOOL_VALUES = new Set(["true", "false", "yes", "no"]);
 const ID_NAME_RE = /(^|[_\s-])(id|key|uuid|pk)$/i;
@@ -169,7 +164,6 @@ function parseCsvLine(line: string): string[] {
   return cells;
 }
 
-// Up to SAMPLE_ROWS non-empty values per column, for CSV or JSONL.
 function sampleColumns(text: string, isJsonl: boolean): { name: string; values: string[] }[] {
   const clean = (values: unknown[]) => values.filter((v) => v != null && v !== "").map(String);
   if (isJsonl) {
@@ -203,8 +197,6 @@ function inferType(values: string[]): string {
   return "text";
 }
 
-// Prefer a column with unique, non-empty values and an id-like name; otherwise the
-// first all-unique column; otherwise an id-named column; otherwise the first column.
 function detectPrimaryKey(cols: { name: string; values: string[] }[]): number {
   const unique = (values: string[]) => values.length > 0 && new Set(values).size === values.length;
   const candidates = cols.map((c, i) => ({ i, c })).filter(({ c }) => unique(c.values));

@@ -1,17 +1,3 @@
-"""
-End-to-end pipeline runner.
-
-One entry point, four variants (see ``spec.py``), one artifact schema
-(see ``artifacts.py``). Heavy intermediates (embeddings, projections, label
-arrays) go through the same on-disk cache the notebooks use, which makes runs
-checkpointed and resumable: a crash after the embed stage costs only the
-stages after embed, and a re-run with identical parameters is almost free.
-
-Shared-GPU etiquette is handled at the edges: the embed stage is the only
-CUDA consumer; its model is dropped and the CUDA cache emptied the moment the
-embeddings exist (or come from cache). UMAP/HDBSCAN run on CPU with the
-thread cap from PipelineConfig.
-"""
 from __future__ import annotations
 
 import json
@@ -43,7 +29,7 @@ from .spec import PipelineSpec
 
 logger = logging.getLogger("reviewscope.pipeline")
 
-N_SAMPLE_DOCS = 5  # random per-cluster samples stored in the artifact
+N_SAMPLE_DOCS = 5
 
 
 def run_pipeline(
@@ -57,20 +43,8 @@ def run_pipeline(
     label_clusters: bool = True,
     on_stage: Optional[Callable[[str], None]] = None,
 ) -> RunArtifacts:
-    """
-    Run one pipeline variant end to end and persist its artifacts.
-
-    ``seed`` overrides ``cfg.seed`` (used by the multi-seed stability check);
-    seeded intermediates get a distinct cache key so notebook caches (seed 42)
-    are never clobbered.
-
-    ``on_stage`` (optional) is invoked with each internal stage name as it
-    starts — the application layer forwards this to its pipeline-status sink.
-    """
     seed = cfg.seed if seed is None else seed
     if run_name is None:
-        # Non-default corpus or embedding model gets its own run dir,
-        # otherwise sweeps would silently overwrite the default run.
         from .spec import default_specs
 
         parts = [spec.variant]
@@ -92,9 +66,6 @@ def run_pipeline(
     if reviews is None:
         reviews = load_benchmark(cfg)
 
-    # Sentence-level: the working unit becomes the mention (segment); the
-    # review stays the container. Everything downstream operates on `units`;
-    # per-review statistics are deduplicated via the segment ids' parent part.
     is_sentence = spec.variant == "sentence_level"
     if is_sentence:
         from ..data.segment import segment_reviews
@@ -110,7 +81,6 @@ def run_pipeline(
     monitor = StageMonitor(on_stage=on_stage)
     profile = run_profile(cfg, spec)
 
-    # ── Embed (cached; model released immediately after) ──────────────────
     with monitor.stage("embed"):
         batch, seq_cap = encode_settings(spec.embedding_model, cfg.batch_size)
         embedder = SentenceTransformerEmbedder(
@@ -129,7 +99,6 @@ def run_pipeline(
         finally:
             embedder.close()
 
-    # ── Reduce + Cluster (variant-specific) ───────────────────────────────
     micro_labels = None
     micro_to_macro = None
     if spec.variant == "bertopic":
@@ -143,16 +112,11 @@ def run_pipeline(
                 cfg, spec, reduced, seed
             )
 
-    # ── Visualisation coords (cached) ─────────────────────────────────────
     with monitor.stage("viz_coords"):
         coords_2d = _viz_cached(cfg, spec, embeddings, seed, n_components=2)
         coords_3d = _viz_cached(cfg, spec, embeddings, seed, n_components=3)
 
-    # ── Sentiment (app-spec step 6) ───────────────────────────────────────
-    # Metadata about clusters, never input to clustering: depends only on
-    # the texts. score = P(pos) - P(neg), labels at ±0.2. Best at sentence
-    # level (tweet-length training regime); fails soft if the model is
-    # unavailable.
+    # Sentiment is cluster metadata, never input to embeddings or clustering.
     with monitor.stage("sentiment"):
         sentiment_scores = None
         sentiment_labels = None
@@ -168,20 +132,13 @@ def run_pipeline(
         except Exception as e:
             logger.warning("sentiment stage failed (continuing without): %s", e)
 
-    # ── Represent ─────────────────────────────────────────────────────────
     with monitor.stage("represent"):
         top_terms = ctfidf_terms(units.texts, labels)
         tfidf_terms = tfidf_top_terms(units.texts, labels)
         word_freqs = word_frequencies(units.texts, labels)
 
-    # ── Label ─────────────────────────────────────────────────────────────
     with monitor.stage("label"):
         if label_clusters:
-            # The corpus profile picks the prompt unless the spec pins one.
-            # Before this, OllamaLabeler was constructed without a variant and
-            # silently fell back to "v1" — the DOCUMENT prompt — even for
-            # sentence-level runs, making "v2_mention" unreachable from the
-            # pipeline. The unit and the prompt must agree.
             labeler = OllamaLabeler(
                 model=spec.label_model,
                 prompt_variant=spec.prompt_variant or profile.label_prompt_variant,
@@ -200,7 +157,6 @@ def run_pipeline(
                 for cid in sorted(int(c) for c in set(labels) if c != -1)
             }
 
-    # ── Evaluate ──────────────────────────────────────────────────────────
     with monitor.stage("evaluate"):
         pipeline_s = sum(
             r["wall_s"] for n, r in monitor.records.items() if n != "label"
@@ -215,9 +171,7 @@ def run_pipeline(
             seed=seed,
         )
         if is_sentence:
-            # Mention-weighted entropy lets one rambling review dominate a
-            # cluster's star profile; recompute on distinct (review, cluster)
-            # pairs so Tier 3 counts customers, not sentences.
+            # Count each review once per cluster so verbosity cannot skew rating entropy.
             from ..core.metrics import compute_rating_entropy
 
             dstars, dlabels = _dedup_parent_stats(units.ids, units.stars, labels)
@@ -226,7 +180,6 @@ def run_pipeline(
         metrics["seed"] = seed
         metrics["unit"] = "sentence" if is_sentence else "document"
 
-    # ── Assemble artifacts ────────────────────────────────────────────────
     from ..data.segment import parent_id
 
     rng = np.random.default_rng(seed)
@@ -239,7 +192,6 @@ def run_pipeline(
         )
         cl = cluster_labels[cid]
         if is_sentence:
-            # Customers, not mentions: dedupe stars per parent review.
             by_parent: dict[str, float] = {}
             for i in np.flatnonzero(mask):
                 by_parent.setdefault(parent_id(units.ids[i]), float(units.stars[i]))
@@ -319,12 +271,6 @@ def cluster_labels_only(
     reviews: Optional[ReviewSet] = None,
     seed: Optional[int] = None,
 ) -> np.ndarray:
-    """
-    Embed (cached) + reduce + cluster for one seed, skipping viz projections,
-    representation, labeling and artifact writes. This is what the multi-seed
-    stability check needs — at 50k each skipped UMAP fit is minutes, so the
-    repeats must not pay for artifacts nobody reads.
-    """
     seed = cfg.seed if seed is None else seed
     if reviews is None:
         reviews = load_benchmark(cfg)
@@ -370,36 +316,21 @@ def cluster_labels_only(
     return labels
 
 
-# ── Variant internals ─────────────────────────────────────────────────────────
-
 def run_profile(cfg: PipelineConfig, spec: PipelineSpec):
-    """The :class:`~reviewscope_ml.core.corpus.CorpusProfile` governing a run.
-
-    ``spec.corpus_profile`` wins because the application cannot express its
-    corpus in ``cfg``: a project's slug is its own ``proj-<id>``. Falling back
-    to the slug keeps the research harness — whose filenames *are* the corpus
-    identity — behaving exactly as before.
-
-    This is the only place the profile is resolved, so the embedding
-    instruction and the label prompt can never come from different corpora.
-    """
     from ..core.corpus import profile_for
 
     return profile_for(spec.corpus_profile or cfg.corpus_slug)
 
 
 def _corpus_prefix(cfg: PipelineConfig) -> str:
-    """Cache namespace per corpus; hotels (the original benchmark) stays bare."""
     return "" if cfg.corpus_slug == "hotels" else f"{cfg.corpus_slug}__"
 
 
 def _unit_prefix(spec: PipelineSpec) -> str:
-    """Sentence-level arrays must never collide with document-level caches."""
     return "sent__" if spec.variant == "sentence_level" else ""
 
 
 def _seed_prefix(cfg: PipelineConfig, spec: PipelineSpec, seed: int, base: str = "") -> str:
-    """Distinct cache namespace for corpus + unit + non-default seeds."""
     ns = f"{_corpus_prefix(cfg)}{_unit_prefix(spec)}"
     return f"{ns}{base}" if seed == cfg.seed else f"{ns}s{seed}_{base}"
 
@@ -407,7 +338,6 @@ def _seed_prefix(cfg: PipelineConfig, spec: PipelineSpec, seed: int, base: str =
 def _dedup_parent_stats(
     ids: list[str], stars: np.ndarray, labels: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """One (star, label) pair per distinct (parent review, cluster)."""
     from ..data.segment import parent_id
 
     seen: set[tuple[str, int]] = set()
@@ -427,14 +357,6 @@ def _dedup_parent_stats(
 
 
 def _write_doc_membership(run_dir, segment_ids: list[str], labels: np.ndarray) -> None:
-    """
-    Per-review membership map for sentence-level runs:
-    ``{review_id: {"primary": cid, "clusters": {cid: share}, "n_segments": n}}``.
-
-    ``share`` is the fraction of the review's segments in that cluster; the
-    primary cluster (most segments, noise never wins over a real cluster) is
-    what the app's one-cluster-per-document field should use.
-    """
     from collections import Counter, defaultdict
 
     from ..data.segment import parent_id
@@ -480,18 +402,6 @@ def _reduce_cached(
 
 
 def _make_backend(spec: PipelineSpec, seed: int, n_units: int):
-    """
-    Build the clustering backend, resolving ``"auto"`` size parameters
-    against the actual number of clustered units.
-
-    HDBSCAN's min_cluster_size is an absolute count whose *meaning* is
-    relative to corpus size (see ``cluster.scaled_min_cluster_size``) —
-    "auto" keeps the notebook-decided behaviour at 5k and scales it to other
-    corpus sizes instead of silently reusing 5k-tuned absolutes. Explicit
-    numeric values are always respected. k for the partitioners is a topic
-    count, not a density parameter — more documents mean bigger topics, not
-    more topics — so it deliberately does not scale.
-    """
     from ..cluster import scaled_min_cluster_size, scaled_min_samples
 
     c = dict(spec.cluster)
@@ -499,25 +409,16 @@ def _make_backend(spec: PipelineSpec, seed: int, n_units: int):
         if c.get("min_cluster_size") == "auto":
             c["min_cluster_size"] = scaled_min_cluster_size(n_units)
         if c.get("min_samples") == "auto":
-            # 3:1 mcs:ms — the ratio notebook 06 selected (15:5) — but capped:
-            # ms is a smoothing knob, and letting it follow a corpus-scaled mcs
-            # collapsed the EuroParl 26k run to 2 clusters. See
-            # ``cluster.scaled_min_samples``.
             c["min_samples"] = scaled_min_samples(c["min_cluster_size"])
         return HDBSCANBackend(**c)
     if spec.variant == "flat_agglomerative":
         return AgglomerativeBackend(**c)
     if spec.variant == "two_stage":
         if c.get("micro_min_cluster_size") == "auto":
-            # Micro pass wants fine, pure clusters: 0.1% of units, floor 5
-            # (anchored to the 5k default micro_mcs=5).
             c["micro_min_cluster_size"] = scaled_min_cluster_size(
                 n_units, fraction=0.001, floor=5
             )
         if c.get("micro_min_samples") == "auto":
-            # Same smoothing cap as the flat path (the micro pass wants fine,
-            # pure clusters, so an unbounded ms defeats its whole purpose);
-            # ratio and floor stay the two-stage design's own 0.6 / 3.
             c["micro_min_samples"] = scaled_min_samples(
                 round(c["micro_min_cluster_size"] * 0.6), ratio=1, floor=3
             )
@@ -594,14 +495,6 @@ def _bertopic_fit(
     embeddings: np.ndarray,
     seed: int,
 ):
-    """
-    BERTopic with stock components, except a seeded UMAP (same defaults:
-    5d/nn15/min_dist 0.0/cosine). Embeddings are passed in pre-computed —
-    they ARE BERTopic's default model (MiniLM), just routed through our cache.
-    Labels/terms/metrics are then computed by the same downstream code as
-    every other variant, so the comparison measures the clustering, not
-    cosmetic differences in artifact assembly.
-    """
     from bertopic import BERTopic
     from umap import UMAP
 
@@ -624,7 +517,6 @@ def _bertopic_fit(
 def _log_to_results_csv(
     cfg: PipelineConfig, spec: PipelineSpec, embed_dim: int, embed_s: float, metrics: dict
 ) -> None:
-    """Append to the shared results.csv so notebook 07's comparison still works."""
     if spec.variant == "bertopic":
         algo, params = "bertopic_internal", spec.cluster
         reduction = {"reduction_method": "umap", "umap_n_components": 5,

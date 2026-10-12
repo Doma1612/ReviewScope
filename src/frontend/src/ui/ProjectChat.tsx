@@ -69,8 +69,7 @@ export function ProjectChat({ projectId, available, clusters }: { projectId: str
   const submit = async () => {
     const question = draft.trim();
     if (!question || pending || !available) return;
-    // Do not let a stale malformed response poison the next request's Pydantic
-    // history validation. Valid messages retain the full local conversation.
+    // Filter malformed history so it cannot fail validation of the next request.
     const history = messages.slice(-8).flatMap(({ role, content }) => typeof content === "string" ? [{ role, content }] : []);
     const next = [...messages, { role: "user" as const, content: question }, { role: "assistant" as const, content: "", sources: [], sourcesVisible: false }];
     const assistantIndex = next.length - 1;

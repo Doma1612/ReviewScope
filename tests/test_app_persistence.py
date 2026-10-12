@@ -32,11 +32,9 @@ class TestToRecords:
 
         assert result.project_id == "proj1"
         assert result.n_documents == 12
-        # first 5 docs -> cluster 0, next 4 -> cluster 1, last 3 -> noise (None)
         assert result.documents[0].cluster_id == 0
         assert result.documents[5].cluster_id == 1
         assert result.documents[-1].cluster_id is None
-        # raw_data carried through
         assert result.documents[0].raw_data["stars"] == 4
 
     def test_embedding_mapping(self, small_run):
@@ -47,7 +45,6 @@ class TestToRecords:
         rec = result.embeddings[2]
         assert rec.primary_key_value == small_run.doc_ids[2]
         assert rec.vector == [8.0, 9.0, 10.0, 11.0]
-        # 3-D UMAP coords drive x/y/z (coords_3d row 2 = [6,7,8])
         assert (rec.umap_x, rec.umap_y, rec.umap_z) == (6.0, 7.0, 8.0)
 
     def test_cluster_mapping(self, small_run):

@@ -18,7 +18,7 @@ def schema() -> UploadSchema:
     )
 
 
-LONG = "This hotel was genuinely lovely and the staff were helpful."  # > 10 chars
+LONG = "This hotel was genuinely lovely and the staff were helpful."
 
 
 def write_csv(path, rows, header=("review_id", "text", "stars")):
@@ -39,14 +39,13 @@ class TestCsvIngest:
         assert corpus.n_documents == 2
         assert corpus.reviews.ids == ["a", "b"]
         assert list(corpus.reviews.stars) == [5.0, 3.0]
-        # raw_data is type-coerced: stars stored as int, not "5"
         assert corpus.raw_rows[0]["stars"] == 5
         assert isinstance(corpus.raw_rows[0]["stars"], int)
 
     def test_short_documents_dropped(self, tmp_path):
         f = write_csv(tmp_path / "r.csv", [
             ("a", LONG, 5),
-            ("b", "short", 3),       # < 10 chars after strip
+            ("b", "short", 3),
         ])
         corpus = reviewset_from_upload(f, schema(), min_text_len=10)
         assert corpus.n_documents == 1
@@ -55,7 +54,7 @@ class TestCsvIngest:
     def test_duplicate_primary_key_deduped(self, tmp_path):
         f = write_csv(tmp_path / "r.csv", [
             ("a", LONG, 5),
-            ("a", LONG + " extra", 4),   # same PK -> dropped (keep first)
+            ("a", LONG + " extra", 4),
         ])
         corpus = reviewset_from_upload(f, schema(), min_text_len=10)
         assert corpus.n_documents == 1

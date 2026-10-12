@@ -1,26 +1,3 @@
-"""
-Three-tier clustering evaluation metrics.
-
-Tier 1 — Geometric (silhouette, Davies-Bouldin, Calinski-Harabasz):
-  Measured in UMAP/PCA space.  Fast, always available, but geometry-circular:
-  instruction models mechanically improve silhouette by reshaping the space,
-  and silhouette rewards fewer large blobs (often sentiment polarity rather
-  than thematic distinction).
-
-Tier 2 — Topic coherence (C_v via Gensim):
-  Measures whether the top words of each cluster co-occur in the corpus.
-  Computed from raw text, independent of embedding geometry, so it can
-  validate or contradict silhouette.  Requires gensim (optional dep).
-
-Tier 3 — Rating entropy:
-  Hotel reviews carry 1–5 star ratings.  A thematic cluster (e.g. "breakfast")
-  should attract reviews of all rating levels → high entropy.  A sentiment
-  cluster (e.g. "5-star enthusiasts") collapses to one rating level → low
-  entropy.  This distinguishes meaningful topic separation from polarity
-  separation, which is not useful for our NLP analysis goal.
-
-All notebooks call compute_metrics() so results are always comparable.
-"""
 from __future__ import annotations
 
 import re
@@ -41,31 +18,6 @@ def compute_metrics(
     silhouette_sample: int = 5_000,
     seed: int = 42,
 ) -> dict:
-    """
-    Compute a standard set of clustering quality metrics.
-
-    Parameters
-    ----------
-    reduced : np.ndarray, shape (n_docs, n_dims)
-        The dimensionality-reduced representation used for clustering
-        (UMAP or PCA output — NOT the raw embedding space).
-    labels : np.ndarray, shape (n_docs,)
-        Cluster label per document.  -1 means noise (HDBSCAN convention).
-        KMeans / Agglomerative produce no -1 labels.
-    runtime_s : float
-        Wall-clock time in seconds for the step that produced these labels
-        (embed + reduce + cluster, or whichever stages were timed).
-    silhouette_sample : int
-        Sub-sample cap for silhouette_score (O(n²) memory).
-    seed : int
-        Random seed for sub-sampling.
-
-    Returns
-    -------
-    dict with keys:
-        n_docs, n_clusters, noise_count, noise_ratio,
-        silhouette, davies_bouldin, calinski_harabasz, runtime_s
-    """
     n_docs = len(labels)
     noise_mask = labels == -1
     noise_count = int(noise_mask.sum())
@@ -83,7 +35,6 @@ def compute_metrics(
         X = reduced[valid_mask]
         y = valid_labels
 
-        # Sub-sample for silhouette (expensive at large n)
         n_sample = min(silhouette_sample, len(X))
         if n_sample < len(X):
             rng = np.random.default_rng(seed)
@@ -125,51 +76,19 @@ def compute_coherence(
     top_n: int = 10,
     coherence_type: str = "c_v",
 ) -> float | None:
-    """
-    Compute mean C_v topic coherence across all non-noise clusters.
-
-    C_v uses normalised pointwise mutual information (NPMI) between the top
-    words of each cluster and their co-occurrence in a sliding window over the
-    corpus.  Unlike silhouette, it is computed entirely from raw text — not
-    from the embedding geometry — so it provides an independent signal.
-
-    A high silhouette with low coherence indicates geometrically separated but
-    lexically fuzzy clusters (often sentiment blobs).  Both scores high is the
-    target for a meaningful topic model.
-
-    Parameters
-    ----------
-    texts : list[str]
-        The preprocessed review texts (same order as labels).
-    labels : np.ndarray
-        Cluster label per document; -1 = noise.
-    top_n : int
-        Number of top TF-IDF words to use as the topic representation per cluster.
-    coherence_type : str
-        Gensim coherence measure.  "c_v" (default) is the most commonly
-        reported in the topic modelling literature.
-
-    Returns
-    -------
-    float | None
-        Weighted-average C_v score (0–1, higher is better), or None if gensim
-        is not installed or fewer than 2 valid clusters exist.
-    """
     try:
         from gensim.corpora import Dictionary
         from gensim.models.coherencemodel import CoherenceModel
     except ImportError:
-        return None  # gensim is an optional dependency
+        return None
 
     valid_mask = labels != -1
     cluster_ids = sorted(set(labels[valid_mask]))
     if len(cluster_ids) < 2:
         return None
 
-    # Tokenise once for the whole corpus (gensim expects list-of-tokens)
     tokenized = [re.findall(r"[a-z]+", t.lower()) for t in texts]
 
-    # Extract top-N TF-IDF words per cluster as topic representation
     tfidf = TfidfVectorizer(max_features=20_000, stop_words="english")
     try:
         tfidf.fit(texts)
@@ -207,7 +126,6 @@ def compute_coherence(
             dictionary=dictionary,
             coherence=coherence_type,
         )
-        # Weighted average by cluster size so large clusters count more
         per_topic = cm.get_coherence_per_topic()
         total = sum(s * c for s, c in zip(per_topic, cluster_sizes))
         score = total / sum(cluster_sizes)
@@ -220,39 +138,6 @@ def compute_rating_entropy(
     stars: np.ndarray | list,
     labels: np.ndarray,
 ) -> float | None:
-    """
-    Compute mean normalised star-rating entropy across all non-noise clusters.
-
-    Why this matters
-    ----------------
-    A **thematic** cluster (e.g. "hotel breakfast quality") attracts reviews
-    from guests who loved or hated breakfast — so the 1–5 star distribution is
-    spread out → high entropy.
-
-    A **sentiment** cluster (e.g. "5-star fans") collapses almost entirely to
-    one rating level → low entropy.  Silhouette cannot distinguish these two
-    cases; rating entropy can.
-
-    Interpretation
-    --------------
-    Normalised entropy is bounded [0, 1]:
-    - > 0.85  → strongly thematic (star-rating-independent topic)
-    - 0.60–0.85 → mixed
-    - < 0.60  → dominated by a single rating level (sentiment blob)
-
-    Parameters
-    ----------
-    stars : array-like of float/int
-        Star rating (1–5) for each document (same order as labels).
-    labels : np.ndarray
-        Cluster label per document; -1 = noise.
-
-    Returns
-    -------
-    float | None
-        Weighted-average normalised entropy (0–1), or None if fewer than 2
-        valid clusters exist or star data is unavailable.
-    """
     from scipy.stats import entropy as scipy_entropy
 
     stars = np.asarray(stars, dtype=float)
@@ -261,7 +146,7 @@ def compute_rating_entropy(
     if len(cluster_ids) < 2:
         return None
 
-    MAX_ENTROPY = np.log(5)  # uniform distribution over 5 star values
+    MAX_ENTROPY = np.log(5)
     weighted_sum = 0.0
     total_docs = 0
 
@@ -272,7 +157,6 @@ def compute_rating_entropy(
         if len(cluster_stars) == 0:
             continue
 
-        # Count how many reviews per star value (1–5)
         counts = np.array([np.sum(cluster_stars == s) for s in range(1, 6)], dtype=float)
         if counts.sum() == 0:
             continue

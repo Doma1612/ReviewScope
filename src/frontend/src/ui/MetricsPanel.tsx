@@ -3,8 +3,6 @@ import { useState } from "react";
 
 import { api } from "../api";
 
-// Friendly labels for the run-level metric keys the ML harness emits. Unknown keys
-// fall back to their raw name so new metrics still show up.
 const LABELS: Record<string, string> = {
   silhouette: "Silhouette (excl. noise)",
   silhouette_incl_noise: "Silhouette (incl. noise)",
@@ -25,9 +23,6 @@ function formatValue(value: unknown): string | null {
   return null;
 }
 
-// R17 — collapsible "Clustering quality" panel surfacing the run-level report the
-// pipeline already computes (silhouette/coherence/rating-entropy/…). Hidden details
-// are fetched lazily on open. Real runs only — simulated runs have no real geometry.
 export function MetricsPanel({ projectId }: { projectId: string }) {
   const [open, setOpen] = useState(false);
   const metrics = useQuery({ queryKey: ["project-metrics", projectId], queryFn: () => api.projectMetrics(projectId), enabled: open });

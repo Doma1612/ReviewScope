@@ -1,42 +1,3 @@
-"""
-Embedding-model sweep: notebook 04's experiment, GPU-capable and unattended.
-
-Each registry candidate (``embed/models.py``) is evaluated under the FIXED
-downstream pipeline (UMAP 10d/nn15 + HDBSCAN with size-scaled parameters — the
-notebook 05/06 decisions) against identical corpus artifacts, so metric
-differences are attributable to the embedding model and to nothing else. The
-segmentation (regex splitter, <20 chars dropped, >600 hard-wrapped) is held
-constant across candidates for the same reason.
-
-Three-tier metrics + noise fairness per model, logged to results.csv (notebook
-07 keeps working) and ranked in a markdown report.
-
-What this module measures that the June version did not
--------------------------------------------------------
-- **Honest cost.** ``embed_with_cache`` returns 0.0 seconds on a cache hit, so
-  the old report printed "0.000" in its runtime column for every model that had
-  ever been run — unusable as evidence. Runtime and peak VRAM now come from
-  ``eval.cost_probe``: a fixed re-encoded probe on a single pinned device,
-  comparable across candidates whatever the cache holds.
-- **Instruction variants kept separate.** A candidate declaring
-  ``extra_instructions`` produces one row per slug. Instructions mechanically
-  reshape the space and inflate silhouette without moving coherence, so an
-  instructed and an uninstructed run are different contestants, never averaged.
-- **Stability.** Optional multi-seed ARI (``--stability-seeds``): a model whose
-  clusters reshuffle when the seed changes has not found stable structure.
-- **Provenance.** Every report carries the commit, config, unit and segmentation
-  parameters it was produced under, so a table can be traced back to a run.
-
-The ranking is a shortlist, not a verdict: instruction-tuned models inflate
-silhouette mechanically — read coherence and rating entropy before believing
-Tier 1, and confirm the finalist with the full pipeline comparison + human
-inspection.
-
-CLI::
-
-    python -m reviewscope_ml.eval.model_sweep --sample-size 5000 --device cuda \
-        --sentence-level
-"""
 from __future__ import annotations
 
 import logging
@@ -78,14 +39,6 @@ def sweep(
     stability_seeds: int = 1,
     tag: str = "",
 ) -> Path:
-    """Run the sweep; returns the path of the ranking report.
-
-    ``sentence_level=True`` evaluates the candidates on sentence segments
-    instead of whole reviews — short texts are a different embedding regime
-    (long-context advantages vanish, small models close the gap), so if the
-    sentence_level pipeline is a serious finalist, pick its model here, not
-    from the document-level ranking.
-    """
     models = models if models is not None else candidates()
     reviews = load_benchmark(cfg)
     if sentence_level:
@@ -114,8 +67,6 @@ def sweep(
 
     corpus = "" if cfg.corpus_slug == "hotels" else f"_{cfg.corpus_slug}"
     unit = "_sent" if sentence_level else ""
-    # A tagged run (e.g. a finalists-only stability pass) must not overwrite the
-    # full ranking table it was derived from.
     suffix = f"_{tag}" if tag else ""
     out = cfg.runs_dir / f"model_sweep_{cfg.sample_size}{corpus}{unit}{suffix}.md"
     out.write_text(_render(
@@ -131,10 +82,7 @@ def _evaluate_one(
     cfg, cand, instr, units, device, sentence_level,
     compute_coherence, probe_set, stability_seeds,
 ) -> dict:
-    """One (candidate, instruction) contestant end to end."""
     logger.info("=== %s (%dM, instr=%s) ===", cand.model, cand.params_m, instr)
-    # Instruction TEXT is corpus-specific ("Represent the hotel review…" would
-    # actively mislead on a parliamentary corpus); the slug that names it is not.
     profile = profile_for(cfg.corpus_slug)
     spec = PipelineSpec(
         variant="sentence_level" if sentence_level else "custom_hdbscan",
@@ -143,8 +91,7 @@ def _evaluate_one(
         cluster={"min_cluster_size": "auto", "min_samples": "auto"},
     )
 
-    # Cost probe first: on a cache hit the full encode never loads the model,
-    # so this is the only place a runtime/VRAM number can come from.
+    # Cache hits have no encode timing; measure cost with an uncached probe.
     probe = None
     if probe_set:
         from .cost_probe import probe_model
@@ -171,12 +118,11 @@ def _evaluate_one(
             prefix_extra="sent__" if sentence_level else "",
         )
     except Exception as e:
-        # Gated models without granted access, network failures: skip, don't die.
         logger.warning("SKIPPING %s (%s): %s", cand.model, instr, e)
         return {"model": cand.model, "instruction": instr,
                 "params_m": cand.params_m, "error": str(e)[:200]}
     finally:
-        embedder.close()  # one model on the GPU at a time, never two
+        embedder.close()
 
     reduced = _reduce_cached(cfg, spec, embeddings, cfg.seed)
     labels, _, _ = _cluster_cached(cfg, spec, reduced, cfg.seed)
@@ -185,8 +131,7 @@ def _evaluate_one(
         runtime_s=embed_s, compute_coh=compute_coherence, seed=cfg.seed,
     )
     if sentence_level:
-        # Customers, not mentions (same dedup as the pipeline runner): one
-        # verbose reviewer must not dominate a cluster's star profile.
+        # Deduplicate by review so verbose reviewers cannot dominate rating entropy.
         from ..core.metrics import compute_rating_entropy
         from ..pipelines.runner import _dedup_parent_stats
 
@@ -257,18 +202,7 @@ def _log_row(cfg, cand, instr, dim, embed_s, metrics) -> None:
 
 
 def _mean_ranks(scored: list[dict]) -> list[str]:
-    """Attach ``_mean_rank`` to each row: mean position across RANK_METRICS.
-
-    Returns the metrics that actually contributed, so the report can state
-    what the ranking was computed from instead of implying all four.
-
-    A metric **no** contestant has is skipped entirely rather than scored as a
-    tie at last place. Rating entropy is None for every row on a corpus with no
-    ratings (Europarl); ranking every row equally last on it would add the same
-    constant to every mean and dilute the three metrics that do discriminate,
-    while leaving a `mean rank` column that is not comparable to a sweep where
-    Tier 3 was available.
-    """
+    # Skip metrics unavailable for every candidate; ranking them as ties dilutes the score.
     used = [m for m in RANK_METRICS if any(r.get(m) is not None for r in scored)]
     for metric in used:
         have = [r for r in scored if r.get(metric) is not None]
@@ -440,8 +374,6 @@ if __name__ == "__main__":
             raise SystemExit(f"no registry model matches {args.models}; "
                              f"registry: {[c.model for c in CANDIDATES]}")
 
-    # Unit and corpus in the log name too: a sentence sweep must not overwrite
-    # the document sweep's log for the same sample size.
     corpus_tag = "" if cfg.corpus_slug == "hotels" else f"_{cfg.corpus_slug}"
     unit_tag = "_sent" if args.sentence_level else ""
     name_tag = f"_{args.tag}" if args.tag else ""

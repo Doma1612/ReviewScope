@@ -8,8 +8,6 @@ export type Project = {
   created_at: string;
   role: "owner" | "viewer";
   last_error: string | null;
-  // "document" = one cluster per review (frozen/read-only); "sentence" = segment
-  // (mention) level, a review maps to several clusters and editing is enabled.
   unit: "document" | "sentence";
   retrieval_ready: boolean;
 };
@@ -22,8 +20,7 @@ export type PipelineStatus = {
 
 export type EmbeddingPoint = {
   document_id: string;
-  // Set for sentence-unit projects, where a point is a mention (segment) and
-  // document_id is the parent review. Null for document-unit projects.
+  // Sentence points identify a segment; document_id identifies its parent review.
   segment_id: string | null;
   cluster_id: string | null;
   x: number;
@@ -41,8 +38,8 @@ export type Cluster = {
   label_source: string;
   top_terms: { term: string; score: number }[];
   word_frequencies: Record<string, number>;
-  size: number;         // distinct parent reviews
-  n_mentions: number;   // segment mentions (== size for document unit)
+  size: number; // distinct parent reviews
+  n_mentions: number; // segment mentions (equal to size for document runs)
   sentiment_avg: number | null;
   sentiment_count: number;
   mean_stars: number | null;
@@ -106,7 +103,6 @@ export type DocumentItem = {
   raw_data: Record<string, unknown>;
   cluster_id: string | null;
   sentiment_score: number | null;
-  // Sentence-unit only: the clusters this review's mentions fall into.
   memberships?: ClusterMembership[];
   primary_cluster_id?: string | null;
 };
@@ -266,8 +262,6 @@ function processProjectChatEvent(line: string, handlers: ProjectChatStreamHandle
   const event = JSON.parse(line) as { type: string; sources?: ProjectChatSource[]; content?: unknown; model?: string; message?: string };
   if (event.type === "sources") handlers.onSources?.(event.sources ?? []);
   else if (event.type === "token") {
-    // Accept the current string protocol and the nested shape emitted by older
-    // development containers, but never stringify an unexpected object into chat.
     const content = projectTokenText(event.content);
     if (content == null) handlers.onError?.("The chat server returned an invalid response token.");
     else handlers.onToken?.(content);
@@ -315,12 +309,10 @@ export const api = {
     requestNdjson(`/api/projects/${projectId}/clusters/${clusterId}/chat/stream`, { method: "POST", body: JSON.stringify({ message, history, active_source_ids: activeSourceIds, last_tool_state: lastToolState }) }, handlers),
   projectChatStream: (projectId: string, message: string, history: ChatMessage[], handlers: ProjectChatStreamHandlers) =>
     requestProjectChatNdjson(`/api/projects/${projectId}/chat/stream`, { method: "POST", body: JSON.stringify({ message, history }) }, handlers),
-  // Move all of a review's mentions to one cluster (sentence-unit "move all").
   reassignReview: (projectId: string, documentId: string, clusterId: string | null) =>
     request<DocumentItem>(`/api/projects/${projectId}/documents/${documentId}`, { method: "PATCH", body: JSON.stringify({ cluster_id: clusterId }) }),
   bulkReassign: (projectId: string, documentIds: string[], clusterId: string | null) =>
     request<{ moved: number }>(`/api/projects/${projectId}/documents/reassign`, { method: "POST", body: JSON.stringify({ document_ids: documentIds, cluster_id: clusterId }) }),
-  // Segment-level (mention) edits.
   reassignSegment: (projectId: string, segmentId: string, clusterId: string | null) =>
     request<EmbeddingPoint>(`/api/projects/${projectId}/segments/${segmentId}`, { method: "PATCH", body: JSON.stringify({ cluster_id: clusterId }) }),
   bulkReassignSegments: (projectId: string, segmentIds: string[], clusterId: string | null) =>

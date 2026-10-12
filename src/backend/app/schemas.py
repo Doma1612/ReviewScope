@@ -35,8 +35,6 @@ class ProjectRead(BaseModel):
     created_at: datetime
     role: ProjectRole
     last_error: str | None = None
-    # "document" (one cluster per review; frozen/read-only) or "sentence"
-    # (segment-level; a review maps to several clusters; editable).
     unit: str = "document"
     retrieval_ready: bool = False
 
@@ -45,8 +43,6 @@ class ProjectUpdate(BaseModel):
     name: str
 
 
-# Column types the upload step and the editable schema both accept. Kept here
-# (not in ml_mapping) so validation stays free of the heavy ML import.
 ALLOWED_COLUMN_TYPES = ("text", "integer", "float", "date", "boolean")
 
 
@@ -64,8 +60,7 @@ class SchemaColumn(BaseModel):
 
 
 class ProjectSchemaRead(BaseModel):
-    # Reflects the stored columns verbatim (which may predate this schema's
-    # validation), so the read side stays tolerant rather than re-validating.
+    # Read legacy stored schemas without imposing current write-side validation.
     columns: list[dict[str, Any]]
 
 
@@ -97,9 +92,7 @@ class PipelineStatusRead(BaseModel):
 
 
 class EmbeddingPoint(BaseModel):
-    # For sentence-unit projects a point is a segment (mention): `segment_id` is set
-    # and `document_id` is the parent review. For document-unit projects `segment_id`
-    # is None and `document_id` is the point.
+    # Sentence points identify a segment; document_id identifies its parent review.
     document_id: uuid.UUID
     segment_id: uuid.UUID | None = None
     cluster_id: uuid.UUID | None
@@ -113,7 +106,6 @@ class EmbeddingPoint(BaseModel):
 
 
 class EmbeddingStats(BaseModel):
-    # Honest totals for a (possibly sampled) scatter fetch.
     total: int
     noise: int
 
@@ -126,7 +118,7 @@ class ClusterRead(BaseModel):
     top_terms: list[dict[str, Any]]
     word_frequencies: dict[str, Any]
     size: int              # distinct parent reviews
-    n_mentions: int = 0    # segment mentions (== size for document unit)
+    n_mentions: int = 0    # segment mentions (equal to size for document runs)
     sentiment_avg: float | None = None
     sentiment_count: int = 0
     mean_stars: float | None = None
@@ -195,8 +187,6 @@ class DocumentRead(BaseModel):
     raw_data: dict[str, Any]
     cluster_id: uuid.UUID | None
     sentiment_score: float | None = None
-    # Sentence-unit only: the clusters this review's mentions fall into (empty for
-    # document-unit projects). primary_cluster_id == cluster_id (the plurality one).
     memberships: list[ClusterMembership] = []
     primary_cluster_id: uuid.UUID | None = None
 
@@ -222,7 +212,7 @@ class ClusterEditRead(BaseModel):
 
 class BulkReassign(BaseModel):
     document_ids: list[uuid.UUID]
-    cluster_id: uuid.UUID | None = None  # None = move to noise
+    cluster_id: uuid.UUID | None = None  # None means noise
 
 
 class BulkReassignResult(BaseModel):
@@ -234,8 +224,6 @@ class DocumentCount(BaseModel):
 
 
 class ProjectMetricsRead(BaseModel):
-    # Run-level clustering-quality report; None for simulated runs. `stale` is true
-    # when manual edits postdate the run, so the figures reflect the original run.
     metrics: dict[str, Any] | None = None
     computed_at: datetime | None = None
     stale: bool = False
@@ -251,7 +239,7 @@ class ClusterMerge(BaseModel):
 
 
 class SegmentReassign(BaseModel):
-    cluster_id: uuid.UUID | None = None  # None = move mention to noise
+    cluster_id: uuid.UUID | None = None  # None means noise
 
 
 class BulkSegmentReassign(BaseModel):
@@ -265,7 +253,7 @@ class ClusterFromSegments(BaseModel):
 
 
 class ReviewReassign(BaseModel):
-    cluster_id: uuid.UUID | None = None  # move all of a review's mentions
+    cluster_id: uuid.UUID | None = None
 
 
 class ClusterUpdate(BaseModel):

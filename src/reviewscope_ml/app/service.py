@@ -1,18 +1,3 @@
-"""
-Application service — the one function the backend's Celery worker calls.
-
-``run_from_upload`` is the full path: ingest an uploaded file (steps 1-2),
-run the frozen pipeline (steps 3-7), map the result to DB records (step 8),
-reporting progress to the supplied :class:`ProgressSink` throughout.
-``run_project_pipeline`` is the same minus ingest, for callers that already
-hold an :class:`UploadedCorpus`.
-
-Everything heavy is delegated to the existing
-:func:`reviewscope_ml.pipelines.runner.run_pipeline`; this module only adapts
-its input (arbitrary upload instead of the Yelp benchmark), surfaces the
-embedding vectors for pgvector, and translates stage transitions into the
-app's eight-step progress vocabulary.
-"""
 from __future__ import annotations
 
 import re
@@ -49,16 +34,6 @@ def run_from_upload(
     corpus_profile: str | None = None,
     force: bool = False,
 ) -> RunResult:
-    """Ingest an uploaded file and run the full pipeline -> persistence DTOs.
-
-    ``label_prompt`` / ``summary_prompt`` are the per-project prompt override:
-    supply both to replace the corpus profile's prompt for this project only.
-    The text is hashed into every cluster label (``ClusterInfo.prompt_hash``),
-    so a run stays traceable to the exact prompt that produced it.
-
-    Raises :class:`~reviewscope_ml.app.ingest_upload.IngestError` if the file
-    fails schema validation (the backend maps that to a 4xx + failed status).
-    """
     progress = progress or NullProgress()
     progress.step("Ingest", "running", index=1, total=TOTAL_STEPS)
     corpus = reviewset_from_upload(file_path, schema, min_text_len=min_text_len)
@@ -90,25 +65,12 @@ def run_project_pipeline(
     corpus_profile: str | None = None,
     force: bool = False,
 ) -> RunResult:
-    """Run the frozen pipeline on an already-ingested corpus -> persistence DTOs.
-
-    ``force`` recomputes even when the project's run directory is already
-    complete. A project's run name is fixed (``proj-<id>__<variant>``), so
-    without it a re-run reloads the previous artifacts and silently ignores
-    any changed parameters — which is never what an application re-run means.
-    Stage caches (embeddings, UMAP, sentiment) still hit, so forcing is cheap.
-    """
     progress = progress or NullProgress()
     spec = spec or app_default_spec()
-    # Per-project prompt override. Only applied when BOTH texts are supplied:
-    # a label prompt paired with a mismatched summary prompt is worse than the
-    # profile default, so a half-filled override is ignored rather than merged.
+    # Apply prompt overrides as a pair so label and summary contexts cannot disagree.
     if label_prompt and summary_prompt:
         spec = replace(spec, label_prompt=label_prompt, summary_prompt=summary_prompt)
-    # Which corpus the prompts and embedding instruction should describe. A
-    # project's own slug is ``proj-<id>``, which resolves to NEUTRAL ("documents"),
-    # so without this every upload is described to the LLM as a generic document
-    # set regardless of what it holds.
+    # Project cache slugs are not corpus identities; pass the profile explicitly.
     if corpus_profile:
         spec = replace(spec, corpus_profile=corpus_profile)
     if corpus.n_documents == 0:
@@ -136,9 +98,7 @@ def run_project_pipeline(
         force=force,
     )
 
-    # Reload the clustered-unit embeddings the embed stage cached. For sentence
-    # runs the units are segments (not reviews), so key on the unit count and the
-    # sent__ namespace — matching embed_with_cache — not corpus.n_documents.
+    # Match the sentence-unit cache namespace and segment count, not the review count.
     unit = str(artifacts.manifest.get("unit", "document"))
     embeddings = load_run_embeddings(
         cfg, spec, len(artifacts.doc_ids), sentence=(unit == "sentence")
@@ -150,16 +110,8 @@ def run_project_pipeline(
     return result
 
 
-# ── Per-project config / cache plumbing ───────────────────────────────────────
-
 def project_corpus_token(project_id: str) -> str:
-    """Filesystem- and cache-safe corpus token for a project.
-
-    Underscore-free (only ``[a-z0-9-]``) so ``PipelineConfig.corpus_slug`` —
-    which splits the benchmark filename on the last underscore — round-trips it
-    cleanly. Never equals 'hotels', so project caches never collide with the
-    research benchmark's.
-    """
+    # Project tokens must be underscore-free for corpus_slug to round-trip.
     safe = re.sub(r"[^a-z0-9]+", "-", project_id.lower()).strip("-") or "x"
     return f"proj-{safe}"
 
@@ -167,12 +119,6 @@ def project_corpus_token(project_id: str) -> str:
 def project_config(
     project_id: str, *, n_docs: int, device: str = "cpu", seed: int = 42
 ) -> PipelineConfig:
-    """A PipelineConfig whose caches and run directory are namespaced per project.
-
-    ``data_file`` is synthetic — the pipeline receives its data in memory, so
-    the file is never read; it exists only to give ``corpus_slug`` a unique,
-    stable value that keys every cached artifact to this project.
-    """
     token = project_corpus_token(project_id)
     return load_config(
         sample_size=n_docs,
@@ -185,13 +131,6 @@ def project_config(
 def load_run_embeddings(
     cfg: PipelineConfig, spec: PipelineSpec, n_units: int, *, sentence: bool = False
 ) -> np.ndarray:
-    """Reload the embedding matrix the run just cached (no recompute, no model load).
-
-    Mirrors ``embed.embed_with_cache``'s key exactly: sentence-unit runs namespace
-    with ``sent__`` and key on the SEGMENT count, document runs use the bare prefix
-    and the review count. ``n_units`` is therefore the number of clustered units
-    (``len(artifacts.doc_ids)``) — segments for sentence, reviews for document.
-    """
     corpus = cfg.corpus_slug
     prefix = ("" if corpus == "hotels" else f"{corpus}__") + ("sent__" if sentence else "")
     path = embedding_path(

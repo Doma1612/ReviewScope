@@ -1,14 +1,3 @@
-"""Replay-logic tests for the re-run survival service (services/replay.py).
-
-No real DB / ML stack (sklearn is absent from the backend venv): replay is plain
-sync code, so a fake ``Session`` that serves the three entity ``select``s from
-in-memory lists and records ``add``/``delete`` exercises it directly.
-``_recompute_clusters_sync`` is monkeypatched to record affected ids (the
-aggregation itself is covered by tests/test_recompute.py), mirroring
-tests/test_cluster_crud.py.
-
-Run from the backend dir:  python -m pytest tests/test_replay.py
-"""
 from __future__ import annotations
 
 import os
@@ -25,14 +14,12 @@ os.environ.setdefault("SYNC_DATABASE_URL", "postgresql+psycopg://u:p@localhost:5
 os.environ.setdefault("SIMULATE_ML", "true")
 os.environ.setdefault("UPLOAD_DIR", tempfile.mkdtemp(prefix="reviewscope-test-uploads-"))
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/backend on path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.models import Cluster, ClusterEdit, Document  # noqa: E402
 from app.services import replay as replay_mod  # noqa: E402
 from app.services.replay import MembershipSnapshot, replay_edits, snapshot_membership  # noqa: E402
 
-
-# ── Fakes ──────────────────────────────────────────────────────────────────────
 
 class _FakeResult:
     def __init__(self, items):
@@ -46,7 +33,6 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """Serves entity selects from in-memory lists; records add/delete/flush."""
 
     def __init__(self, *, docs=None, clusters=None, edits=None):
         self._docs = docs or []
@@ -58,7 +44,7 @@ class _FakeSession:
 
     def execute(self, stmt):
         descs = stmt.column_descriptions
-        if len(descs) >= 2:  # snapshot tuple query: (id, primary_key_value, cluster_id)
+        if len(descs) >= 2:
             return _FakeResult([(d.id, d.primary_key_value, d.cluster_id) for d in self._docs])
         entity = descs[0]["entity"]
         if entity is Document:
@@ -90,7 +76,6 @@ class _FakeSession:
 
 @pytest.fixture(autouse=True)
 def _stub_recompute(monkeypatch):
-    """Record the ids replay asks to recompute instead of touching the ML stack."""
     calls: list = []
 
     def _fake(session, project_id, cluster_ids):
@@ -99,8 +84,6 @@ def _stub_recompute(monkeypatch):
     monkeypatch.setattr(replay_mod, "_recompute_clusters_sync", _fake)
     return calls
 
-
-# ── Builders ────────────────────────────────────────────────────────────────────
 
 def _doc(pid, pk, cluster_id):
     return Document(id=uuid.uuid4(), project_id=pid, primary_key_value=pk, text="t", raw_data={}, cluster_id=cluster_id)
@@ -118,15 +101,10 @@ def _new_cluster(session):
     return next(c for c in session.added if isinstance(c, Cluster))
 
 
-# ── Acceptance scenario: reassign + rename survive a re-run ──────────────────────
-
 def test_reassign_and_rename_survive_rerun(_stub_recompute):
-    """The B6 acceptance test: reassign a doc + rename a cluster, then re-run."""
     pid = uuid.uuid4()
     a_old, b_old = uuid.uuid4(), uuid.uuid4()
-    # Old doc UUIDs, keyed to stable primary keys "1".."5".
     old_doc_ids = {pk: uuid.uuid4() for pk in ("1", "2", "3", "4", "5")}
-    # Membership as the human left it: doc "1" was moved out of A into B.
     snapshot = MembershipSnapshot(
         doc_pk_by_id={str(did): pk for pk, did in old_doc_ids.items()},
         cluster_members={a_old: ["2", "3"], b_old: ["4", "5", "1"]},
@@ -136,7 +114,6 @@ def test_reassign_and_rename_survive_rerun(_stub_recompute):
         _edit(pid, "rename_label", cluster_id=a_old, new_label="My Theme"),
     ]
 
-    # Fresh run re-clusters from scratch, ignoring the human edits: "1" back in A.
     a_new, b_new = uuid.uuid4(), uuid.uuid4()
     fresh_docs = {
         "1": _doc(pid, "1", a_new), "2": _doc(pid, "2", a_new), "3": _doc(pid, "3", a_new),
@@ -147,15 +124,10 @@ def test_reassign_and_rename_survive_rerun(_stub_recompute):
 
     replay_edits(session, pid, snapshot)
 
-    # The human label landed on the new cluster that holds A's old members.
     assert a.label == "My Theme" and a.label_source == "hitl_override"
-    # The reassigned doc lands back in B (plurality of B's old members).
     assert fresh_docs["1"].cluster_id == b_new
-    # Both touched clusters were recomputed.
     assert _stub_recompute[0][1] == {a_new, b_new}
 
-
-# ── Human-created clusters are recreated ─────────────────────────────────────────
 
 def test_create_from_selection_recreated(_stub_recompute):
     pid = uuid.uuid4()
@@ -174,11 +146,8 @@ def test_create_from_selection_recreated(_stub_recompute):
     created = _new_cluster(session)
     assert created.label == "Human" and created.label_source == "hitl_override"
     assert fresh["1"].cluster_id == created.id and fresh["2"].cluster_id == created.id
-    # New cluster + the docs' previous owner are recomputed.
     assert _stub_recompute[0][1] == {created.id, x}
 
-
-# ── Merge survives ───────────────────────────────────────────────────────────────
 
 def test_merge_survives(_stub_recompute):
     pid = uuid.uuid4()
@@ -193,12 +162,10 @@ def test_merge_survives(_stub_recompute):
 
     replay_edits(session, pid, snapshot)
 
-    assert fresh["1"].cluster_id == b_new  # moved into the merge target
-    assert a in session.deleted  # source cluster removed
+    assert fresh["1"].cluster_id == b_new
+    assert a in session.deleted
     assert _stub_recompute[0][1] == {b_new}
 
-
-# ── Junk survives (docs → noise, cluster removed) ────────────────────────────────
 
 def test_mark_junk_survives(_stub_recompute):
     pid = uuid.uuid4()
@@ -217,8 +184,6 @@ def test_mark_junk_survives(_stub_recompute):
     assert a in session.deleted
 
 
-# ── approve_label stamps the resolved cluster ────────────────────────────────────
-
 def test_approve_label_survives(_stub_recompute):
     pid = uuid.uuid4()
     c_old = uuid.uuid4()
@@ -235,11 +200,9 @@ def test_approve_label_survives(_stub_recompute):
     assert a.label_source == "hitl_approved"
 
 
-# ── Unresolvable edits are skipped without error ─────────────────────────────────
-
 def test_unresolvable_edits_skipped(_stub_recompute):
     pid = uuid.uuid4()
-    gone = uuid.uuid4()  # old cluster whose members are all noise / absent now
+    gone = uuid.uuid4()
     snapshot = MembershipSnapshot(doc_pk_by_id={}, cluster_members={gone: ["99"]})
     edits = [
         _edit(pid, "rename_label", cluster_id=gone, new_label="orphan"),
@@ -251,13 +214,11 @@ def test_unresolvable_edits_skipped(_stub_recompute):
     a = _cluster(a_new, pid, "auto")
     session = _FakeSession(docs=list(fresh.values()), clusters=[a], edits=edits)
 
-    replay_edits(session, pid, snapshot)  # must not raise
+    replay_edits(session, pid, snapshot)
 
-    assert a.label == "auto"  # untouched
+    assert a.label == "auto"
     assert fresh["1"].cluster_id == a_new
 
-
-# ── snapshot_membership ──────────────────────────────────────────────────────────
 
 def test_snapshot_membership_builds_maps(_stub_recompute):
     pid = uuid.uuid4()
@@ -268,7 +229,7 @@ def test_snapshot_membership_builds_maps(_stub_recompute):
     snap = snapshot_membership(session, pid)
 
     assert snap.doc_pk_by_id == {str(d1.id): "1", str(d2.id): "2", str(d3.id): "3"}
-    assert snap.cluster_members == {c1: ["1", "2"]}  # noise (None) excluded
+    assert snap.cluster_members == {c1: ["1", "2"]}
 
 
 if __name__ == "__main__":

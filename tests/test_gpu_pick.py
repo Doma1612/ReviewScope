@@ -9,7 +9,6 @@ def gpu(index, used_mb, util=0):
 
 
 class TestPickIdleGpus:
-    # The usual box state: other groups on 0 and 1, 2 and 3 idle.
     BOX = [gpu(0, 5_000), gpu(1, 3_200), gpu(2, 143), gpu(3, 200)]
 
     def test_busy_devices_never_claimed(self):
@@ -24,7 +23,7 @@ class TestPickIdleGpus:
         assert len(pick_idle_gpus(idle_box, max_gpus=2)) == 2
 
     def test_emptiest_first(self):
-        assert pick_idle_gpus(self.BOX, max_gpus=None)[0] == 2  # 143 < 200 used
+        assert pick_idle_gpus(self.BOX, max_gpus=None)[0] == 2
 
     def test_utilization_counts_as_busy(self):
         box = [gpu(0, 150, util=80), gpu(1, 150)]
@@ -42,7 +41,7 @@ class TestGpuClaim:
     def test_multi_claim_properties(self):
         c = GpuClaim([2, 3], "test")
         assert c.device == "cuda"
-        assert c.gpu_id == 2  # first device, single-GPU compat
+        assert c.gpu_id == 2
 
     def test_empty_claim_is_cpu(self):
         c = GpuClaim([], "fallback")

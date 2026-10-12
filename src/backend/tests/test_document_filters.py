@@ -1,11 +1,3 @@
-"""Parsing tests for the document facet-filter helper (api/projects.py).
-
-No DB: ``_document_filter_conditions`` turns a JSON facet spec into a list of
-SQLAlchemy WHERE clauses, so we assert how many clauses it builds (and that bad
-input is ignored) without executing them.
-
-Run from the backend dir:  python -m pytest tests/test_document_filters.py
-"""
 from __future__ import annotations
 
 import json
@@ -20,7 +12,7 @@ os.environ.setdefault("SYNC_DATABASE_URL", "postgresql+psycopg://u:p@localhost:5
 os.environ.setdefault("SIMULATE_ML", "true")
 os.environ.setdefault("UPLOAD_DIR", tempfile.mkdtemp(prefix="reviewscope-test-uploads-"))
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/backend on path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.api.projects import _document_filter_conditions  # noqa: E402
 
@@ -47,8 +39,8 @@ def test_valid_specs_build_one_condition_each():
 
 def test_empty_value_and_missing_column_skipped():
     specs = [
-        {"column": "rating", "op": "gte", "value": "", "type": "integer"},  # blank value
-        {"op": "eq", "value": "x"},                                          # no column
-        {"column": "rating", "op": "gte", "value": "not-a-number", "type": "float"},  # bad numeric
+        {"column": "rating", "op": "gte", "value": "", "type": "integer"},
+        {"op": "eq", "value": "x"},
+        {"column": "rating", "op": "gte", "value": "not-a-number", "type": "float"},
     ]
     assert _document_filter_conditions(json.dumps(specs)) == []

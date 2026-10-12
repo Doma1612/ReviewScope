@@ -15,13 +15,13 @@ class TestSplitSentences:
         assert out == [
             "The room was spotless and quiet.",
             "Breakfast was cold every day!",
-        ]  # "Would I return?" and "Maybe." are under min_chars
+        ]
 
     def test_short_fragments_dropped(self):
         assert split_sentences("Great! Loved it. Wow.") == []
 
     def test_long_sentence_hard_wrapped(self):
-        text = "word " * 300  # 1500 chars, no terminator
+        text = "word " * 300
         out = split_sentences(text)
         assert len(out) > 1
         assert all(len(s) <= 600 for s in out)
@@ -58,9 +58,8 @@ class TestDedupParentStats:
     def test_one_pair_per_review_and_cluster(self):
         ids = ["rA#0", "rA#1", "rA#2", "rB#0"]
         stars = np.array([5.0, 5.0, 5.0, 1.0])
-        labels = np.array([0, 0, 1, 0])  # rA mentions cluster 0 twice
+        labels = np.array([0, 0, 1, 0])
         dstars, dlabels = _dedup_parent_stats(ids, stars, labels)
-        # (rA,0), (rA,1), (rB,0) — the duplicate (rA,0) collapsed
         assert len(dstars) == 3
         assert (dlabels == 0).sum() == 2
 
@@ -96,6 +95,5 @@ class TestModelRegistry:
 
         names = [c.model for c in CANDIDATES]
         assert len(names) == len(set(names))
-        # everything in the registry must fit the 6 GB Pascal VRAM slice
         assert all(c.params_m <= 700 for c in CANDIDATES)
         assert all(not c.gated for c in candidates(include_gated=False))

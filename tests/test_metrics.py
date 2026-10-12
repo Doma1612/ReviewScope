@@ -32,14 +32,14 @@ class TestComputeMetricsEdgeCases:
         labels_noisy[:5] = -1
         m = compute_metrics(X, labels_noisy, runtime_s=0.0)
         assert m["noise_count"] == 5
-        assert m["silhouette"] > 0.8  # computed on the clean remainder
+        assert m["silhouette"] > 0.8
 
 
 class TestRatingEntropy:
     def test_thematic_high_sentiment_low(self):
         labels = np.array([0] * 50 + [1] * 50)
-        mixed = np.tile([1, 2, 3, 4, 5], 20)          # both clusters mixed
-        polar = np.array([5.0] * 50 + [1.0] * 50)     # clusters = star levels
+        mixed = np.tile([1, 2, 3, 4, 5], 20)
+        polar = np.array([5.0] * 50 + [1.0] * 50)
         assert compute_rating_entropy(mixed, labels) > 0.9
         assert compute_rating_entropy(polar, labels) < 0.1
 
@@ -55,7 +55,6 @@ class TestEvaluateLabels:
         m = evaluate_labels(X, noisy, ["a b"] * len(noisy), None, compute_coh=False)
         assert m["silhouette"] is not None
         assert m["silhouette_incl_noise"] is not None
-        # the pseudo-cluster of scattered noise must hurt the score
         assert m["silhouette_incl_noise"] < m["silhouette"]
 
     def test_partitioner_silhouettes_match(self):
@@ -71,7 +70,7 @@ class TestStabilityARI:
 
     def test_permuted_labels_still_score_one(self):
         a = np.array([0, 0, 1, 1, 2, 2])
-        b = np.array([2, 2, 0, 0, 1, 1])  # same partition, renamed
+        b = np.array([2, 2, 0, 0, 1, 1])
         assert stability_ari([a, b])["ari_mean"] == 1.0
 
     def test_single_run_returns_none(self):

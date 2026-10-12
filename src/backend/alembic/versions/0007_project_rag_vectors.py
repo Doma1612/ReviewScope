@@ -3,10 +3,6 @@
 Revision ID: 0007_project_rag_vectors
 Revises: 0006_segments
 Create Date: 2026-09-20
-
-The legacy JSONB vectors remain intact. Existing projects have no reliable
-embedding provenance, so they are not backfilled and must be reprocessed before
-semantic project chat is enabled.
 """
 from alembic import op
 import sqlalchemy as sa

@@ -1,16 +1,3 @@
-"""Recompute a cluster's aggregates from its current membership.
-
-"Append + derive, don't patch": rather than incrementally
-nudging a cluster's stored stats on every move, we recompute them from the
-documents currently assigned to it, so the app and the notebook agree. The
-``top_terms`` / ``word_frequencies`` reuse the very functions the pipeline uses
-(:mod:`reviewscope_ml.represent.terms`); those are imported lazily so this module
-stays free of the heavy ML deps at import time (the backend venv has no sklearn).
-
-The simple numeric aggregates (``size`` / ``sentiment_avg`` / ``mean_stars``) are
-factored into pure helpers below so they can be unit-tested without a database or
-the ML stack — see ``tests/test_recompute.py``.
-"""
 from __future__ import annotations
 
 import uuid
@@ -27,14 +14,7 @@ from app.models import Cluster, Document, Embedding, Project, ProjectSchema, Seg
 from app.services.metrics import cohesion_score
 
 
-# ── Pure aggregate helpers (no DB, no ML deps) ─────────────────────────────────
-
 def _parse_rating(raw_data: dict[str, Any] | None, rating_col: str | None) -> float | None:
-    """Pull a numeric rating out of a document's ``raw_data``.
-
-    Ratings live in the original upload columns, so the value may be a string
-    ("4") or genuinely absent. Returns ``None`` for anything non-numeric (booleans
-    included — ``True`` is not a 1-star rating)."""
     if not raw_data or not rating_col:
         return None
     value = raw_data.get(rating_col)
@@ -54,10 +34,6 @@ def numeric_aggregates(
     sentiment_scores: list[float | None],
     ratings: list[float | None],
 ) -> dict[str, Any]:
-    """``size`` / ``sentiment_avg`` / ``mean_stars`` for one cluster's members.
-
-    ``size`` is the member count (one entry per doc, ``None`` allowed); the means
-    ignore ``None`` and are themselves ``None`` when nothing numeric remains."""
     sentiments = [s for s in sentiment_scores if s is not None]
     stars = [r for r in ratings if r is not None]
     return {
@@ -72,13 +48,7 @@ def segment_aggregates(
     sentiment_scores: list[float | None],
     ratings_by_document: dict[Any, float | None],
 ) -> dict[str, Any]:
-    """Aggregates for a sentence-unit cluster from its member *segments*.
-
-    ``size`` is the count of distinct parent reviews (the headline "customers"
-    number); ``n_mentions`` is the raw segment count. ``sentiment_avg`` is over
-    every segment, but ``mean_stars`` is deduped to one rating per distinct review
-    so a rambling multi-segment review can't dominate the star profile (mirrors the
-    runner's ``_dedup_parent_stats``)."""
+    # Deduplicate review ratings so multi-segment reviews cannot dominate mean_stars.
     distinct = list(dict.fromkeys(document_ids))
     sentiments = [s for s in sentiment_scores if s is not None]
     stars = [ratings_by_document[d] for d in distinct if ratings_by_document.get(d) is not None]
@@ -94,11 +64,6 @@ _STOPWORDS = {"the", "and", "for", "with", "that", "this", "from", "are", "was",
 
 
 def _simple_terms(texts: list[str]) -> tuple[list[dict], dict]:
-    """Lightweight bag-of-words terms — the sim-mode fallback for the c-TF-IDF path.
-
-    Mirrors the simulated pipeline's tokenizer (``tasks._terms``) so an edited
-    cluster's ``top_terms`` / ``word_frequencies`` keep the same shape and feel as
-    the ones the simulated run produced, without importing the heavy ML stack."""
     counter: Counter = Counter()
     for text in texts:
         words = [word.strip(".,!?;:()[]{}\"'").lower() for word in text.split()]
@@ -109,12 +74,6 @@ def _simple_terms(texts: list[str]) -> tuple[list[dict], dict]:
 
 
 def _terms_and_frequencies(texts: list[str]) -> tuple[list[dict], dict]:
-    """Top c-TF-IDF terms + within-cluster word counts for one cluster.
-
-    All docs belong to this single cluster, so they are labelled ``0`` and the
-    ``0`` entry is read back out. Heavy ML imports happen here, lazily. In
-    simulated mode we skip them entirely and use :func:`_simple_terms`, so the
-    cluster-edit features work in a lightweight env with no sklearn installed."""
     if not texts:
         return [], {}
     if get_settings().simulate_ml:
@@ -129,8 +88,6 @@ def _terms_and_frequencies(texts: list[str]) -> tuple[list[dict], dict]:
     return top_terms, freqs
 
 
-# ── DB-bound recompute ─────────────────────────────────────────────────────────
-
 async def recompute_cluster(
     db: AsyncSession,
     project_id: uuid.UUID,
@@ -138,19 +95,13 @@ async def recompute_cluster(
     *,
     delete_if_empty: bool = False,
 ) -> Cluster | None:
-    """Recompute one cluster's aggregates from its current membership.
-
-    Returns the updated :class:`Cluster`, or ``None`` if the cluster was missing,
-    not part of ``project_id``, or empty and deleted (``delete_if_empty``). The
-    caller owns the surrounding transaction/commit."""
+    # The caller owns the transaction and commit.
     cluster = await db.get(Cluster, cluster_id)
     if cluster is None or cluster.project_id != project_id:
         return None
 
     rating_col = await _rating_column(db, project_id)
     if await _is_sentence_unit(db, project_id):
-        # Sentence unit: aggregate over the cluster's member *segments*; size is
-        # distinct parent reviews, mean_stars deduped per review.
         rows = (
             await db.execute(
                 select(
@@ -181,7 +132,6 @@ async def recompute_cluster(
         agg = segment_aggregates(document_ids, sentiments, ratings_by_document)
         cluster.n_mentions = agg["n_mentions"]
     else:
-        # Document unit (frozen legacy projects): aggregate over documents.
         rows = (
             await db.execute(
                 select(
@@ -223,12 +173,7 @@ async def recompute_cluster(
 async def recompute_document_primary(
     db: AsyncSession, project_id: uuid.UUID, document_ids: list[uuid.UUID]
 ) -> None:
-    """Refresh each review's derived "primary" cluster from its segments.
-
-    ``documents.cluster_id`` is a display convenience for sentence-unit projects
-    (the plurality non-noise cluster among the review's mentions; ``None`` when the
-    review has no clustered mention). Call after any segment membership change. The
-    caller owns the transaction."""
+    # Refresh derived primary clusters after segment membership changes; the caller commits.
     for document_id in dict.fromkeys(document_ids):
         rows = (
             await db.execute(
@@ -258,9 +203,8 @@ async def recompute_clusters(
     *,
     delete_if_empty: bool = False,
 ) -> list[Cluster]:
-    """Recompute several clusters; returns those still present afterwards."""
     updated: list[Cluster] = []
-    for cluster_id in dict.fromkeys(cluster_ids):  # de-dup, keep order
+    for cluster_id in dict.fromkeys(cluster_ids):
         cluster = await recompute_cluster(
             db, project_id, cluster_id, delete_if_empty=delete_if_empty
         )

@@ -1,11 +1,3 @@
-"""Plan-vs-actual Gantt chart for the final presentation.
-
-Planned windows are copied from docs/project-plan.md. Actual windows are
-reconstructed from commit dates and recorded run dates, so they bound when work
-landed rather than when it started — adjust the ACTUAL column if you know better.
-
-    python scripts/gantt.py            # -> docs/assets/gantt-final.{png,svg}
-"""
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -16,7 +8,7 @@ import matplotlib.pyplot as plt
 
 TODAY = date(2026, 9, 23)
 
-TRACK_COLORS = {  # reference palette, slots 1-3 (validated all-pairs)
+TRACK_COLORS = {
     "Backend & ML": "#2a78d6",
     "Frontend": "#eb6834",
     "All": "#1baf7a",
@@ -60,7 +52,7 @@ def main() -> None:
 
     n = len(ROWS)
     for i, (wp, title, track, ps, pw, as_, ae, status) in enumerate(ROWS):
-        y = n - i  # top to bottom
+        y = n - i
         p0 = d(ps)
         ax.barh(y + 0.17, timedelta(weeks=pw), left=p0, height=0.22,
                 color=PLAN_COLOR, edgecolor="none")

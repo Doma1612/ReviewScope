@@ -1,31 +1,3 @@
-"""Offline evaluation of the project chat's retrieval-augmented answering.
-
-Three measurements, each answering a different question:
-
-A. Known-item retrieval (no human labels needed). An LLM writes one
-   paraphrased question per sampled segment; the retriever should return that
-   segment. Hit@k, MRR@10, nDCG@10, and parent-document Hit@10.
-B. Graded topical relevance. Hand-written analyst queries; the top 10 of every
-   retriever are pooled and judged 0/1/2 by an LLM. P@5, P@10, nDCG@10, MRR.
-C. Answer grounding. The shipped prompt (rendered by the app's own
-   ``rag_messages`` inside the api container) is answered by the shipped chat
-   model; citations are checked for validity and coverage, and each cited
-   sentence is judged for support by its cited evidence.
-
-Retrievers, all with the app's candidate policy (30 candidates, at most two
-segments per parent document, 10 results) so only the scoring differs:
-
-- ``app``       cosine over clustered segments only — what ships
-- ``dense_all`` cosine over every segment, HDBSCAN noise included
-- ``bm25``      Okapi BM25 over every segment
-- ``hybrid``    reciprocal-rank fusion of ``dense_all`` and ``bm25``
-
-Usage (the app's docker stack must be up; Ollama may be any instance holding
-the same model digests):
-
-    .venv/bin/python scripts/rag_eval.py --corpus europarl --ollama http://127.0.0.1:11435
-    .venv/bin/python scripts/rag_eval.py --corpus hotels   --ollama http://127.0.0.1:11435
-"""
 from __future__ import annotations
 
 import argparse
@@ -55,7 +27,6 @@ EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 CHAT_MODEL = "llama3.2:latest"  # OLLAMA_CHAT_MODEL of the api service
 JUDGE_MODEL = "gemma3:4b"       # a different family than the generator
 
-# The app's policy in services/project_rag.retrieve_project_sources.
 CANDIDATES, PER_DOC_CAP, K = 30, 2, 10
 
 CORPORA = {
@@ -77,7 +48,6 @@ CORPORA = {
             "the Middle East peace process",
             "regulation of chemicals under REACH",
             "roaming charges for mobile phones",
-            # niche: expected to have little or no evidence
             "regulation of social media platforms",
             "cryptocurrencies like Bitcoin",
         ],
@@ -100,16 +70,13 @@ CORPORA = {
             "slow or unreliable WiFi",
             "long waits at check-in",
             "hidden fees or resort fees on the bill",
-            # niche: expected to have little or no evidence
             "charging stations for electric cars",
             "paying with cryptocurrency",
         ],
     },
 }
-NICHE = 2  # the last NICHE queries of each list
+NICHE = 2
 
-
-# ---------------------------------------------------------------- data
 
 @dataclass
 class Corpus:
@@ -140,7 +107,6 @@ _embedders: dict[str, object] = {}
 
 
 def _embed(texts: list[str], device: str) -> np.ndarray:
-    """Encode exactly as services/query_embeddings does (model, no instruction)."""
     if device not in _embedders:
         from reviewscope_ml.embed.models import encode_settings
         from reviewscope_ml.embed.sentence_transformer import SentenceTransformerEmbedder
@@ -185,16 +151,13 @@ def load_corpus(name: str, device: str) -> tuple[Corpus, dict]:
     corpus = Corpus(z["seg_ids"], z["doc_ids"], z["pk"], z["cluster_ids"], labels,
                     list(z["texts"]), _normalise(z["vectors"].astype(np.float32)))
 
-    # Fidelity check: re-encoding with the query-side model must reproduce the
-    # stored vectors, otherwise queries and corpus live in different spaces.
+    # Query and stored vectors must use the same embedding space.
     if cfg["stored_vectors"]:
         idx = np.random.default_rng(0).choice(len(corpus.texts), 200, replace=False)
         fresh = _normalise(_embed([corpus.texts[i] for i in idx], device))
         info["stored_vs_reencoded_cosine_min"] = float((fresh * corpus.vectors[idx]).sum(1).min())
     return corpus, info
 
-
-# ---------------------------------------------------------------- retrievers
 
 class BM25:
     def __init__(self, texts: list[str], k1: float = 1.2, b: float = 0.75):
@@ -218,7 +181,6 @@ class BM25:
 
 
 def _policy(order: np.ndarray, doc_ids: np.ndarray) -> list[int]:
-    """The app's candidate policy applied to a best-first index order."""
     out, per_doc = [], {}
     for i in order[:CANDIDATES]:
         d = doc_ids[i]
@@ -262,8 +224,6 @@ class Retrievers:
         return results
 
 
-# ---------------------------------------------------------------- LLM
-
 def ollama(base: str, model: str, messages: list[dict], options: dict | None = None, timeout: int = 300) -> str:
     body = {"model": model, "messages": messages, "stream": False}
     if options:
@@ -281,8 +241,6 @@ def pmap(fn, items, workers: int = 4):
 def _content_tokens(text: str) -> set[str]:
     return {t for t in re.findall(r"[a-z]{3,}", text.lower()) if t not in ENGLISH_STOP_WORDS}
 
-
-# ---------------------------------------------------------------- A: known item
 
 def known_item(corpus: Corpus, retr: Retrievers, cfg: dict, base: str, n: int, seed: int) -> dict:
     rng = random.Random(seed)
@@ -340,8 +298,6 @@ def known_item(corpus: Corpus, retr: Retrievers, cfg: dict, base: str, n: int, s
     }
 
 
-# ---------------------------------------------------------------- B: graded relevance
-
 def judge_relevance(base: str, cfg: dict, query: str, passage: str) -> int:
     prompt = (
         f"You assess search results over {cfg['collection']}.\n\n"
@@ -391,8 +347,6 @@ def graded(corpus: Corpus, retr: Retrievers, cfg: dict, base: str) -> dict:
     return {"queries": queries, "runs": runs, "per_query": table, "summary": summary, "judged": judged}
 
 
-# ---------------------------------------------------------------- C: answer grounding
-
 _RENDER = r"""
 import json, sys, uuid
 from app.project_chat_schemas import ProjectChatSource
@@ -404,7 +358,6 @@ print(json.dumps(rag_messages(payload["question"], [], sources)))
 
 
 def render_messages(question: str, sources: list[dict]) -> list[dict]:
-    """The app's own prompt, rendered inside the api container."""
     out = subprocess.run(
         ["docker", "exec", "-i", "reviewscope_api_1", "python", "-c", _RENDER],
         input=json.dumps({"question": question, "sources": sources}),
@@ -423,7 +376,6 @@ def _sentences(answer: str) -> list[str]:
         if not line:
             continue
         parts.extend(s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", line))
-    # Headings, lead-ins and fragments carry no checkable claim.
     return [s for s in parts if len(s) >= 25 and not s.endswith(":")]
 
 
@@ -491,8 +443,6 @@ def grounding(corpus: Corpus, cfg: dict, base: str, graded_runs: dict) -> dict:
         },
     }
 
-
-# ---------------------------------------------------------------- main
 
 def _jsonable(o):
     if isinstance(o, (np.floating, np.integer)):

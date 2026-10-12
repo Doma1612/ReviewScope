@@ -1,21 +1,3 @@
-"""
-Qualitative inspection artifacts — the part of the harness a human actually
-reads, and the part with the final say.
-
-Design rules (mission north star):
-
-- Sample documents are **random** members, not nearest-to-centroid. Centroid
-  documents are the most average members and make every cluster look tidier
-  than it is; random members show the cluster a reviewer will actually get.
-- The rendering must let a human judge "is this one theme?" in seconds:
-  per cluster, the label, the top terms, and the sampled documents sit side
-  by side.
-- The intruder test makes boundary quality testable by a human: 4 documents
-  from the cluster plus 1 from elsewhere, shuffled. If the reader cannot spot
-  the intruder, the boundary between those clusters is not meaningful —
-  regardless of silhouette. Rendering is automated; judging is deliberately
-  not.
-"""
 from __future__ import annotations
 
 import numpy as np
@@ -36,10 +18,6 @@ def _snippet(text: str) -> str:
 
 
 def render_inspection(art: RunArtifacts, reviews: ReviewSet) -> str:
-    """
-    Markdown inspection sheet for one run: every cluster with its label, top
-    terms and the random samples stored in the artifact.
-    """
     docs = _doc_lookup(reviews)
     lines = [
         f"## Qualitative inspection — `{art.run_name}`",
@@ -74,11 +52,6 @@ def render_inspection(art: RunArtifacts, reviews: ReviewSet) -> str:
 def render_intruder_test(
     art: RunArtifacts, reviews: ReviewSet, seed: int = 42, n_members: int = 4
 ) -> str:
-    """
-    Markdown intruder test: per cluster, ``n_members`` random members plus one
-    document from a different cluster, shuffled. The answer key is collected
-    at the bottom so the reader can self-test honestly first.
-    """
     rng = np.random.default_rng(seed)
     docs = _doc_lookup(reviews)
     ids_by_cluster = {
@@ -101,7 +74,7 @@ def render_intruder_test(
     for cid in eligible:
         members = rng.choice(ids_by_cluster[cid], size=n_members, replace=False)
         other = eligible[int(rng.integers(len(eligible) - 1))]
-        if other == cid:  # pick the next cluster instead of re-rolling
+        if other == cid:
             other = eligible[(eligible.index(cid) + 1) % len(eligible)]
         intruder = rng.choice(ids_by_cluster[other])
 

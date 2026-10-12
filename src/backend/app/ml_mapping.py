@@ -1,19 +1,3 @@
-"""
-Pure adapters between the ``reviewscope_ml`` integration seam and the backend's
-ORM — deliberately free of Celery, FastAPI and the heavy ML deps so the mapping
-logic is unit-testable in isolation (see ``tests/test_ml_integration.py``).
-
-Three concerns live here:
-
-* :func:`derive_roles` / :func:`build_upload_schema` — turn the stored
-  ``project_schema.columns`` into the seam's :class:`UploadSchema` (which needs a
-  designated text column and an optional rating column the column table implies).
-* :class:`DbProgressSink` — the seam's ``ProgressSink`` port, writing
-  ``pipeline_jobs`` rows so ``GET /pipeline/status`` advances mid-run.
-* :func:`result_to_orm` / :func:`persist_run_result` — map a finished
-  ``RunResult`` (plain dataclasses) onto ``Cluster`` / ``Document`` / ``Embedding``
-  rows, resolving the pipeline's integer cluster ids to row UUIDs.
-"""
 from __future__ import annotations
 
 import uuid
@@ -25,9 +9,6 @@ from sqlalchemy import delete, select, update
 from app.models import Cluster, Document, Embedding, PipelineJob, PipelineStepStatus, Project, Segment
 
 
-# Canonical lowercase step order, matching the rows pre-created in
-# ``create_project`` and the 1-based ``index`` the seam reports. Kept local so
-# importing this module never drags in Celery.
 STEP_ORDER: tuple[str, ...] = (
     "ingest", "preprocess", "embed", "reduce",
     "cluster", "sentiment", "label", "finalize",
@@ -38,18 +19,7 @@ _RATING_NAME_HINTS = ("stars", "star", "rating", "rate", "score")
 _NUMERIC_TYPES = ("integer", "float")
 
 
-# ── Schema derivation ─────────────────────────────────────────────────────────
-
 def derive_roles(columns: list[dict[str, Any]]) -> tuple[str, str | None]:
-    """Pick the ``(text_column, rating_column)`` the seam needs from the columns.
-
-    text:   a non-primary-key ``type == "text"`` column, preferring conventional
-            names (a PK is identity, not content, so it is excluded unless it is
-            the only text column); falls back to the first text column, or the
-            first column of any type (the seam then rejects it with a clear
-            SchemaError → failed status).
-    rating: a numeric column with a rating-like name, else ``None``.
-    """
     text_cols = [
         c for c in columns
         if c.get("type") == "text" and not c.get("is_primary_key")
@@ -73,20 +43,6 @@ def _first_named(cols: list[dict[str, Any]], hints: tuple[str, ...]) -> str | No
 
 
 def corpus_profile_for(source_filename: str | None) -> str | None:
-    """Registered corpus profile named by an uploaded file's name, if any.
-
-    The ML seam keys its corpus-facing texts — the embedding instruction table
-    and the LLM label prompt's domain description — on a profile slug. A project
-    cannot supply one: its cache slug is its own ``proj-<id>``, which resolves to
-    the neutral profile and describes any upload as "documents".
-
-    Until ``projects`` carries an explicit column, the uploaded filename is the
-    only corpus identity the backend holds, so a benchmark file named after a
-    registered corpus (``sample_europarl-en_26391.jsonl``) is matched against the
-    registry. Longest slug first, so a more specific corpus wins over a prefix of
-    it. An ordinary user upload matches nothing and returns None, which leaves
-    the neutral profile in place — the correct answer for an unknown corpus.
-    """
     if not source_filename:
         return None
     from reviewscope_ml.core.corpus import PROFILES
@@ -98,11 +54,6 @@ def corpus_profile_for(source_filename: str | None) -> str | None:
 
 
 def build_upload_schema(columns: list[dict[str, Any]]):
-    """Build the seam's ``UploadSchema`` from stored ``project_schema.columns``.
-
-    Imports ``reviewscope_ml`` lazily so this module (and the tests that import
-    it) stay free of the heavy ML dependency tree.
-    """
     from reviewscope_ml.app import ColumnSpec, UploadSchema
 
     text_column, rating_column = derive_roles(columns)
@@ -115,16 +66,7 @@ def build_upload_schema(columns: list[dict[str, Any]]):
     return schema
 
 
-# ── Progress sink (ProgressSink port) ─────────────────────────────────────────
-
 class DbProgressSink:
-    """Writes each pipeline step transition to ``pipeline_jobs``.
-
-    The seam emits Capitalized canonical names (``Ingest``…``Finalize``) and only
-    an explicit ``done`` for ``Finalize``; this sink lowercases to match the
-    pre-created rows and, on each ``running`` event, marks every earlier step
-    ``done`` so the dashboard progress bar fills monotonically.
-    """
 
     def __init__(self, session_factory: Callable[[], Any], project_id: uuid.UUID) -> None:
         self._session_factory = session_factory
@@ -135,7 +77,6 @@ class DbProgressSink:
         now = datetime.now(UTC)
         with self._session_factory() as session:
             if status == "running":
-                # Everything before this step is implicitly finished.
                 earlier = [s for s in STEP_ORDER[: max(index - 1, 0)]]
                 if earlier:
                     session.execute(
@@ -163,26 +104,11 @@ class DbProgressSink:
         )
 
 
-# ── Result → ORM ──────────────────────────────────────────────────────────────
-
 def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding], list[Segment]]:
-    """Map a ``RunResult`` to (clusters, documents, embeddings, segments) ORM rows.
-
-    UUIDs are assigned eagerly (not left to SQLAlchemy defaults) so the integer
-    ``cluster_id`` → cluster-UUID map and the ``primary_key_value`` → document-UUID
-    join can be built before any flush. Noise members keep a ``NULL`` FK.
-
-    Document-unit runs populate ``embeddings`` (one per review) and leave
-    ``segments`` empty; sentence-unit runs do the reverse — ``segments`` are the
-    clustered mentions and each ``Document`` carries the review's derived primary
-    cluster. Exactly one of the two collections is non-empty.
-    """
+    # Assign UUIDs before flush so cluster and document joins can be built eagerly.
     project_id = uuid.UUID(str(result.project_id))
     unit = getattr(result, "unit", "document")
 
-    # Cohesion: mean cosine similarity of member vectors to their centroid, seeded
-    # here from the clustered unit's vectors (embeddings for document runs, the
-    # segments themselves for sentence runs) so `cohesion` matches later recomputes.
     from app.services.metrics import cohesion_score
 
     vectors_by_cluster_int: dict[int, list] = {}
@@ -241,7 +167,7 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
     for rec in result.embeddings:
         did = doc_uuid_by_pk.get(rec.primary_key_value)
         if did is None:
-            continue  # embedding without a surviving document — skip defensively
+            continue
         embeddings.append(Embedding(
             document_id=did,
             vector=list(rec.vector),
@@ -255,7 +181,7 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
     for rec in getattr(result, "segments", None) or []:
         did = doc_uuid_by_pk.get(rec.parent_key)
         if did is None:
-            continue  # segment whose parent review didn't survive — skip defensively
+            continue
         segments.append(Segment(
             id=uuid.uuid4(),
             project_id=project_id,
@@ -276,12 +202,7 @@ def result_to_orm(result) -> tuple[list[Cluster], list[Document], list[Embedding
 
 
 def persist_run_result(session, result) -> int:
-    """Replace a project's analysis rows with a finished run. Returns doc count.
-
-    The caller (the Celery task) owns the surrounding transaction/commit. Wipes in
-    FK-safe order (segments + embeddings → documents → clusters) and re-inserts,
-    then stamps the project's ``unit`` so the read path knows which shape to serve.
-    """
+    # The caller owns the transaction and commit.
     project_id = uuid.UUID(str(result.project_id))
     unit = getattr(result, "unit", "document")
     session.execute(delete(Segment).where(Segment.project_id == project_id))
@@ -306,10 +227,7 @@ def persist_run_result(session, result) -> int:
     spec = (getattr(result, "manifest", {}) or {}).get("spec", {})
     vectors = segments if unit == "sentence" else embeddings
     dimension = len(vectors[0].vector) if vectors else None
-    # RAG only becomes available after a real pipeline run whose vectors are
-    # all present and all the same width — the query embedder is chosen from
-    # the recorded model, so a mixed-dimension project could not be searched.
-    # Simulated and legacy projects stay disabled until re-run.
+    # Retrieval requires complete, same-width vectors and the recorded query model.
     ready = bool(
         dimension
         and spec.get("embedding_model")

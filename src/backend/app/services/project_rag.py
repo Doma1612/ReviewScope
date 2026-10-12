@@ -1,4 +1,3 @@
-"""Project-wide, vector-grounded chat retrieval. Kept independent of cluster chat."""
 from __future__ import annotations
 
 import uuid
@@ -24,7 +23,6 @@ def _rating(raw_data: dict[str, Any]) -> float | None:
 async def retrieve_project_sources(
     db: AsyncSession, project: Project, query_vector: list[float], limit: int = 10, cluster_id: uuid.UUID | None = None
 ) -> list[ProjectChatSource]:
-    """Retrieve project-only clustered evidence and diversify repeated reviews."""
     candidates = 30
     if project.unit == "sentence":
         distance = Segment.vector_pg.cosine_distance(query_vector).label("distance")
@@ -88,9 +86,7 @@ async def retrieve_project_sources(
 
 
 async def resolve_project_cluster(db: AsyncSession, project: Project, reference: str) -> Cluster | None:
-    """Resolve only an exact UUID or label inside the current project."""
-    # Project chat displays cluster citations as "label [C1]"; users naturally
-    # repeat that visible reference in a follow-up, while the stored label does not.
+    # Follow-ups may repeat the displayed citation suffix, which is not part of the label.
     reference = reference.strip().split(" [C", 1)[0].strip()
     try:
         cluster_id = uuid.UUID(reference)
@@ -141,7 +137,6 @@ def _cluster_source(cluster: Cluster, citation_id: str, snippet: str) -> Project
 async def retrieve_related_clusters(
     db: AsyncSession, project: Project, query_vector: list[float], query: str, limit: int
 ) -> list[ProjectChatSource]:
-    """Return distinct topic clusters, not a review-level nearest-neighbour list."""
     candidate_limit = max(200, limit * 40)
     if project.unit == "sentence":
         distance = Segment.vector_pg.cosine_distance(query_vector).label("distance")
@@ -163,8 +158,6 @@ async def retrieve_related_clusters(
         )).all()
         semantic = [(cluster, document.text) for document, cluster, _distance in rows]
 
-    # Exact topic terms in cluster labels, summaries, or top-term JSON are also
-    # relevant catalog matches. They complement semantic matches for broad topics.
     selected: dict[object, tuple[Cluster, str]] = {}
     needle = query.strip().lower()
     if needle:

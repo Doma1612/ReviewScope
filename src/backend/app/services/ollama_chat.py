@@ -18,7 +18,6 @@ def chat_message(
     tools: list[dict] | None = None,
     response_format: str | dict | None = None,
 ) -> dict:
-    """Call Ollama and return its complete assistant message, including tool calls."""
     url = f"{base_url.rstrip('/')}/api/chat"
     request_payload = {"model": model, "messages": messages, "stream": False}
     if tools:
@@ -50,11 +49,6 @@ def chat_message(
 
 
 def chat_completion(*, base_url: str, model: str, messages: list[dict[str, str]], timeout: int, response_format: str | dict | None = None) -> str:
-    """Call Ollama's native non-streaming chat API.
-
-    This deliberately has no API-key handling: local Docker, localhost, and LAN
-    Ollama deployments are the first supported target for ReviewScope chat.
-    """
     message = chat_message(
         base_url=base_url,
         model=model,
@@ -69,7 +63,6 @@ def chat_completion(*, base_url: str, model: str, messages: list[dict[str, str]]
 
 
 def stream_chat_completion(*, base_url: str, model: str, messages: list[dict[str, str]], timeout: int):
-    """Yield content chunks from Ollama's native streaming chat API."""
     url = f"{base_url.rstrip('/')}/api/chat"
     body = json.dumps({"model": model, "messages": messages, "stream": True}).encode("utf-8")
     request = urllib.request.Request(

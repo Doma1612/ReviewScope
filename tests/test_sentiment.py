@@ -9,7 +9,6 @@ from reviewscope_ml.sentiment import (
 
 class TestScoreToLabel:
     def test_thresholds(self):
-        # team decision: negative < -0.2, neutral in [-0.2, 0.2], positive > 0.2
         assert score_to_label(-0.9) == "negative"
         assert score_to_label(-0.21) == "negative"
         assert score_to_label(-0.2) == "neutral"
@@ -57,7 +56,7 @@ class TestArtifactRoundtripWithSentiment:
     def test_runs_without_sentiment_still_load(self, small_run, tmp_path):
         from reviewscope_ml.pipelines.artifacts import load_run, save_run
 
-        save_run(tmp_path / "r", small_run)  # no sentiment set
+        save_run(tmp_path / "r", small_run)
         loaded = load_run(tmp_path / "r")
         assert loaded.sentiment_scores is None
         assert loaded.sentiment_labels is None

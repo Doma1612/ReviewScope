@@ -19,7 +19,7 @@ def make_schema(**over) -> UploadSchema:
 
 class TestSchemaValidation:
     def test_valid_schema_passes(self):
-        make_schema().validate()  # no raise
+        make_schema().validate()
 
     def test_primary_key_detected(self):
         assert make_schema().primary_key() == "review_id"
