@@ -1,0 +1,121 @@
+# ReviewScope from published images — no source checkout needed.
+#
+# Download this file and .env.example (rename to .env, set the secrets), then:
+#   docker compose -f docker-compose.release.yml up -d
+# and open http://localhost:5173. See docs/deployment.md.
+#
+# Runs on CPU on any machine (Linux, Windows, macOS incl. Apple Silicon). On an
+# NVIDIA machine with nvidia-container-toolkit, add the GPU override:
+#   docker compose -f docker-compose.release.yml -f docker-compose.gpu.yml up -d
+#
+# Images are built and pushed by .github/workflows/docker-publish.yml.
+# REVIEWSCOPE_VERSION picks the release (e.g. 0.1.0-rc1); `latest` is the newest
+# stable release.
+
+x-backend-image: &backend-image ${REVIEWSCOPE_NAMESPACE:-dmnkmrtns}/reviewscope-backend:${REVIEWSCOPE_VERSION:-latest}
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ollama:
+    # Pulls the label model on first boot (~2 GB), then serves it.
+    image: ${REVIEWSCOPE_NAMESPACE:-dmnkmrtns}/reviewscope-ollama:${REVIEWSCOPE_VERSION:-latest}
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "8192"
+      OLLAMA_KEEP_ALIVE: 10m
+      OLLAMA_LABEL_MODEL: llama3.2
+    # Healthy only once the label model is pulled. First boot downloads ~2 GB:
+    # 60 retries * 10s = 10 min budget for slow connections.
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q llama3.2"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 15s
+
+  api:
+    image: *backend-image
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_CHAT_MODEL: llama3.2
+      SIMULATE_ML: "false"
+    # Migrations first: the schema is Alembic-only (no create_all on startup).
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - app_data:/workspace/data
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: *backend-image
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://ollama:11434
+      SIMULATE_ML: "false"
+      # CPU by default; docker-compose.gpu.yml switches this to cuda.
+      ML_DEVICE: cpu
+      # The ML pipeline keeps its caches and run dirs under REVIEWSCOPE_ROOT/data.
+      REVIEWSCOPE_ROOT: /workspace
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    volumes:
+      - app_data:/workspace/data
+      # Embedding/sentiment models download on the first run (~1 GB); keep them.
+      - model_cache:/root/.cache/huggingface
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+  frontend:
+    image: ${REVIEWSCOPE_NAMESPACE:-dmnkmrtns}/reviewscope-frontend:${REVIEWSCOPE_VERSION:-latest}
+    # Vite dev server: fine for local use, not a hardened production server.
+    command: npm run dev -- --host 0.0.0.0
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  ollama_data:
+  app_data:
+  model_cache:
