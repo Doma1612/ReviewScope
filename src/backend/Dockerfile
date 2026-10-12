@@ -1,19 +1,24 @@
 # Build context is the REPOSITORY ROOT (see docker-compose.yml: build.context: .),
 # so this image can install the reviewscope_ml package alongside the backend.
-# Pinned to bullseye (not the bare -slim tag, which tracks bookworm/trixie).
-# This host's Docker daemon is 20.10.7, whose bundled seccomp profile blocks the
-# clone3 syscall. bookworm+ glibc (>=2.34) uses clone3 to spawn sub-processes, so
-# apt/dpkg die mid-build ("Problem executing scripts APT::Update::Post-Invoke ...
-# Sub-process returned an error code"). bullseye ships glibc 2.31, which does not
-# use clone3, so the build works without touching the shared daemon's seccomp.
-FROM python:3.12-slim-bullseye
+#
+# Base: bookworm by default. ltgpu1 overrides it to bullseye
+# (docker-compose.ltgpu.yml): its Docker 20.10.7 seccomp profile blocks clone3,
+# which bookworm's glibc (>=2.34) uses, while bullseye's glibc 2.31 does not.
+# Bullseye is EOL and its security mirror now 404s, so the bullseye build must
+# not touch apt — which works because amd64 needs no compiler (see below).
+ARG BASE_IMAGE=python:3.12-slim-bookworm
+FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
-# build-essential: hdbscan / llvmlite (umap) compile native extensions on install.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# Every dependency ships amd64 wheels, but hdbscan publishes no aarch64 wheel and
+# compiles from source there — so the compiler is installed on arm64 only.
+ARG TARGETARCH
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends build-essential \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Pin torch to 2.7.1+cu126 BEFORE installing reviewscope_ml. Left unpinned,
 # sentence-transformers pulls the latest torch, which has dropped Pascal (sm_61)
@@ -24,7 +29,6 @@ RUN apt-get update \
 # arm64 (Apple Silicon, Graviton) gets the CPU build: PyTorch publishes no CUDA
 # wheel of 2.7.1 for aarch64, and Docker on a Mac has no GPU anyway. TARGETARCH is
 # set by BuildKit/buildx only; the legacy builder (ltgpu1) leaves it empty → CUDA.
-ARG TARGETARCH
 RUN if [ "$TARGETARCH" = "arm64" ]; then TORCH_INDEX=cpu; else TORCH_INDEX=cu126; fi \
     && pip install --no-cache-dir torch==2.7.1 --index-url "https://download.pytorch.org/whl/$TORCH_INDEX"
 

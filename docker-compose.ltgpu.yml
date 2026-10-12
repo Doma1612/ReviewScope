@@ -18,7 +18,17 @@ services:
     security_opt:
       - seccomp=unconfined
 
+  api:
+    build:
+      args:
+        # glibc 2.31: no clone3, which this Docker's seccomp profile blocks
+        # (see src/backend/Dockerfile).
+        BASE_IMAGE: python:3.12-slim-bullseye
+
   worker:
+    build:
+      args:
+        BASE_IMAGE: python:3.12-slim-bullseye
     environment:
       # A request, not a grab: each run claims only idle cards via nvidia-smi
       # (app.ml_pipeline._claim_device) and falls back to CPU when all are busy.
