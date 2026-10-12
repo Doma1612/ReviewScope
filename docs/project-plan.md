@@ -1,4 +1,4 @@
-# Project Plan — ReviewScope
+# Project Plan: ReviewScope
 
 **Team:** Daniel (Backend/Algorithm), Dominik (Backend/Algorithm), Shokoufeh (Frontend)  
 **Capacity:** 8h/week per person  
@@ -26,13 +26,13 @@
 | WP2 | Core backend (FastAPI, DB schema, Celery + Redis) | Daniel, Dominik | MVP |
 | WP3 | Frontend scaffolding & upload UI | Shokoufeh | MVP |
 | WP4 | Data ingestion & preprocessing (Yelp) | Daniel, Dominik | MVP |
-| WP5 | NLP pipeline — method evaluation & implementation: candidate methods (embedding models, dimensionality reduction: UMAP/PCA/t-SNE, clustering: HDBSCAN/hierarchical/KMeans, LLM labeling) to be benchmarked and selected empirically before implementation | Daniel, Dominik | MVP |
+| WP5 | NLP pipeline: method evaluation & implementation: candidate methods (embedding models, dimensionality reduction: UMAP/PCA/t-SNE, clustering: HDBSCAN/hierarchical/KMeans, LLM labeling) to be benchmarked and selected empirically before implementation | Daniel, Dominik | MVP |
 | WP6 | Cluster visualization (2D/3D scatter, cluster detail view) | Shokoufeh | MVP |
 | WP7 | RAG engine (prompt design, context injection, orchestration) | Daniel, Dominik | Phase 2 |
 | WP8 | RAG chat interface (streaming, follow-up queries) | Shokoufeh | Phase 2 |
 | WP9 | EuroParl integration (ingestion, multilingual pipeline) | Daniel, Dominik | Phase 2 |
-| WP9b | Stable & incremental clustering — two goals: (1) deterministic re-runs (same corpus → same clusters, via seed management, parameter versioning, approximation investigation); (2) incremental updates (new documents added to existing clusters without full re-run, meaningful cluster identity stability across runs) | Daniel, Dominik | Phase 2 |
-| WP10 | Advanced visualization (time series views — depends on WP9b) | Shokoufeh | Phase 2 |
+| WP9b | Stable & incremental clustering: two goals: (1) deterministic re-runs (same corpus → same clusters, via seed management, parameter versioning, approximation investigation); (2) incremental updates (new documents added to existing clusters without full re-run, meaningful cluster identity stability across runs) | Daniel, Dominik | Phase 2 |
+| WP10 | Advanced visualization (time series views: depends on WP9b) | Shokoufeh | Phase 2 |
 | WP11 | Integration, testing & hardening | All | Phase 2 |
 | WP12 | Demo preparation & final polish | All | Final |
 
@@ -42,7 +42,7 @@
 
 ```mermaid
 gantt
-    title ReviewScope — Semester Plan
+    title ReviewScope: Semester Plan
     dateFormat  YYYY-MM-DD
     axisFormat  %d.%m
 
@@ -73,7 +73,7 @@ gantt
     WP12 – Demo Prep                        :wp12b, 2026-09-07, 2w
 ```
 
-### Gantt Chart — actual (as of 2026-09-23)
+### Gantt Chart: actual (as of 2026-09-23)
 
 Reconstructed from commit and run dates, so windows mark when work landed and may
 start later than the work did. Legend: done = finished, active = ongoing,
@@ -81,7 +81,7 @@ crit = partially delivered (reason in the task name).
 
 ```mermaid
 gantt
-    title ReviewScope — Actual Progress (23.09.2026)
+    title ReviewScope: Actual Progress (23.09.2026)
     dateFormat  YYYY-MM-DD
     axisFormat  %d.%m
 
@@ -116,7 +116,7 @@ gantt
 
 ## Phase Summary
 
-### MVP — May to end of June
+### MVP: May to end of June
 Goal: working end-to-end pipeline on the Yelp dataset, visible in the browser.
 
 Backend/Algorithm and Frontend run in parallel:
@@ -131,19 +131,19 @@ Backend/Algorithm and Frontend run in parallel:
 - Component scaffolding, routing, file upload UI
 - Interactive 2D/3D cluster scatter plot and cluster detail view
 
-### Phase 2 — July to mid-August
+### Phase 2: July to mid-August
 Goal: RAG chat, EuroParl support, advanced visualization.
 
 **Backend/Algorithm (Daniel, Dominik):**
 - RAG engine with orchestration framework; prompt and context strategy
 - EuroParl corpus ingestion; multilingual embedding evaluation
-- Stable & incremental clustering (WP9b): two goals — (1) deterministic re-runs so the same corpus always produces the same clusters; (2) incremental updates so newly arriving documents can be meaningfully added to existing clusters without triggering a full re-run. Both require investigating approximation methods and cluster identity stability. Hard problem, high value — prerequisite for time series visualization.
+- Stable & incremental clustering (WP9b): two goals, (1) deterministic re-runs so the same corpus always produces the same clusters; (2) incremental updates so newly arriving documents can be meaningfully added to existing clusters without triggering a full re-run. Both require investigating approximation methods and cluster identity stability. Hard problem, high value: prerequisite for time series visualization.
 
 **Frontend (Shokoufeh):**
 - Streaming RAG chat interface
-- Time series visualization (WP10) — scheduled in parallel with WP9b; meaningful only once reproducibility is in place
+- Time series visualization (WP10): scheduled in parallel with WP9b; meaningful only once reproducibility is in place
 
-### Final — mid-August to September 24
+### Final: mid-August to September 24
 Goal: stable, demo-ready application.
 
 - Full-stack integration testing
@@ -156,5 +156,5 @@ Goal: stable, demo-ready application.
 
 Features beyond the core project scope, to be tackled if time allows after the MVP and Phase 2 are complete:
 
-- **Time series analysis** — track how themes evolve over time across a corpus with temporal metadata. Targeted for Phase 2 (WP10), contingent on reproducibility (WP9b) being completed first.
-- **Multilingual support** — extend the pipeline to handle multilingual corpora natively (e.g. EuroParl in multiple languages), requiring evaluation of multilingual embedding models
+- **Time series analysis**: track how themes evolve over time across a corpus with temporal metadata. Targeted for Phase 2 (WP10), contingent on reproducibility (WP9b) being completed first.
+- **Multilingual support**: extend the pipeline to handle multilingual corpora natively (e.g. EuroParl in multiple languages), requiring evaluation of multilingual embedding models

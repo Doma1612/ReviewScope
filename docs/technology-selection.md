@@ -1,10 +1,10 @@
-# WP5 technology selection — embedding and labeling models
+# WP5 technology selection: embedding and labeling models
 
 **Date:** 2026-08-08 · **Corpus:** Hotels 5k benchmark (`sample_hotels_5k.jsonl`)
 · **Unit:** sentence segments (mentions) · **Commit:** `d411728`
 
 This document records which models the pipeline uses, what evidence chose them,
-and — the part that matters most for a defensible claim — **what the evidence
+and (the part that matters most for a defensible claim) **what the evidence
 does not support**. It supersedes the embedding decision in
 `methodology.md` §3, which was made at document level in notebook 04.
 
@@ -31,11 +31,11 @@ Companion artifacts, all regenerable (commands in §9):
 | Embedding (segment unit) | **`all-MiniLM-L6-v2`**, no instruction | arctic-embed-l-v2.0 (2nd), Qwen3-0.6B (3rd), mpnet (incumbent, 4th) | best mean rank across all three tiers at 5k; **tied** with arctic at 50k, decided there by ~10× throughput at ~⅕ the VRAM (§6b) |
 | Instruction | **none** | `generic` / `domain` variants | instructions improved geometry and stability but lowered coherence and entropy |
 | Unit | **mention (sentence segment)** | whole review | ~8 aspects/review mean-pooled into one vector; ~10% of reviews truncated at 384 tokens |
-| Labeler | see §7 | — | format compliance, faithfulness, hallucination + human sheet |
+| Labeler | see §7 | n/a | format compliance, faithfulness, hallucination + human sheet |
 
 **Status of the evidence:** the ranking is established at 5k (43,012 segments,
 12 contestants) and the two finalists were confirmed at 50k (454,493 segments)
-on 2026-08-08 — §6b. The 50k run **did not reproduce MiniLM's margin**: the two
+on 2026-08-08, §6b. The 50k run **did not reproduce MiniLM's margin**: the two
 finalists tie on mean rank there and the decision rests on cost, which is a
 weaker claim than §5 makes and is stated as such below. Multi-seed stability
 (§6) was measured at 5k only.
@@ -49,12 +49,12 @@ convenience:
 
 - The median hotel review runs **~8 sentences across several aspects** (room,
   staff, location, breakfast, value). One vector per review mean-pools those
-  aspects into a centroid that represents none of them — a review praising the
+  aspects into a centroid that represents none of them: a review praising the
   staff and condemning the bathroom lands between the "staff" and "bathroom"
   regions, in a place that is about neither.
 - Roughly **10% of hotel reviews exceed mpnet's 384-token window** and are
   silently truncated. The reviews that overflow are the long ones, which are
-  precisely the most multi-aspect ones — so the document path degrades hardest
+  precisely the most multi-aspect ones: so the document path degrades hardest
   on exactly the documents whose structure matters most.
 
 At mention level the clustered unit is the aspect mention and both failure
@@ -62,13 +62,13 @@ modes disappear. This also means **no cross-unit comparison tables**: segment
 and document metrics are computed over different populations and are not
 commensurable (methodology §5b).
 
-**Hotels only.** The existing benchmark stays, for continuity — every prior
+**Hotels only.** The existing benchmark stays, for continuity: every prior
 result is calibrated on it. No Automotive contrast run. The known category
 co-occurrence leak is carried forward as a stated threat to validity (§8).
 
 **Counting semantics** (segment-unit throughout): cluster `size` counts
 mentions; `n_documents` counts distinct parent reviews. Anything
-customer-facing — per-cluster mean stars, Tier-3 rating entropy — is computed
+customer-facing (per-cluster mean stars, Tier-3 rating entropy) is computed
 on **deduplicated (review, cluster) pairs**, so one verbose reviewer cannot
 dominate a cluster's star profile.
 
@@ -94,12 +94,12 @@ segments/s).
 **Rejected on `trust_remote_code`** (verified against `transformers 5.10.1` /
 `sentence-transformers 5.5.1`):
 
-- `Alibaba-NLP/gte-large-en-v1.5` — requires `Alibaba-NLP/new-impl`
-- `jinaai/jina-embeddings-v3` — requires `jinaai/xlm-roberta-flash-implementation`
+- `Alibaba-NLP/gte-large-en-v1.5`: requires `Alibaba-NLP/new-impl`
+- `jinaai/jina-embeddings-v3`: requires `jinaai/xlm-roberta-flash-implementation`
 
-**Re-admitted — a previously registered objection that has expired:**
+**Re-admitted: a previously registered objection that has expired:**
 
-- `nomic-ai/nomic-embed-text-v1.5` — transformers now ships `NomicBertModel`
+- `nomic-ai/nomic-embed-text-v1.5`: transformers now ships `NomicBertModel`
   natively, so the `trust_remote_code` objection no longer holds. It was
   admitted and evaluated (rank 9). Caveat: nomic expects task prefixes
   (`clustering: `) that our instruction mechanism only approximates, so its
@@ -107,7 +107,7 @@ segments/s).
 
 **Blocked, and recorded as such rather than silently skipped:**
 
-- `google/embeddinggemma-300m` — repo is `gated: manual`. Being logged in is
+- `google/embeddinggemma-300m`: repo is `gated: manual`. Being logged in is
   not sufficient; access must be granted per account. The June sweep failed
   with 401 (unauthenticated); it now fails with **403** (authenticated, not
   authorised). **This candidate remains unevaluated.** Any claim that the
@@ -115,16 +115,16 @@ segments/s).
   supported by this evidence.
 
 **Added for this review**, selected on the MTEB **Clustering** and **STS** task
-groups rather than the overall average — the downstream task is density-based
+groups rather than the overall average: the downstream task is density-based
 clustering of short single-aspect spans, and holding up on sentence-length
 input is not the same competence as document retrieval:
 
-- `mixedbread-ai/mxbai-embed-large-v1` — best admissible Clustering (46.71)
+- `mixedbread-ai/mxbai-embed-large-v1`: best admissible Clustering (46.71)
   *and* best STS (85.00)
-- `BAAI/bge-large-en-v1.5` — size-matched contrast to mxbai (Clustering 46.08,
+- `BAAI/bge-large-en-v1.5`: size-matched contrast to mxbai (Clustering 46.08,
   STS 83.11): same architecture and parameter count, different training recipe,
   which isolates recipe from capacity
-- `Snowflake/snowflake-arctic-embed-l-v2.0` — admissible, multilingual,
+- `Snowflake/snowflake-arctic-embed-l-v2.0`: admissible, multilingual,
   forward-looking for EuroParl Phase 2
 
 **Re-weighted, not dropped.** The long-context argument that justified `bge-m3`
@@ -137,8 +137,8 @@ a Phase-2 criterion only; it earns no credit on this corpus.
 
 Every contestant saw an identical corpus, an identical segmentation (regex
 splitter, segments < 20 chars dropped, > 600 chars hard-wrapped), identical
-DR and identical clustering configuration — UMAP(10d, nn=15, min_dist=0.0,
-cosine) → HDBSCAN(mcs = 0.3% of units, floor 15; ms = mcs/3 — this sweep
+DR and identical clustering configuration (UMAP(10d, nn=15, min_dist=0.0,
+cosine) → HDBSCAN(mcs = 0.3% of units, floor 15; ms = mcs/3) this sweep
 predates the ms cap of 50 added 2026-09-22, but at 58,230 segments the rule
 gave ms=58, below the cliff, and every contestant saw the same value).
 **The embedding model is the only manipulated variable.**
@@ -154,7 +154,7 @@ Two measurement faults were fixed before any number here was believed:
    previously-run model. Cost now comes from a fixed re-encoded probe on a
    single pinned device, comparable regardless of cache state.
 2. **The first model probed absorbed CUDA context creation.** Without a warm-up
-   pass MiniLM measured 221 segments/s; its true figure is **3,413** — a 15×
+   pass MiniLM measured 221 segments/s; its true figure is **3,413**: a 15×
    error that inverted the cost ranking. Every probe now warms up first.
 
 ## 5. Embedding results (5k Hotels, 43,012 segments)
@@ -179,7 +179,7 @@ rating entropy. Full table in `data/runs/model_sweep_5000_sent.md`.
 
 ### Decision: `all-MiniLM-L6-v2`, no instruction
 
-It wins the mean rank, and it wins the cost argument outright — **10× the
+It wins the mean rank, and it wins the cost argument outright: **10× the
 throughput and 4.7× less VRAM than the model directly behind it**. At segment
 granularity the quality gap that would justify a larger model does not exist.
 
@@ -191,9 +191,9 @@ runtime column.
 
 ### Findings that carry more weight than the winner
 
-**MTEB rank did not transfer.** `mxbai-embed-large-v1` — the best admissible
+**MTEB rank did not transfer.** `mxbai-embed-large-v1`: the best admissible
 model on *both* the MTEB Clustering (46.71) and STS (85.00) task groups, chosen
-specifically because those are the competences this task needs — finished
+specifically because those are the competences this task needs: finished
 **11th of 12**, below the 22M baseline on every Tier-1 metric. `bge-large-en-v1.5`
 (8th) and `gte-modernbert-base` (7th) tell the same story. Leaderboard position
 on general benchmarks predicted very little about density-based clustering of
@@ -206,15 +206,15 @@ mentions as noise** and posts a *negative* incl.-noise silhouette; `gte-modernbe
 8k window is irrelevant when the unit is one sentence.
 
 **The instruction effect reproduced exactly.** Qwen3 `generic` posts the best
-incl.-noise silhouette in the entire table (.148) and the lowest noise (.328) —
-better *geometry* — while its C_v **falls** (.590 → .572) and its entropy falls
+incl.-noise silhouette in the entire table (.148) and the lowest noise (.328)
+(better *geometry*) while its C_v **falls** (.590 → .572) and its entropy falls
 (.863 → .854). The instruction reshapes the space without improving the topics,
 which is precisely notebook 04's finding, now confirmed at mention level. Had
 the two variants been averaged into one row, this would have been invisible.
 
 **A cautionary result on Tier 3.** `multilingual-e5-large-instruct` without its
-instruction collapses to **4 clusters** covering 99% of mentions — a degenerate
-clustering by any reading — yet posts the **highest rating entropy in the table
+instruction collapses to **4 clusters** covering 99% of mentions (a degenerate
+clustering by any reading) yet posts the **highest rating entropy in the table
 (.930)**. Four buckets containing everything necessarily contain every star
 level. Tier 3 is a tripwire, not a score, and this row is the proof; it is also
 why the mean rank is a shortlisting convention rather than a verdict.
@@ -243,7 +243,7 @@ is what distinguishes the two cases.
 
 Adjusted Rand Index of cluster assignments across seeds 42/43/44, noise treated
 as its own label. UMAP is deterministic per seed but not across seeds, so this
-measures whether a model has found structure that survives re-projection —
+measures whether a model has found structure that survives re-projection:
 WP9b's "same corpus → same clusters" goal depends on it.
 
 | model | instr | mean rank | ARI mean | ARI min |
@@ -256,7 +256,7 @@ WP9b's "same corpus → same clusters" goal depends on it.
 
 **The instruction buys stability, and that is the strongest thing it buys.**
 Qwen3 `generic` is the most seed-stable configuration measured (0.744) while
-Qwen3 `no_inst` is the *least* (0.615) — the same model, differing only by an
+Qwen3 `no_inst` is the *least* (0.615): the same model, differing only by an
 instruction prefix, moves 0.13 ARI. Combined with §5, the full picture of what
 the instruction does to Qwen3 is:
 
@@ -269,7 +269,7 @@ the instruction does to Qwen3 is:
 | rating entropy | .863 | .854 | slightly worse |
 
 This refines rather than contradicts notebook 04. The instruction *does*
-reshape the geometry without improving the topics — the C_v and entropy both
+reshape the geometry without improving the topics: the C_v and entropy both
 fall, exactly as documented. What notebook 04 could not see, because it never
 measured stability, is that the reshaping also makes the projection markedly
 more reproducible. So "instruction = cosmetic silhouette inflation" is too
@@ -277,7 +277,7 @@ strong a summary: it is a real trade of topic quality for geometric regularity
 and reproducibility.
 
 **MiniLM wins on stability among the no-instruction candidates** (0.682), which
-matters because it is not the usual pattern — the smallest model is normally
+matters because it is not the usual pattern: the smallest model is normally
 the most seed-sensitive. It is not the most stable configuration overall.
 
 ### Decision on the stability trade-off
@@ -290,7 +290,7 @@ The case for switching to Qwen3 `generic` is real: +0.062 ARI mean (0.744 vs
 clusters" goal. The case against, which decided it:
 
 - It costs **~18× the compute** (190 vs 3,413 segments/s) and 6.3× the VRAM.
-- It is **worse on the topics themselves** — C_v 0.572 vs 0.572 (equal) and
+- It is **worse on the topics themselves**: C_v 0.572 vs 0.572 (equal) and
   entropy 0.854 vs 0.918, the latter a large gap on the metric that detects
   sentiment blobs.
 - Its stability advantage comes from an instruction that *lowers* its own
@@ -298,7 +298,7 @@ clusters" goal. The case against, which decided it:
 - 0.68 and 0.74 are both well short of "reproducible". Neither delivers WP9b's
   goal; pinning the seed is what delivers it, and the seed is pinned. The
   choice between them is therefore not the difference between reproducible and
-  not — it is a small movement inside the "unstable across seeds" regime.
+  not: it is a small movement inside the "unstable across seeds" regime.
 
 **Revisit this if** cross-seed identity becomes a hard requirement rather than a
 goal, in which case Qwen3 `generic` is the documented alternative and the
@@ -342,7 +342,7 @@ The raw metrics above it are the comparable rows.
 coherence and rating entropy; arctic takes both silhouettes. Two metrics each,
 so the "1" and "2" printed in the report are an artefact of tie-breaking and
 carry no information. **At 50k there is no quality argument for MiniLM over
-arctic** — there is a cost argument, and it is decisive: 10.4× the throughput
+arctic**: there is a cost argument, and it is decisive: 10.4× the throughput
 (3,593 vs 347 seg/s) at 21% of the VRAM (498 vs 2,337 MB), for quality that
 measurement cannot separate. That is a sound basis for the decision and a
 different one from §5's, which claimed a quality win. Both are recorded.
@@ -354,7 +354,7 @@ different one from §5's, which claimed a quality win. Both are recorded.
   the *lower*-noise model (.331 vs .347) to the *higher*-noise one (.393 vs
   .374). A head-to-head margin at 5k therefore does not predict its own sign at
   50k. **Treat the 5k table as a shortlisting instrument, not as a measurement
-  of how much better one model is** — that is what §4 claimed for it, and this
+  of how much better one model is**: that is what §4 claimed for it, and this
   run is the evidence that the caution was warranted.
 - **Coherence improved for both** (MiniLM .572 → .643, arctic .577 → .634) and
   rating entropy rose. More data per theme yields more lexically coherent
@@ -364,17 +364,17 @@ different one from §5's, which claimed a quality win. Both are recorded.
   noise rose. The §5 conclusion that *no* configuration scores well once
   discarded mentions are counted holds at scale, and gets worse. 37–39% of
   mentions are still thrown away.
-- **Cluster count barely moved** — 61 → 68 for MiniLM against 10.6× the data.
+- **Cluster count barely moved**: 61 → 68 for MiniLM against 10.6× the data.
   Because `min_cluster_size` scales with corpus size, extra data makes existing
   clusters bigger rather than finding new themes. Whether that is the pipeline
   finding a stable topic inventory or the parameterisation *imposing* one is not
   answerable from this run; it needs a sweep over `min_cluster_size` at fixed
   corpus size, which is not done.
 - **Throughput was reproducible** (3,413 → 3,593 and 341 → 347 seg/s) because
-  this run had the box to itself. Compare with §6's contended figures — this is
+  this run had the box to itself. Compare with §6's contended figures: this is
   what the "quote cost from a sweep that ran alone" rule is for.
 
-**What this run does not establish.** No multi-seed ARI was computed at 50k —
+**What this run does not establish.** No multi-seed ARI was computed at 50k:
 `--stability-seeds` was not passed, and re-running the seeded UMAP fit twice
 more at 454k segments was not affordable in the window. **Every stability claim
 in §6 remains a 5k claim**, and the possibility that the two models' stability
@@ -403,7 +403,7 @@ only the labeler and the prompt vary. Five candidates:
 
 ### A mention-level prompt (v2)
 
-Notebook 08's v1 prompt says "reviews" and asks what they "have in common" —
+Notebook 08's v1 prompt says "reviews" and asks what they "have in common":
 sensible for document clusters, wrong for mention clusters. Mention clusters are
 tighter and already single-topic, so asking what members "have in common"
 invites the model to hedge toward a generic theme. **v2_mention** names the unit
@@ -417,12 +417,12 @@ evaluative mentions tempt a model into ("Breakfast Buffet Quality", never
 
 Three axes, per the tech-selection requirement:
 
-- **Format compliance** — deterministic. 3–6 words, no preamble, no quotes, no
+- **Format compliance**: deterministic. 3–6 words, no preamble, no quotes, no
   trailing punctuation, single line. The one axis with a ground truth.
-- **Faithfulness** — `discrimination@1`: embed the label and check whether its
+- **Faithfulness** (`discrimination@1`): embed the label and check whether its
   own cluster's centroid is the nearest of all centroids. An automatic analogue
   of the methodology's intruder test.
-- **Hallucination** — content words appearing in *no* member mention.
+- **Hallucination**: content words appearing in *no* member mention.
 
 Read `hallucination_rate` with care: it is lexical, so a correct paraphrase
 ("Breakfast" for mentions saying "morning buffet") counts against it. It is a
@@ -431,7 +431,7 @@ tripwire for invention, not a quality score, which is why the human sheet
 
 ### Results
 
-`data/runs/label_quality_sent.md` — with `data/runs/label_quality_sent_nothink.md`
+`data/runs/label_quality_sent.md`: with `data/runs/label_quality_sent_nothink.md`
 for the qwen3 re-run described below, and every individual label plus its model
 and prompt hash in `label_quality_sent.json`.
 
@@ -457,7 +457,7 @@ reasoning made qwen3 *worse*, not faster:
 
 v1 loses 0.10 discrimination@1 with thinking off; v2_mention holds its composite
 and gains margin. And the latency saving is **6%** on v1 (44.7 → 42.0 s/label),
-not the order of magnitude the reasoning hypothesis predicted — qwen3's cost is
+not the order of magnitude the reasoning hypothesis predicted: qwen3's cost is
 the model, not the thinking. So: **quote the default rows.** Thinking was not
 inflating qwen3's score, and the `+nothink` rows exist to demonstrate that
 rather than to replace anything. The deployability objection to qwen3 stands
@@ -475,7 +475,7 @@ output contract worse.
 This is not a flaw in v2_mention, but neither is it cured by size alone: only
 `qwen3:4b` and `gemma3:4b` hold format compliance at 1.000 under **both**
 prompts. `llama3.2:3b` manages 0.800/0.700 and `phi4-mini` collapses from 0.950
-to 0.450 on v2_mention — the same failure as the 1B model, at 4B. Following a
+to 0.450 on v2_mention, the same failure as the 1B model, at 4B. Following a
 stricter output contract tracks the individual model, not the parameter count,
 which is the argument for keeping format compliance as the first gate in the
 reading order below rather than assuming a mid-size model will pass it.
@@ -483,7 +483,7 @@ reading order below rather than assuming a mid-size model will pass it.
 ### How to decide from the table
 
 The composite column weights format compliance, discrimination@1 and
-(1 − hallucination) equally — a stated convention, not a truth, with the raw
+(1 − hallucination) equally: a stated convention, not a truth, with the raw
 columns present so it can be re-weighted. Recommended reading order:
 
 1. **Format compliance first.** A label that needs salvaging by a regex is
@@ -494,17 +494,17 @@ columns present so it can be re-weighted. Recommended reading order:
    is a mandatory HITL step (methodology §9) precisely because of this. Scoring
    happens in the app (`Label scoring`), blind and multi-reviewer;
    `label_sheet_sent.md` remains as a static export for anyone who wants to read
-   the task offline. **This is still outstanding — every labeler claim above is
+   the task offline. **This is still outstanding: every labeler claim above is
    an automatic-metric claim.**
 4. **Latency last**, but not never: labeling runs once per cluster per run, so
-   seconds-per-label matters far less than quality — except where it signals a
+   seconds-per-label matters far less than quality, except where it signals a
    misconfiguration, as with qwen3's reasoning.
 
 ## 8. Threats to validity
 
 - **Category co-occurrence leak (carried forward, not fixed).** "Hotels"-tagged
   Yelp businesses are frequently co-tagged restaurants/nightlife/venues, so the
-  benchmark contains substantial non-hotel content — the 1k smoke run's largest
+  benchmark contains substantial non-hotel content: the 1k smoke run's largest
   cluster was about oysters on Bourbon Street. This was carried forward
   deliberately for continuity with prior results rather than re-filtered
   mid-stream. **Assessment for this decision: it does not appear to change the
@@ -513,19 +513,19 @@ columns present so it can be re-weighted. Recommended reading order:
   favouring one. It would matter for an absolute claim about hotel review
   topics; it does not undermine a relative claim between embedding models.
   **The 50k numbers now exist (§6b), so this is due.** It is visible in the
-  labeled output — cluster 3, one of the 20 largest mention clusters scored in
+  labeled output: cluster 3, one of the 20 largest mention clusters scored in
   §7, is a Reno casino cluster that **9 of the 10 labeler configurations named
   correctly** ("Best Casino in Reno", "Reno Casino Experience", …). The labels
   are right; the cluster simply is not about hotels. Any slide showing
   cluster inventories, and any claim of the form "the pipeline finds N themes in
-  hotel reviews", is wrong until the corpus is filtered — while the model
-  *ranking* stands unaffected. See `docs/quality-roadmap.md` for the fix.
-- **"First N matching" is not a random sample** — dataset order correlates with
+  hotel reviews", is wrong until the corpus is filtered, while the model
+  *ranking* stands unaffected.
+- **"First N matching" is not a random sample**: dataset order correlates with
   business ID and therefore geography (methodology §1). Fine for comparing
   candidates against each other, not for claims about Yelp hotels in general.
 - **English-only evidence.** `arctic-embed-l-v2.0`, `bge-m3` and
   `multilingual-e5` were evaluated only on English hotel mentions. Their
-  multilingual capacity — the reason two of them are registered — is
+  multilingual capacity (the reason two of them are registered) is
   **completely untested here**. The EuroParl Phase-2 question remains open, and
   nothing in this document should be read as answering it.
 - **`embeddinggemma-300m` was never evaluated** (§3). The claim "MiniLM beats
@@ -540,7 +540,7 @@ Stated plainly, because a selection document that only lists conclusions is not
 auditable:
 
 1. That MiniLM-L6-v2 is the best embedding model for this pipeline **in
-   general** — the evidence covers English hotel reviews, mention units, one
+   general**: the evidence covers English hotel reviews, mention units, one
    fixed DR/clustering referee, and one seed at 50k.
 2. That MiniLM-L6-v2 produces **better clusters than arctic-embed-l-v2.0**. At
    50k the two are indistinguishable on the measured axes (§6b); the choice
@@ -548,15 +548,15 @@ auditable:
    throughput constraint has no evidence-based reason to prefer either.
 3. That it would win on a **different corpus**. EuroParl, support tickets and
    Automotive are all untested; WP9 must re-run this sweep per corpus.
-4. That the resulting clusters are **good** — only that they are better than the
+4. That the resulting clusters are **good**: only that they are better than the
    alternatives measured. 37% of mentions are discarded as noise at 50k, and no
    configuration scores well once that noise is counted.
-5. That the **MTEB leaderboard is wrong** — only that its ranking did not
+5. That the **MTEB leaderboard is wrong**: only that its ranking did not
    transfer to this task, corpus and unit. That is a statement about transfer,
    not about the benchmark.
 6. That any model beats **`embeddinggemma-300m`**, which remains unevaluated
    behind a gated repo.
-7. That the multilingual candidates are or are not suitable for Phase 2 — that
+7. That the multilingual candidates are or are not suitable for Phase 2: that
    question was not asked here.
 8. That any labeler is **useful**, as opposed to well-formed and faithful. No
    human has scored a label yet (§7).
@@ -592,10 +592,10 @@ python -m reviewscope_ml.eval.model_sweep --sample-size 50000 --device cuda \
 # 6. qualitative inspection, paired with the ranking
 streamlit run src/reviewscope_ml/hitl/app.py   # sidebar → "Model selection"
 
-# 7. human label scoring — blind, multi-reviewer, writes to data/feedback/
+# 7. human label scoring: blind, multi-reviewer, writes to data/feedback/
 streamlit run src/reviewscope_ml/hitl/app.py   # sidebar → "Label scoring"
 ```
 
 Steps 1–5 all ran on 2026-08-08; `scripts/run_unattended.sh` chains 4–5 with
-cleanup that releases the shared GPUs afterwards. Step 7 is the open one — see
-§7 and `docs/quality-roadmap.md`.
+cleanup that releases the shared GPUs afterwards. Step 7 is the open one: see
+§7.

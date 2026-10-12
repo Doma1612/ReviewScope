@@ -1,196 +1,94 @@
-# ReviewScope Backend
+# Backend
 
-FastAPI backend for ReviewScope. It provides authentication, project upload, project sharing, dashboard APIs, cluster/document read APIs, and a Celery-based simulated ML pipeline.
+FastAPI application and Celery worker. The API handles accounts, projects, uploads, cluster editing and chat. The worker runs the ML pipeline from `reviewscope_ml` and stores the results in PostgreSQL.
 
-## Requirements
+## Structure
 
-- Docker and Docker Compose, recommended
-- Python 3.12, only needed for local backend-only development
-- PostgreSQL and Redis are provided by `docker-compose.yml`
+| Path | Responsibility |
+|---|---|
+| `app/main.py` | FastAPI app, CORS, router registration, `GET /api/health` |
+| `app/api/auth.py` | Register, login, logout, current user. JWT in an httpOnly cookie |
+| `app/api/projects.py` | Projects, upload, schema, pipeline status, embeddings, clusters, documents, segments, members, edit history, cluster chat |
+| `app/api/project_chat.py` | Project chat over all documents (plain and streaming) |
+| `app/api/system.py` | `GET /api/models`: embedding and label model in use |
+| `app/api/deps.py` | Current user and project permission dependencies |
+| `app/models.py` | SQLAlchemy tables (see below) |
+| `app/schemas.py`, `app/project_chat_schemas.py` | Pydantic request and response models |
+| `app/core/config.py` | Settings from environment variables |
+| `app/core/security.py` | Password hashing and JWT handling |
+| `app/db/` | Async engine for the API, sync engine for the worker |
+| `app/worker.py` | Celery app; one task per worker process |
+| `app/ml_pipeline.py` | Celery task that runs `reviewscope_ml` on an upload and persists the result |
+| `app/ml_mapping.py` | Converts the upload schema and the pipeline result to and from database rows; reports step progress |
+| `app/tasks.py` | Simulated pipeline for tests and runs without ML dependencies (`SIMULATE_ML=true`) |
+| `app/services/edits.py` | Writes the cluster edit log |
+| `app/services/recompute.py` | Recomputes cluster size, terms and sentiment after edits |
+| `app/services/replay.py` | Reapplies manual edits after a pipeline rerun |
+| `app/services/metrics.py` | Cluster cohesion metric |
+| `app/services/project_rag.py` | Retrieval of relevant documents for the project chat |
+| `app/services/project_chat_tools.py` | Tools the chat model may call (cluster count, ranking, related clusters, evidence search), validated on the server |
+| `app/services/query_embeddings.py` | Embeds chat queries on CPU with the project's embedding model |
+| `app/services/ollama_chat.py` | Client for Ollama chat completions |
+| `alembic/` | Database migrations |
+| `tests/` | Unit tests; no database or GPU required |
 
-## Environment
+## Data model
 
-Create a root `.env` file from `.env.example`:
+| Table | Content |
+|---|---|
+| `users` | Accounts |
+| `projects`, `project_members`, `project_schema` | Project metadata, owner and viewer roles, confirmed column types |
+| `documents` | Uploaded rows: primary key, text, all original columns, primary cluster, sentiment |
+| `segments` | Sentences of each document; the unit that is clustered |
+| `embeddings` | Vectors (pgvector) and 2D/3D map coordinates |
+| `clusters` | Label, summary, top terms, word frequencies, size, sentiment, label source |
+| `cluster_edits` | Log of manual edits, replayed after reruns |
+| `pipeline_jobs` | Status and message per pipeline step |
 
-```bash
-cp .env.example .env
+## Pipeline run
+
+1. `POST /api/projects` stores the file, saves the confirmed schema and queues `run_ml_pipeline`.
+2. The worker claims an idle GPU if `ML_DEVICE=cuda`, otherwise runs on CPU.
+3. `reviewscope_ml.app.run_from_upload` runs the steps Ingest, Preprocess, Embed, Reduce, Cluster, Sentiment, Label, Finalize. Each step updates `pipeline_jobs`, which the frontend polls.
+4. The result replaces the project's clusters, documents and segments. Earlier manual edits are then reapplied, and the project becomes `ready`.
+
+## Configuration
+
+Settings are read from the repository root `.env` (template: `.env.example`).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SECRET_KEY` | required | JWT signing key |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST`, `POSTGRES_PORT` | | Database connection |
+| `REDIS_URL` | `redis://localhost:6379/0` | Celery broker and result backend |
+| `SIMULATE_ML` | `true` | `false` runs the real pipeline; Docker Compose sets `false` |
+| `ML_DEVICE` | `cpu` | `cuda` requests a GPU per run |
+| `ML_MAX_GPUS` | `1` | Idle GPUs one run may claim; `0` means all idle GPUs |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server for labels and chat |
+| `OLLAMA_CHAT_MODEL` | `llama3.2` | Model for cluster and project chat |
+
+## Development
+
+The usual way is the Docker Compose stack described in the root README; it runs migrations on start. Without Docker for the API and worker:
+
 ```
-
-Set local values in `.env`:
-
-```env
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=change-me
-POSTGRES_DB=postgres
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5533
-REDIS_URL=redis://localhost:6379/0
-SECRET_KEY=change-me
-VITE_API_BASE_URL=http://localhost:8000
-```
-
-Do not commit `.env`. It is intentionally ignored by git.
-
-The backend builds database URLs safely from `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_PORT`, and `POSTGRES_DB`. This avoids problems with special characters in database passwords.
-
-## Run With Docker Compose
-
-From the repository root:
-
-```bash
-docker compose up -d db redis
-docker compose run --rm api alembic upgrade head
-docker compose up --build
-```
-
-Services:
-
-- API: `http://localhost:8000`
-- Health check: `http://localhost:8000/api/health`
-- OpenAPI docs: `http://localhost:8000/docs`
-- PostgreSQL from host: `localhost:5533`
-- Redis from host: `localhost:6379`
-
-Inside Docker, API and worker use service names:
-
-- PostgreSQL: `db:5432`
-- Redis: `redis:6379`
-
-## Database Migrations
-
-Run migrations:
-
-```bash
-docker compose run --rm api alembic upgrade head
-```
-
-Create a new autogenerated migration after changing SQLAlchemy models:
-
-```bash
-docker compose run --rm api alembic revision --autogenerate -m "describe change"
-```
-
-## Local Development (Native, recommended for dev)
-
-Runs Postgres + Redis in Docker and the API, Celery worker and frontend natively —
-no multi-GB image build. Uses `SIMULATE_ML=true`, so no heavy ML deps are needed.
-
-One-time setup from the repo root:
-
-```bash
-cp .env.example .env          # set SECRET_KEY; keep POSTGRES_PORT=5533, SIMULATE_ML=true
 docker compose up -d db redis
 python -m venv src/backend/.venv
 src/backend/.venv/bin/pip install -r src/backend/requirements.txt
 npm --prefix src/frontend install
+scripts/dev-local.sh
 ```
 
-Then start everything with one command (loads `.env`, runs migrations, launches all three):
+`scripts/dev-local.sh` loads `.env`, runs the migrations and starts API, worker and frontend. With `SIMULATE_ML=true` no ML dependencies are needed. For the real pipeline, also run `pip install -e .` from the repository root and set `SIMULATE_ML=false`.
 
-```bash
-scripts/dev-local.sh          # Ctrl-C stops API + worker + frontend
+New migration after a model change:
+
+```
+docker compose run --rm api alembic revision --autogenerate -m "describe change"
 ```
 
-- API: `http://localhost:8000` (docs at `/docs`)
-- Frontend: `http://localhost:5173`
+Tests:
 
-### Running the real ML pipeline locally
-
-The native dev flow above is simulated. To run the real `reviewscope_ml` pipeline:
-
-```bash
-src/backend/.venv/bin/pip install -e .          # installs reviewscope_ml + torch/etc (multi-GB)
-ollama pull llama3.2                              # local Ollama labels clusters
-# set SIMULATE_ML=false in .env, then re-run scripts/dev-local.sh
 ```
-
-### Manual (separate terminals)
-
-If you prefer not to use the launcher, from `src/backend` with the venv activated:
-
-```bash
-alembic upgrade head
-uvicorn app.main:app --reload                     # terminal 1
-celery -A app.worker.celery_app worker --loglevel=info   # terminal 2
+cd src/backend && python -m pytest
 ```
-
-> The backend reads the repo-root `.env`; run these with it loaded
-> (`set -a; . ../../.env; set +a`) or from a shell where those vars are exported.
-
-## Main API Areas
-
-- `POST /api/auth/register`
-- `POST /api/auth/login`
-- `POST /api/auth/logout`
-- `GET /api/auth/me`
-- `POST /api/projects`
-- `GET /api/projects`
-- `GET /api/projects/{project_id}`
-- `GET /api/projects/{project_id}/pipeline/status`
-- `GET /api/projects/{project_id}/embeddings`
-- `GET /api/projects/{project_id}/clusters`
-- `GET /api/projects/{project_id}/documents`
-- `GET /api/projects/{project_id}/members`
-- `GET /api/models`
-
-## ML Pipeline
-
-The worker can run the pipeline in two modes, selected by the `SIMULATE_ML` env var:
-
-- `SIMULATE_ML=true` (default in `.env`): `app/tasks.run_simulated_pipeline` fabricates
-  embeddings, UMAP coordinates, clusters, labels, summaries, top terms, word frequencies and
-  sentiment. No heavy ML dependencies — used by tests and lightweight local runs.
-- `SIMULATE_ML=false` (set for `api`/`worker` in `docker-compose.yml`): `app/ml_pipeline.run_ml_pipeline`
-  drives the real `reviewscope_ml` seam (`run_from_upload`). `ML_DEVICE` (`cpu`/`cuda`) is passed
-  through. See `docs/integration-guide.md` (contract) and `docs/ml-integration-changelog.md`
-  (what was wired and why).
-
-Pipeline stages (both modes report the same 8 steps to `GET /pipeline/status`):
-
-1. `ingest`
-2. `preprocess`
-3. `embed`
-4. `reduce`
-5. `cluster`
-6. `sentiment`
-7. `label`
-8. `finalize`
-
-### Real pipeline (Docker)
-
-The `api`/`worker` image installs the `reviewscope_ml` package (build context is the repo root).
-Cluster labeling uses the `ollama` service; pull its model once after first start:
-
-```bash
-docker compose exec ollama ollama pull llama3.2
-```
-
-Until the model is present, labeling fails soft to term-based labels (each cluster's
-`label_source` records whether an LLM or the fallback produced the label).
-
-### Tests
-
-```bash
-python -m pytest tests/test_ml_integration.py
-```
-
-Pure-logic tests for the `reviewscope_ml` ↔ ORM mapping (no DB, GPU, or model downloads).
-
-## Troubleshooting
-
-If `docker compose exec api ...` says the service is not running, use a one-off container:
-
-```bash
-docker compose run --rm api alembic upgrade head
-```
-
-If PostgreSQL rejects the password after changing `.env`, the existing Docker volume may still contain the old password. If local data can be discarded:
-
-```bash
-docker compose down -v
-docker compose up -d db redis
-docker compose run --rm api alembic upgrade head
-docker compose up --build
-```
-
-If the worker cannot connect to Redis, make sure Docker services use `redis://redis:6379/0`, not `localhost`. This is already configured in `docker-compose.yml`.

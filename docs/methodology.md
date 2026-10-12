@@ -1,4 +1,4 @@
-# ReviewScope ML pipeline — methodology and threats to validity
+# ReviewScope ML pipeline: methodology and threats to validity
 
 This document records, per pipeline stage: what was decided, on what evidence,
 and what the known weaknesses are. It is written to be argued with. Where the
@@ -23,9 +23,9 @@ clusters that are distinguishable *by topic* rather than by cuisine.
 **Weaknesses / threats to validity.**
 
 - **Hotel-only sampling bias vs. the app's "any CSV/JSONL" promise.** Every
-  empirical decision in this pipeline — preprocessing depth, embedding model,
-  UMAP parameters, HDBSCAN minimum cluster sizes, even the Tier-3 metric —
-  was tuned on English hotel reviews of 50–5,000 characters. The application
+  empirical decision in this pipeline (preprocessing depth, embedding model,
+  UMAP parameters, HDBSCAN minimum cluster sizes, even the Tier-3 metric)
+was tuned on English hotel reviews of 50–5,000 characters. The application
   accepts arbitrary corpora. There is **no evidence** the chosen
   configuration transfers to, say, German parliamentary speeches (the
   EuroParl Phase-2 target) or support tickets. The honest claim is: *the
@@ -39,21 +39,21 @@ clusters that are distinguishable *by topic* rather than by cuisine.
   not acceptable for claims about Yelp hotels in general.
 - **Category co-occurrence leakage.** "Hotels"-tagged Yelp businesses are
   frequently co-tagged (restaurants, nightlife, venues), so the benchmark
-  contains substantial restaurant/bar content — visible in the 1k smoke run,
+  contains substantial restaurant/bar content: visible in the 1k smoke run,
   where a finalist's largest cluster is about oysters on Bourbon Street, not
   rooms. The qualitative inspection caught this; no metric did. Either accept
   it (it is what "hotel business reviews" really are) or tighten the filter
-  to businesses tagged *only* Hotels — a decision to revisit before the 50k
+  to businesses tagged *only* Hotels: a decision to revisit before the 50k
   GPU benchmark.
 - **Minimum length filter.** Dropping < 50-char reviews removes exactly the
   documents that are hardest to embed and cluster. Production data will
   contain them; the preprocess Celery step replicates the filter, but that
-  means the app silently discards user data — this is documented behaviour,
+  means the app silently discards user data: this is documented behaviour,
   surfaced in the pipeline status, but a user may still be surprised.
 
 ## 2. Preprocessing
 
-**Decision.** "Minimal" — whitespace normalisation only (notebook 02).
+**Decision.** "Minimal": whitespace normalisation only (notebook 02).
 
 **Evidence.** Notebook 02 compared raw / minimal / aggressive variants;
 sentence-transformer models are trained on natural text, and aggressive
@@ -65,7 +65,7 @@ metrics slightly while never helping.
 app spec assigns dedup to the Preprocess step by primary key, which catches
 exact re-uploads only, not near-duplicates (copy-paste reviews differing by
 one word). Near-duplicate documents inflate cluster densities and can create
-phantom "topics" — a known, unmitigated gap.
+phantom "topics": a known, unmitigated gap.
 
 ## 3. Embeddings
 
@@ -90,7 +90,7 @@ re-checkable).
 under a *fixed* UMAP+HDBSCAN configuration, so metric differences are
 attributable to the embedding. Decisive was not raw silhouette but the
 three-tier picture: instruction-tuned models *mechanically* raise silhouette
-by reshaping the space toward the instruction, without raising coherence —
+by reshaping the space toward the instruction, without raising coherence,
 the geometry improves, the topics don't.
 
 **Weaknesses.**
@@ -105,7 +105,7 @@ the geometry improves, the topics don't.
   (bge-m3, multilingual-e5, arctic-embed-l-v2.0) is deferred to WP9. The
   2026-08 sweep evaluated the multilingual candidates *on English mentions
   only*, so it still provides no evidence either way on multilingual capacity.
-- GPU-tier models (instructor-xl, e5-mistral-7b) were never run — the
+- GPU-tier models (instructor-xl, e5-mistral-7b) were never run: the
   comparison is honest only within the CPU tier until the GPU sweep happens.
   **Closed for the segment unit**: the 2026-08 sweep ran on GPU across the
   whole admissible registry up to 600M parameters. The 4B/7B instruction
@@ -119,14 +119,14 @@ cosine metric, fixed seed; separate 2-D/3-D projections (`min_dist=0.1`) for
 visualisation only (notebook 05). PCA→UMAP and PCA-only were tried and not
 selected at this embedding dimensionality.
 
-**Weaknesses — these are the big ones.**
+**Weaknesses: these are the big ones.**
 
 - **UMAP distorts density, and HDBSCAN then clusters density.** UMAP
   preserves neighbourhood topology, not distances or densities; `min_dist=0`
   actively compacts regions. HDBSCAN's notion of "variable density clusters"
   is therefore applied to an artifact of the projection, not to the
   embedding space. Cluster boundaries in UMAP space can be projection
-  artifacts. We accept this (the field broadly does — BERTopic is built on
+  artifacts. We accept this (the field broadly does: BERTopic is built on
   the same stack) because clustering in 768-d raw space is itself unreliable
   (distance concentration), but Tier-1 metrics measured *in UMAP space* must
   be read as "quality of the projection's clusters", never "quality of the
@@ -135,12 +135,12 @@ selected at this embedding dimensionality.
 - **Nondeterminism.** UMAP is deterministic only with a fixed seed (which
   forces single-threaded layout, a real runtime cost at 50k+), and unstable
   *across* seeds. The harness quantifies this with multi-seed ARI; early smoke
-  results show the instability is significant — which makes WP9b's
+  results show the instability is significant: which makes WP9b's
   "same corpus → same clusters" goal achievable only by *pinning* seeds, and
   "meaningful cluster identity across runs" still open.
 - Tier-1 metrics in 10-d UMAP space systematically look better than the same
   clustering would in raw space. All variants share the bias except BERTopic
-  (5-d internal space) — cross-variant Tier-1 comparisons therefore carry a
+  (5-d internal space): cross-variant Tier-1 comparisons therefore carry a
   small systematic advantage we cannot fully remove; flagged in the report.
 
 ## 5. Clustering
@@ -163,22 +163,22 @@ artifacts and adds stability + noise-fairness, which the notebooks lacked.
   including noise as a pseudo-cluster, plus the noise fraction, and the
   report instructs readers to use them together. There is no single fair
   number; we publish the disagreement instead of hiding it.
-- **min_cluster_size is scale-dependent — handled, but heuristically.**
+- **min_cluster_size is scale-dependent: handled, but heuristically.**
   HDBSCAN's mcs is an absolute count whose meaning is relative: mcs=15 on the
   5k benchmark (0.3% of the corpus) is a topic threshold; the same 15 at 50k
   (0.03%) produces blob-and-crumbs. Default specs therefore use
-  ``"auto"``: mcs = 0.3% of the clustered units (floor 15) —
-  *anchored to* notebook 06's decision, which means it reproduces the decided
+  ``"auto"``: mcs = 0.3% of the clustered units (floor 15),
+*anchored to* notebook 06's decision, which means it reproduces the decided
   behaviour at 5k and extrapolates linearly elsewhere. The linearity is an
-  assumption, not a finding; the proper validation is a per-scale sweep (see
-  the tuning roadmap in docs/pipeline-guide.md). BERTopic deliberately keeps
-  its stock min_topic_size=10 — it is the "off-the-shelf, no thinking"
+  assumption, not a finding; the proper validation is a per-scale sweep.
+  BERTopic deliberately keeps
+  its stock min_topic_size=10: it is the "off-the-shelf, no thinking"
   baseline, scale problems included.
-- **min_samples must NOT scale with it — the mistake that cost a run.**
+- **min_samples must NOT scale with it: the mistake that cost a run.**
   Notebook 06 chose the pair (15, 5), and the auto rule originally carried
   the 3:1 ratio into the extrapolation: ms = mcs/3. That is a category
   error. mcs is a *size* threshold ("a theme smaller than this is not a
-  theme"), but ms is the *smoothing* parameter — it sets each point's core
+  theme"), but ms is the *smoothing* parameter: it sets each point's core
   distance as the distance to its ms-th neighbour, so a large ms flattens
   precisely the local density variation HDBSCAN needs to separate modes.
   Scaled together, the two eventually erase all structure.
@@ -196,20 +196,20 @@ artifacts and adds stability + noise-fairness, which the notebooks lacked.
   The collapse fingerprint is the noise ratio, not the cluster count: a
   stricter clustering should label *more* points as noise, and this one
   dropped from ~40% to 1.3% because it stopped seeing outliers at all.
-  ``cluster.scaled_min_samples`` therefore caps ms at 50 — the largest value
+  ``cluster.scaled_min_samples`` therefore caps ms at 50: the largest value
   that leaves every validated configuration unchanged (5k docs -> 5, 50k
   docs -> 50). The cliff between 100 and 353 is unmapped; the cap sits clear
   of it rather than on a measured optimum. The same cap now applies to the
   two-stage micro pass, which had the identical unbounded ratio (0.6·mcs).
 
   Two lessons generalise beyond this parameter. First, a ratio observed at
-  one scale is not a scaling law — only the parameter the anchor was
+  one scale is not a scaling law: only the parameter the anchor was
   *about* may be extrapolated. Second, the failure was fully visible in the
   run's own ``metrics`` (``max_cluster_share`` 0.98, the two
   ``failure_flags``) yet the pipeline still wrote clusters, labelled them
   with an LLM, and marked the project ``ready``: the flags are recorded,
-  not enforced. Gating a run on its own failure flags — or at least
-  surfacing them in the project card — is an open item.
+  not enforced. Gating a run on its own failure flags (or at least
+  surfacing them in the project card) is an open item.
 - **The two-stage clusterer's macro count heuristic** (≈√n_micro, clamped to
   [5, 30]) is a readability heuristic, not an optimum; it has no validation
   beyond "produces human-reviewable counts". Treated as a reviewable
@@ -218,7 +218,7 @@ artifacts and adds stability + noise-fairness, which the notebooks lacked.
   issue and additionally assumes roughly isotropic clusters; its k is fixed
   by hand. It earns its slot as the no-noise contrast candidate.
 
-## 5b. Sentence-level (aspect) clustering — the fifth variant
+## 5b. Sentence-level (aspect) clustering: the fifth variant
 
 **Decision.** ``sentence_level`` splits each review into sentence segments
 (regex splitter, segments < 20 chars dropped, > 600 chars hard-wrapped) and
@@ -231,14 +231,14 @@ problems disappear.
 **Counting semantics** (the part that is easy to get wrong):
 
 - Cluster ``size`` counts **mentions**; ``n_documents`` counts **distinct
-  parent reviews** — both are stored and displayed together ("3,180 mentions
+  parent reviews**: both are stored and displayed together ("3,180 mentions
   in 2,410 reviews"). Anything that should reflect customers rather than
   verbosity (per-cluster mean stars, Tier-3 rating entropy) is computed on
   deduplicated (review, cluster) pairs, so one rambling reviewer cannot
   dominate a cluster's star profile.
 - ``doc_membership.json`` maps every review to its cluster shares and a
-  *primary* cluster (most mentions; noise never outranks a real cluster) —
-  this is what fills the app's one-cluster-per-document field.
+  *primary* cluster (most mentions; noise never outranks a real cluster):
+this is what fills the app's one-cluster-per-document field.
 
 **Weaknesses.**
 
@@ -247,19 +247,19 @@ problems disappear.
   matters.
 - Short evaluative sentences carry sentiment but no topic; the minimum-length
   filter removes the worst, but expect one or two **generic praise/complaint
-  clusters** — that is normal at sentence level and exactly what the HITL
+  clusters**: that is normal at sentence level and exactly what the HITL
   ``mark_junk`` action is for. Watch Tier 3 on these.
 - ~6x more points: the seeded (single-threaded) UMAP fit dominates runtime at
   50k documents (~300k segments). Run it deliberately, not casually.
 - Metrics are computed on segments, so Tier-1/Tier-2 numbers are **not
-  directly comparable** to the document-level variants — same corpus,
+  directly comparable** to the document-level variants: same corpus,
   different unit. Only the entropy (deduplicated) and the human inspection
   compare fairly across the unit boundary; the report ranks them together
   regardless, which is a known limitation to keep in mind when reading it.
 
 ## 6. Sentiment/topic entanglement (why Tier 3 exists)
 
-Review embeddings encode sentiment as strongly as topic — angry reviews
+Review embeddings encode sentiment as strongly as topic: angry reviews
 resemble other angry reviews. A clustering can therefore score excellently on
 geometry while having separated *ratings*, not *themes* ("all 1-star rants"
 is a textbook failure cluster). Tier 3 (normalised star-rating entropy per
@@ -272,7 +272,7 @@ this corpus.
 **Limitations.** Tier 3 requires a rating column (absent → metric silently
 unavailable, app falls back to Tiers 1–2); it cannot distinguish "sentiment
 blob" from a legitimately polarised topic (e.g. "bed bugs" will be ~all
-1-star and is still a real topic — entropy alone would wrongly flag it; only
+1-star and is still a real topic: entropy alone would wrongly flag it; only
 a human reading samples catches this). Tier 3 is a tripwire, not a verdict.
 
 ## 7. Representation and LLM labeling
@@ -286,7 +286,7 @@ context strategy and v1 prompts; prompt hash and model recorded per label.
 - **LLM label hallucination risk.** The model sees 5 sampled documents, not
   the cluster. Labels can be plausible-but-wrong (over-specific from a
   non-representative sample, or generic to the point of useless). Notebook
-  08's human scoring sheet was never completed — the centroid/v1 choice rests
+  08's human scoring sheet was never completed: the centroid/v1 choice rests
   on informal reading, which is why **label approval is a mandatory HITL
   step**, not a nicety. Every label carries `label_source` so unreviewed LLM
   text is always distinguishable from human-approved text.
@@ -302,7 +302,7 @@ context strategy and v1 prompts; prompt hash and model recorded per label.
 Metrics shortlist; humans decide. Encoded in the report structure itself:
 Step 1 ranks by mean rank over silhouette (excl. and incl. noise), C_v and
 rating entropy; Step 2 is a per-finalist inspection sheet (label + top terms
-+ **5 random member documents** — random, not centroid, because centroid
++ **5 random member documents**: random, not centroid, because centroid
 samples flatter the cluster) and an intruder test (4 members + 1 outsider,
 shuffled; if the intruder isn't obvious the boundary isn't meaningful). The
 report ends with a sign-off block; the Streamlit app records the
@@ -318,7 +318,7 @@ pipeline and confirmed they are thematically coherent."*
   generic high-frequency word sets. We use it as a *relative* signal between
   configurations on the same corpus, never as an absolute quality claim, and
   it is one vote among four in the shortlist ranking.
-- The mean-rank shortlist weights all four metrics equally — defensible
+- The mean-rank shortlist weights all four metrics equally: defensible
   only as a tie-breaking convention; the report makes the raw table visible
   so a reader can re-rank under different priorities.
 - Inspection and intruder tests are rendered for the *first seed's* run;
@@ -344,7 +344,7 @@ timestamp; application semantics are specified in
 
 ## 10. Reproducibility status (WP9b)
 
-- Deterministic re-runs: achieved *per seed* — config, seed, and parameter
+- Deterministic re-runs: achieved *per seed*, config, seed, and parameter
   set fully determine every artifact (caches are keyed on all of them).
 - Cross-seed stability: measured (ARI), not yet achieved; this is open
   research within WP9b, not an engineering gap.

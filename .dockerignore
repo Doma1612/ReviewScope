@@ -12,3 +12,4 @@ scripts
 **/*.pyc
 **/*.pyo
 src/frontend/node_modules
+datasets

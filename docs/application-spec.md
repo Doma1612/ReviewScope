@@ -1,4 +1,4 @@
-# ReviewScope — Application Specification
+# ReviewScope: Application Specification
 
 ---
 
@@ -6,7 +6,7 @@
 
 ### Auth
 - User registration and login (JWT stored in httpOnly cookie)
-- Protected routes — unauthenticated users redirected to login
+- Protected routes: unauthenticated users redirected to login
 
 ### Project Permissions
 - **Owner:** full access (read, share, delete)
@@ -38,25 +38,25 @@
 
 ---
 
-### Upload Modal — Step 1: File
+### Upload Modal, Step 1: File
 - Project name input
 - File drop zone (JSONL or CSV)
 - "Next" button → parses file headers, proceeds to Step 2
 
-### Upload Modal — Step 2: Schema Confirmation
-- Dataset must already be correctly structured — no column renaming, reordering, or exclusion
+### Upload Modal, Step 2: Schema Confirmation
+- Dataset must already be correctly structured: no column renaming, reordering, or exclusion
 - Table of auto-detected columns:
   - Column name (read-only)
   - Data type selector: `text`, `integer`, `float`, `date`, `boolean`
   - Primary key indicator (auto-detected from column name heuristics, read-only)
-- Validation runs on submit — errors shown inline, no auto-fixing
+- Validation runs on submit: errors shown inline, no auto-fixing
 - "Upload & Start" button → submits schema + file, closes modal, pipeline starts async
 
 > **Future extensions:** chunk size configuration, append data to existing project
 
 ---
 
-### Project Dashboard — Live Status
+### Project Dashboard: Live Status
 - Cards for in-progress projects show current pipeline step (e.g. `Clustering… step 4/6`)
 - Frontend polls `GET /api/projects/{id}/pipeline/status` every ~3s
 - Polling stops automatically on `Ready` or `Failed`
@@ -65,12 +65,12 @@
 
 ### Cluster View (`/projects/:id`)
 
-**Left panel — Scatter Plot**
+**Left panel: Scatter Plot**
 - Plotly.js 2D / 3D toggle
 - Points colored by cluster assignment
 - Click a point → highlights corresponding cluster in the right panel
 
-**Right panel — Cluster List (scrollable)**
+**Right panel: Cluster List (scrollable)**
 
 Per cluster card:
 - Cluster label (LLM-generated)
@@ -81,7 +81,7 @@ Per cluster card:
 - 2–3 sample document snippets
 - "View all" button → navigates to Cluster Detail
 
-**Bottom toggle — Show all documents**
+**Bottom toggle: Show all documents**
 - Replaces cluster list panel with a full paginated document table
 - All schema columns are shown as table columns
 
@@ -196,7 +196,7 @@ Step 7  Status → Ready: "Open" button activates
 | 3 | **Embed** | Run sentence-transformers, store vectors in pgvector |
 | 4 | **Reduce** | UMAP dimensionality reduction to 2D and 3D coords per document |
 | 5 | **Cluster** | HDBSCAN / Agglomerative clustering, assign cluster_id per document |
-| 6 | **Sentiment** | BERTopic sentiment model — score per document, aggregate per cluster (skipped if no text column qualifies) |
+| 6 | **Sentiment** | BERTopic sentiment model: score per document, aggregate per cluster (skipped if no text column qualifies) |
 | 7 | **Label** | Ollama LLM generates label and summary per cluster |
 | 8 | **Finalize** | Mark project as Ready, persist all results |
 
@@ -263,7 +263,7 @@ Step 7  Status → Ready: "Open" button activates
 | `label` | text | LLM-generated |
 | `summary` | text | LLM-generated |
 | `top_terms` | JSONB | `[{term, score}]` |
-| `word_frequencies` | JSONB | `{term: count}` — drives word cloud |
+| `word_frequencies` | JSONB | `{term: count}`: drives word cloud |
 | `size` | integer | document count |
 | `sentiment_avg` | float | nullable |
 

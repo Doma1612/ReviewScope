@@ -1,4 +1,4 @@
-# RAG evaluation — project chat retrieval and answer grounding
+# RAG evaluation: project chat retrieval and answer grounding
 
 **Date:** 2026-09-23 · **Script:** `scripts/rag_eval.py` · **Raw output:**
 `data/runs/rag_eval/rag_eval_{hotels,europarl}.json` (every query, ranking,
@@ -27,22 +27,22 @@ goes straight to `search_project_evidence`, the path the planner falls back to.
 Four retrievers, all under the app's candidate policy so that only the scoring
 differs:
 
-- **app** — cosine over *clustered* segments only (`Segment.cluster_id IS NOT NULL`), i.e. what ships
-- **dense_all** — the same, with HDBSCAN noise segments included
-- **bm25** — Okapi BM25 (k1 = 1.2, b = 0.75, English stop words) over all segments
-- **hybrid** — reciprocal-rank fusion (k = 60) of dense_all and bm25
+- **app**: cosine over *clustered* segments only (`Segment.cluster_id IS NOT NULL`), i.e. what ships
+- **dense_all**: the same, with HDBSCAN noise segments included
+- **bm25**: Okapi BM25 (k1 = 1.2, b = 0.75, English stop words) over all segments
+- **hybrid**: reciprocal-rank fusion (k = 60) of dense_all and bm25
 
 Three measurements:
 
 - **A. Known-item retrieval.** 200 random segments (≥ 60 chars) per corpus.
   `gemma3:4b` writes one natural question that the segment answers, paraphrased
   rather than copied (mean content-word overlap with the source: 0.28 hotels,
-  0.30 EuroParl). Metric: is *that* segment retrieved — Hit@k, MRR@10, nDCG@10;
+  0.30 EuroParl). Metric: is *that* segment retrieved, Hit@k, MRR@10, nDCG@10;
   plus Doc-Hit@10 (any segment of the same review/speech).
 - **B. Graded topical relevance.** 12 hand-written analyst queries per corpus
   plus 2 deliberately niche ones. The top 10 of all four retrievers are pooled
   and each (query, segment) pair is graded 0/1/2 by `gemma3:4b`. P@5, P@10
-  (grade ≥ 1), strict P@10 (grade 2), nDCG@10 against the judged pool, MRR.
+  (grade ≥ 1), nDCG@10 against the judged pool, MRR.
   Niche queries are excluded from the averages (see §4).
 - **C. Answer grounding.** For each of the 14 queries, the app's top 10 go
   through the app's prompt to `llama3.2`. Citation validity (cited IDs exist),
@@ -71,12 +71,12 @@ Split by whether the source segment is clustered or noise:
 
 ### B. Topical precision (12 queries per corpus, LLM-judged)
 
-| | Hotels P@10 | Hotels strict P@10 | Hotels nDCG@10 | EuroParl P@10 | EuroParl strict P@10 | EuroParl nDCG@10 |
-|---|---|---|---|---|---|---|
-| **app** | 0.942 | 0.917 | 0.942 | 0.983 | 0.958 | 0.972 |
-| dense_all | 0.942 | 0.933 | 0.949 | 1.000 | 0.992 | 0.996 |
-| bm25 | 0.958 | 0.942 | 0.962 | 0.967 | 0.942 | 0.962 |
-| hybrid | **0.983** | **0.975** | **0.985** | 1.000 | 0.992 | 0.996 |
+| | Hotels P@10 | Hotels nDCG@10 | EuroParl P@10 | EuroParl nDCG@10 |
+|---|---|---|---|---|
+| **app** | 0.942 | 0.942 | 0.983 | 0.972 |
+| dense_all | 0.942 | 0.949 | 1.000 | 0.996 |
+| bm25 | 0.958 | 0.962 | 0.967 | 0.962 |
+| hybrid | **0.983** | **0.985** | 1.000 | 0.996 |
 
 MRR is 1.0 for every retriever on every query: the first result is always
 relevant. The only hotel query with real misses is "rude or unhelpful front
@@ -176,7 +176,7 @@ parallel requests, and with 12 queries the difference between the two runs
 - **Small n.** 12 topical queries per corpus; 200 known-item queries. Treat
   differences below ~0.05 in B and ~0.07 in A (binomial SE at n = 200 is
   ~0.03) as noise.
-- **Not evaluated:** the llama3.2 tool planner (known to be unstable — see
+- **Not evaluated:** the llama3.2 tool planner (known to be unstable, see
   commit `1502acd`), the cluster-level chat, multi-turn history, and anything
   about the answer's *usefulness* to an analyst.
 

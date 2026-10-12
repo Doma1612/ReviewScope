@@ -1,13 +1,13 @@
 # Dataset Selection
 
 **Project:** ReviewScope  
-**Status:** Partially decided — development order confirmed, see section headers.
+**Status:** Partially decided, development order confirmed, see section headers.
 
 ---
 
 ## Context
 
-Choosing the right datasets for development is not just a convenience decision — it shapes what the pipeline gets optimized for and what the demos can actually show. Three things should guide the selection:
+Choosing the right datasets for development is not just a convenience decision: it shapes what the pipeline gets optimized for and what the demos can actually show. Three things should guide the selection:
 
 1. **Pipeline coverage.** We need datasets that stress-test the full stack: short noisy text and long structured text, single-domain and multi-domain corpora, enough volume to make clustering meaningful.
 2. **DATS relevance.** If we want the academic / discourse analysis framing to hold up, at least some datasets should reflect the kind of data social scientists actually work with.
@@ -20,13 +20,13 @@ All datasets listed here are openly available. None require a data sharing agree
 ## Proposed Datasets
 
 ### 1. Yelp Open Dataset ✓ MVP Dataset
-**Initial development dataset — short-form user-generated text**
+**Initial development dataset: short-form user-generated text**
 
-6.9 million reviews across restaurants, shops, and local services, with star ratings, timestamps, and business metadata included. The volume is large enough to stress-test the pipeline properly, and the metadata allows filtering by business category, city, or rating band — which makes for more controlled experiments than throwing the full corpus at the clusterer at once.
+6.9 million reviews across restaurants, shops, and local services, with star ratings, timestamps, and business metadata included. The volume is large enough to stress-test the pipeline properly, and the metadata allows filtering by business category, city, or rating band: which makes for more controlled experiments than throwing the full corpus at the clusterer at once.
 
-User-generated review text is a well-understood benchmark domain for NLP. It is short, noisy, opinionated, and high-volume — all properties that make it a useful baseline for evaluating embedding quality and cluster coherence.
+User-generated review text is a well-understood benchmark domain for NLP. It is short, noisy, opinionated, and high-volume: all properties that make it a useful baseline for evaluating embedding quality and cluster coherence.
 
-- **Source:** [yelp.com/dataset](https://www.yelp.com/dataset) — free, requires registration
+- **Source:** [yelp.com/dataset](https://www.yelp.com/dataset), free, requires registration
 - **Size:** ~6.9M reviews, JSON
 - **Text length:** Short to medium
 - **Languages:** Primarily English
@@ -36,7 +36,7 @@ User-generated review text is a well-understood benchmark domain for NLP. It is 
 ---
 
 ### 2. Amazon Customer Reviews
-**Secondary dataset — cross-domain generalization**
+**Secondary dataset: cross-domain generalization**
 
 A different domain of short-form user-generated text, covering product feedback across many categories. Available directly via HuggingFace with per-category filtering, so we can start narrow and broaden as the pipeline matures.
 
@@ -52,15 +52,15 @@ The value here is generalization: if the pipeline clusters Yelp reviews well, do
 ---
 
 ### 3. EuroParl Corpus ✓ Phase 2
-**Academic / discourse analysis dataset — DATS angle**
+**Academic / discourse analysis dataset: DATS angle**
 
-Parliamentary debate transcripts from the European Parliament, covering 21 languages. This is the kind of primary source material that social scientists and discourse analysts actually work with — long documents, formal argumentation, a clear temporal dimension, and genuine thematic variety across political topics.
+Parliamentary debate transcripts from the European Parliament, covering 21 languages. This is the kind of primary source material that social scientists and discourse analysts actually work with: long documents, formal argumentation, a clear temporal dimension, and genuine thematic variety across political topics.
 
 This dataset directly supports the DATS integration story. DATS appears to be built for this kind of corpus. Showing ReviewScope's clustering and summarization pipeline applied to EuroParl debates makes the academic credibility of the project concrete.
 
-The multilingual dimension is also useful — it forces us to think early about whether embeddings generalize across languages or whether we need language-specific models.
+The multilingual dimension is also useful: it forces us to think early about whether embeddings generalize across languages or whether we need language-specific models.
 
-- **Source:** [statmt.org/europarl](https://www.statmt.org/europarl/) or HuggingFace — `Helsinki-NLP/europarl`
+- **Source:** [statmt.org/europarl](https://www.statmt.org/europarl/) or HuggingFace, `Helsinki-NLP/europarl`
 - **Size:** ~60M words per language pair
 - **Text length:** Long (speeches, debate segments)
 - **Languages:** 21 EU languages
@@ -70,13 +70,13 @@ The multilingual dimension is also useful — it forces us to think early about 
 ---
 
 ### 4. All the News (Kaggle)
-**Discourse analysis dataset — long-form text and concept-over-time angle**
+**Discourse analysis dataset: long-form text and concept-over-time angle**
 
-Roughly 200,000 news articles from major US outlets, covering 2016–2017 with publication dates, authors, and source metadata. The temporal metadata is the key asset here — it enables concept-over-time analysis (how does cluster X grow or shrink over the coverage period?), which is one of DATS's own features and would make for a compelling demo.
+Roughly 200,000 news articles from major US outlets, covering 2016–2017 with publication dates, authors, and source metadata. The temporal metadata is the key asset here: it enables concept-over-time analysis (how does cluster X grow or shrink over the coverage period?), which is one of DATS's own features and would make for a compelling demo.
 
 Long-form text also tests the summarization pipeline differently than short reviews. A cluster summary drawn from news articles needs to synthesize more complex content and handle a wider range of vocabulary.
 
-- **Source:** Kaggle — "All the News" dataset (multiple versions available)
+- **Source:** Kaggle, "All the News" dataset (multiple versions available)
 - **Size:** ~200k articles
 - **Text length:** Long (news articles)
 - **Languages:** English
@@ -100,16 +100,16 @@ The spread across short and long text, user-generated and formal language, and E
 
 ## One to Keep in Reserve
 
-**Google Play Store Reviews** (Kaggle, multiple versions) — app reviews are short, often multilingual, and structurally different enough from Yelp and Amazon to serve as an additional generalization test. Not needed immediately but useful to have on the list.
+**Google Play Store Reviews** (Kaggle, multiple versions): app reviews are short, often multilingual, and structurally different enough from Yelp and Amazon to serve as an additional generalization test. Not needed immediately but useful to have on the list.
 
 ---
 
 ## Development Order ✓ Decided
 
-1. **Yelp** — MVP. Short-form, well-understood domain, enough volume to stress-test the pipeline without needing to handle multilingual or long-form complexity first.
-2. **EuroParl** — Phase 2, once the MVP pipeline is stable. Long-form, formal language, multilingual, strong DATS relevance.
-3. **Amazon Reviews** — cross-domain generalization check once the pipeline is proven on Yelp.
-4. **All the News** — when concept-over-time visualization is on the roadmap.
+1. **Yelp**: MVP. Short-form, well-understood domain, enough volume to stress-test the pipeline without needing to handle multilingual or long-form complexity first.
+2. **EuroParl**: Phase 2, once the MVP pipeline is stable. Long-form, formal language, multilingual, strong DATS relevance.
+3. **Amazon Reviews**: cross-domain generalization check once the pipeline is proven on Yelp.
+4. **All the News**: when concept-over-time visualization is on the roadmap.
 
 ---
 

@@ -82,10 +82,9 @@ services:
     volumes:
       - ./src/backend:/app
       - ./data:/workspace/data
-    # Share the ollama container's network namespace so the ML labeler's
-    # hard-coded http://localhost:11434 reaches Ollama (reviewscope_ml is frozen
-    # and exposes no base_url override yet — see docs/ml-integration-changelog.md).
-    # db/redis service names still resolve via ollama's default-network membership.
+    # Shares the ollama container's network namespace, so localhost:11434 reaches
+    # Ollama. Recreating ollama therefore requires recreating the worker too.
+    # (The labeler also honours OLLAMA_BASE_URL; docker-compose.release.yml uses that.)
     network_mode: "service:ollama"
     depends_on:
       db:
@@ -104,21 +103,20 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    # Healthy only once the label model is actually pulled, so the worker (which
-    # waits for service_healthy) never starts before labeling can succeed. First
-    # boot must download ~2 GB: retries * interval = 30 * 10s = 5 min budget.
+    # Healthy once the entrypoint has pulled every model in OLLAMA_MODELS, so the
+    # worker never starts before labeling can succeed. First boot downloads
+    # ~5 GB: retries * interval = 90 * 10s = 15 min budget.
     healthcheck:
-      test: ["CMD-SHELL", "ollama list | grep -q llama3.2"]
+      test: ["CMD-SHELL", "test -f /tmp/models-ready"]
       interval: 10s
       timeout: 5s
-      retries: 30
+      retries: 90
       start_period: 15s
     environment:
       OLLAMA_CONTEXT_LENGTH: "8192"
       OLLAMA_KEEP_ALIVE: 10m
-      # Override the model the entrypoint pulls (default llama3.2, the
-      # reviewscope_ml PipelineSpec default). Keep the healthcheck grep in sync.
-      OLLAMA_LABEL_MODEL: llama3.2
+      # Label model (reviewscope_ml APP_LABEL_MODEL) and chat model (OLLAMA_CHAT_MODEL).
+      OLLAMA_MODELS: gemma3:4b llama3.2
 
   frontend:
     build:

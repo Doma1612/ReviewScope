@@ -1,112 +1,53 @@
-# ReviewScope Frontend
+# Frontend
 
-React + TypeScript + Vite frontend for ReviewScope. It includes authentication screens, project dashboard, upload flow, spatial dashboard, pipeline process view, cluster visualization, cluster detail, and project settings.
+React 19 and TypeScript single page app, built with Vite. Server state is handled by TanStack Query, the cluster map by Plotly.
 
-## Requirements
+## Structure
 
-- Node.js 22 recommended
-- npm
-- Backend API running at `http://localhost:8000`
+| Path | Responsibility |
+|---|---|
+| `src/main.tsx` | Entry point, routes, query client |
+| `src/api.ts` | Typed API client and response types; all requests send the auth cookie |
+| `src/views/AuthPage.tsx` | Login and registration |
+| `src/views/Dashboard.tsx` | Project grid, upload dialog with schema confirmation, live pipeline status |
+| `src/views/DeckDashboard.tsx` | Alternative dashboard: project list next to the map of the selected project |
+| `src/views/ProjectView.tsx` | Cluster map (2D/3D), cluster list, editing, document table, project chat |
+| `src/views/ClusterDetail.tsx` | One cluster: summary, word cloud, rating distribution, documents, cluster chat |
+| `src/views/PipelineView.tsx` | Pipeline steps of a project with the method behind each step |
+| `src/views/SettingsView.tsx` | Rename, sharing with viewers, deletion |
+| `src/ui/` | Shared components: app shell, theme, document table, word cloud, star rating, metrics panel, edit history, chat panel, badges |
+| `src/optimistic.ts` | Optimistic cache updates for cluster edits, with rollback on error |
+| `src/plot.ts` | Stratified point sampling that keeps the map responsive for large projects |
+| `src/hover.ts`, `src/colors.ts` | Map tooltips and the cluster colour palette |
+| `src/useSimulated.ts` | Detects whether the backend runs the simulated pipeline |
 
-## Environment
+## Routes
 
-The frontend reads the API base URL from the root `.env` file:
+| Route | View |
+|---|---|
+| `/login`, `/register` | Authentication |
+| `/` | Project dashboard |
+| `/deck` | Alternative dashboard |
+| `/projects/:projectId` | Cluster view |
+| `/projects/:projectId/clusters/:clusterId` | Cluster detail |
+| `/projects/:projectId/pipeline` | Pipeline view |
+| `/projects/:projectId/settings` | Project settings |
 
-```env
-VITE_API_BASE_URL=http://localhost:8000
+## Development
+
+The Docker Compose stack runs the dev server with hot reload at http://localhost:5173. Without Docker, with the API running on port 8000:
+
 ```
-
-Do not commit `.env`. Use `.env.example` as the safe template.
-
-## Run With Docker Compose
-
-From the repository root:
-
-
-```bash
-docker compose up --build frontend
-```
-
-Usually, run the full stack instead:
-
-```bash
-docker compose up --build
-```
-
-Frontend URL:
-
-```text
-http://localhost:5173
-```
-
-## Local Frontend Development
-
-From `src/frontend`:
-
-```bash
 npm install
 npm run dev
 ```
 
-Open:
+`VITE_API_BASE_URL` sets the API address (default `http://localhost:8000`). The API accepts requests only from `http://localhost:5173`.
 
-```text
-http://localhost:5173
+Type check and production build:
+
 ```
-
-Make sure the backend is running:
-
-```text
-http://localhost:8000/api/health
-```
-
-## Build
-
-From `src/frontend`:
-
-```bash
 npm run build
 ```
 
-Preview the production build:
-
-```bash
-npm run preview
-```
-
-## Main Routes
-
-- `/login` — login
-- `/register` — registration
-- `/` — classic project dashboard
-- `/deck` — spatial deck.gl-inspired dashboard
-- `/projects/:projectId` — cluster visualization
-- `/projects/:projectId/pipeline` — model/pipeline process view
-- `/projects/:projectId/clusters/:clusterId` — cluster detail
-- `/projects/:projectId/settings` — project settings and sharing
-
-## Features
-
-- httpOnly cookie authentication
-- Project dashboard with upload modal
-- CSV, JSON, and JSONL upload flow
-- Pipeline status polling
-- Methodology-based pipeline process page
-- Plotly cluster visualization
-- Deck-style spatial dashboard
-- Dark and clear themes with `localStorage` persistence
-- Project sharing/settings UI
-
-## API Notes
-
-The API client is in:
-
-```text
-src/frontend/src/api.ts
-```
-
-Requests use `credentials: "include"` because authentication is stored in an httpOnly cookie.
-
-## Known Build Note
-
-`npm run build` may show a chunk-size warning because Plotly is large. The build still succeeds. A later optimization can lazy-load Plotly or split visualization routes.
+The build reports a chunk size warning caused by Plotly; the build itself succeeds.

@@ -1,114 +1,70 @@
 # reviewscope_ml
 
-Pure-Python ML pipeline package — no Jupyter dependencies. The experiment
-notebooks (00–11) orchestrate it; the FastAPI/Celery backend will import it.
+Python package with the ML pipeline. The backend worker calls it through one function, `reviewscope_ml.app.run_from_upload`; the notebooks and evaluation scripts use the same modules. It has no web framework or database dependencies.
 
-```bash
-pip install -e .            # from the repo root
-pytest                      # pure-logic tests, no GPU, no model downloads
+```
+pip install -e .        # from the repository root
+pytest tests            # no GPU and no model downloads required
 ```
 
-## Module → app-spec Celery step mapping
+## Pipeline
 
-| Module | Celery step (app spec) | Notes |
-|---|---|---|
-| `data/` (ingest, preprocess, segment) | 1 Ingest, 2 Preprocess | benchmark builder (any Yelp category), "minimal" preprocessing (nb 02), sentence segmentation for aspect-level clustering |
-| `embed/` | 3 Embed | sentence-transformers (+instruction prompts), disk-cached, device-aware, CUDA-OOM batch backoff; `models.py` = curated candidate registry |
-| `reduce/` | 4 Reduce | UMAP / PCA→UMAP, seeded; separate 2-D/3-D viz projections |
-| `cluster/` | 5 Cluster | HDBSCAN, KMeans, agglomerative, two-stage micro→macro |
-| `sentiment/` | 6 Sentiment | tweet-RoBERTa per unit: score = P(pos)−P(neg), labels at ±0.2; per-cluster avg + distribution; cached, fails soft |
-| `represent/` | feeds 7 + word clouds | c-TF-IDF & TF-IDF terms, word frequencies |
-| `label/` | 7 Label | Ollama label+summary, prompt-hash recorded, term fallback when LLM is down |
-| `pipelines/` | 8 Finalize | five end-to-end variants (incl. sentence-level mentions), one artifact schema (assignments, coords, clusters, manifest, doc membership) |
-| `app/` | 1–8 (backend seam) | upload→ReviewSet ingest, frozen default spec, per-project config, persistence DTOs + ports, one `run_from_upload` entry point. See `docs/integration-guide.md` |
-| `eval/` | — (WP5 harness) | three-tier metrics, noise fairness, multi-seed ARI, inspection + intruder test, comparison report |
-| `hitl/` | — (review loop) | Streamlit review app, versioned JSONL feedback, apply-on-rerun |
-| `runtime/` | — (ops) | shared-GPU claim/release etiquette, per-stage wall/RSS/VRAM monitor |
-
-## Common commands
-
-```bash
-# Build the benchmark sample from the raw Yelp dump (idempotent)
-python -m reviewscope_ml.data.ingest --sample-size 5000
-
-# CPU smoke test — REQUIRED before any GPU run
-python -m reviewscope_ml.eval.report --sample-size 1000 --device cpu
-
-# Embedding model sweep (curated registry in embed/models.py; nb 04 protocol)
-python -m reviewscope_ml.eval.model_sweep --sample-size 5000 --device cuda
-#   subset: --models qwen3 bge-m3      gated EmbeddingGemma needs `hf auth login`
-
-# Subset of pipeline variants (sentence_level is the expensive one at 50k)
-python -m reviewscope_ml.eval.report --sample-size 50000 --device cuda \
-    --variants custom_hdbscan two_stage sentence_level
-
-# LLM labels: Ollama runs rootless from the home directory on the uni server
-# (pip only ships the client; grab ollama-linux-amd64.tar.zst from GitHub
-# releases). Pin it to an idle GPU:
-CUDA_VISIBLE_DEVICES=<idle-gpu> nohup ~/ollama/bin/ollama serve > ~/ollama/serve.log 2>&1 &
-~/ollama/bin/ollama pull llama3.2
-
-# Review a finished run, record feedback
-streamlit run src/reviewscope_ml/hitl/app.py
-
-# Apply recorded feedback -> <run>__reviewed
-python -m reviewscope_ml.hitl.apply_feedback two_stage__1000__s42 --sample-size 1000
+```
+upload -> ingest -> preprocess -> segment -> embed -> reduce -> cluster -> sentiment -> represent -> label -> result
 ```
 
-## Running on the shared GPU server (etiquette is enforced, not optional)
+The app runs the `sentence_level` variant: every document is split into sentences, and the sentences are clustered. A document belongs to the cluster that holds most of its sentences.
 
-The box has 4× TITAN X (12 GB), no scheduler; other groups are usually on
-GPUs 0–1. **torch must be 2.7.1+cu126** — newer wheels dropped Pascal
-(sm_61) kernels and fail at the first CUDA op (see requirements.txt).
-Every GPU entry point goes through `runtime.gpu.claim_gpu()`, which
+| Step | Default in the app |
+|---|---|
+| Preprocess | Whitespace normalisation, texts shorter than 50 characters removed |
+| Segment | Regex sentence splitter, sentences shorter than 20 characters removed |
+| Embed | `all-MiniLM-L6-v2` |
+| Reduce | UMAP to 10 dimensions for clustering; separate 2D and 3D projections for the map |
+| Cluster | HDBSCAN, minimum cluster size 0.3% of the sentences (at least 15) |
+| Sentiment | `twitter-roberta-base-sentiment-latest`, score per sentence, averaged per cluster |
+| Represent | c-TF-IDF top terms and word frequencies |
+| Label | `gemma3:4b` via Ollama; falls back to joined top terms when Ollama is unavailable |
 
-1. queries `nvidia-smi` and claims **idle devices only** — by default every
-   idle GPU (`--gpus auto`); the embed stage runs data-parallel across them
-   for a near-linear speedup. Busy devices are never touched,
-2. pins the process to the claim via `CUDA_VISIBLE_DEVICES`,
-3. **refuses to start** if no device has ≥ 6 GB free (falls back to CPU or
-   tells you to come back later — never squeeze in),
-4. logs the claim and the release.
+The reasons behind these choices are documented in `docs/methodology.md` and `docs/technology-selection.md`.
 
-`--gpus 1` restores the conservative single-device claim; only embedding
-parallelises (UMAP/HDBSCAN are CPU), so multi-GPU shortens the embed stage,
-not the whole run.
+## Structure
 
-```bash
-# 0) look before you leap (claim_gpu does this too, but look anyway)
-nvidia-smi
+| Module | Responsibility |
+|---|---|
+| `app/` | Interface for the backend: upload schema, file ingest, default pipeline spec, progress and persistence ports, `run_from_upload` |
+| `data/` | Benchmark loading, sentence segmentation, dataset builders in `data/sources/` (Yelp, Europarl) |
+| `core/` | Configuration, disk caches, corpus profiles, metrics, experiment tracking |
+| `embed/` | sentence-transformers wrapper with caching and multi-GPU encoding; `models.py` lists the evaluated models |
+| `reduce/` | UMAP and PCA reduction |
+| `cluster/` | HDBSCAN, KMeans, agglomerative and two-stage clustering backends |
+| `sentiment/` | Sentiment scoring and per-cluster aggregation |
+| `represent/` | Cluster terms and word frequencies |
+| `label/` | Ollama labeler and the term fallback |
+| `pipelines/` | Pipeline specs, the runner and the run artifact format |
+| `eval/` | Metrics, comparison reports, model and labeler sweeps, label scoring |
+| `hitl/` | Streamlit review app and feedback that is applied on the next run |
+| `runtime/` | GPU selection on shared servers, resource monitoring |
 
-# 1) CPU smoke first, always
-python -m reviewscope_ml.eval.report --sample-size 1000 --device cpu
+## Pipeline variants
 
-# 2) full comparison on GPU — one short-lived process; the embed stage
-#    releases the model + CUDA cache the moment embeddings are cached
-python -m reviewscope_ml.eval.report --sample-size 5000 --device cuda
-```
+`pipelines/spec.py` defines five variants for comparison: `bertopic`, `custom_hdbscan`, `flat_agglomerative`, `two_stage` and `sentence_level`. All of them write the same run directory under `data/runs/`: `manifest.json`, `assignments.csv`, `clusters.json`, `metrics.json`, and for `sentence_level` also `doc_membership.json`. Every expensive step is cached under `data/cache/`, keyed on all of its inputs, so interrupted runs resume.
 
-In Python, the same flow per stage:
+## Command line
 
-```python
-from reviewscope_ml.runtime import claim_gpu
-from reviewscope_ml import load_config
+| Command | Purpose |
+|---|---|
+| `python -m reviewscope_ml.data.sources.yelp --sample-size 5000` | Build a hotel review sample from the Yelp download |
+| `python -m reviewscope_ml.data.sources.europarl --sample-size 5000` | Build a Europarl sample |
+| `python -m reviewscope_ml.eval.report --sample-size 1000 --device cpu` | Run and compare all variants, write a report |
+| `python -m reviewscope_ml.eval.model_sweep --sample-size 5000 --device cuda --sentence-level` | Compare embedding models |
+| `python -m reviewscope_ml.eval.label_sweep --sample-size 5000 --device cuda` | Compare LLM labelers |
+| `python -m reviewscope_ml.eval.cost_probe` | Measure runtime and memory per model |
+| `streamlit run src/reviewscope_ml/hitl/app.py` | Review runs, approve labels, score labels |
+| `python -m reviewscope_ml.hitl.apply_feedback <run_name>` | Apply recorded feedback to a run |
 
-with claim_gpu() as claim:                       # picks + pins freest GPU
-    cfg = load_config(sample_size=50_000, device=claim.device,
-                      gpu_id=claim.gpu_id, cuda_mem_fraction=0.5, cpu_threads=4)
-    ...                                          # run ONE stage, then exit
-```
+The scripts in `scripts/` wrap the runs used for the technology selection.
 
-Rules baked into the code (see `runtime/gpu.py` for the rationale):
-one GPU only, ≤ 50% of its VRAM, ≤ 4 CPU threads, prefer one short-lived
-process per stage over a long-lived kernel, and long runs are
-checkpoint/resume via the stage caches — a crash never forces a full re-run.
+## GPU use on shared servers
 
-## Artifact schema (the contract with the app)
-
-Every pipeline variant writes the same run directory under `data/runs/`:
-`manifest.json` (spec, seed, per-stage cost, label sources, human
-confirmation), `assignments.csv` (doc → cluster + 2-D/3-D coords),
-`clusters.json` (label, summary, label_source, terms, word frequencies,
-random sample doc ids), `metrics.json`. The backend can consume any variant
-interchangeably; the HITL feedback JSONL in `data/feedback/` is the
-GUI-independent review contract.
+Every GPU entry point calls `runtime.gpu.claim_gpu()`. It reads `nvidia-smi`, claims only idle GPUs with at least 6 GB free, pins the process with `CUDA_VISIBLE_DEVICES`, and falls back to CPU (or stops, for sweeps) when none is idle. Each process uses at most 50% of a GPU's memory and 4 CPU threads. torch is pinned to 2.7.1 with CUDA 12.6; newer builds lack kernels for Pascal GPUs such as the TITAN X.

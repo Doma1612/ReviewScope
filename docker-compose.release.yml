@@ -2,7 +2,7 @@
 #
 # Download this file and .env.example (rename to .env, set the secrets), then:
 #   docker compose -f docker-compose.release.yml up -d
-# and open http://localhost:5173. See docs/deployment.md.
+# and open http://localhost:5173. See README.md.
 #
 # Runs on CPU on any machine (Linux, Windows, macOS incl. Apple Silicon). On an
 # NVIDIA machine with nvidia-container-toolkit, add the GPU override:
@@ -38,21 +38,21 @@ services:
       retries: 10
 
   ollama:
-    # Pulls the label model on first boot (~2 GB), then serves it.
+    # Pulls the label and chat models on first boot (~5 GB), then serves them.
     image: ${REVIEWSCOPE_NAMESPACE:-dmnkmrtns}/reviewscope-ollama:${REVIEWSCOPE_VERSION:-latest}
     volumes:
       - ollama_data:/root/.ollama
     environment:
       OLLAMA_CONTEXT_LENGTH: "8192"
       OLLAMA_KEEP_ALIVE: 10m
-      OLLAMA_LABEL_MODEL: llama3.2
-    # Healthy only once the label model is pulled. First boot downloads ~2 GB:
-    # 60 retries * 10s = 10 min budget for slow connections.
+      OLLAMA_MODELS: gemma3:4b llama3.2
+    # Healthy once both models are pulled. 120 retries * 10s = 20 min budget for
+    # slow connections.
     healthcheck:
-      test: ["CMD-SHELL", "ollama list | grep -q llama3.2"]
+      test: ["CMD-SHELL", "test -f /tmp/models-ready"]
       interval: 10s
       timeout: 5s
-      retries: 60
+      retries: 120
       start_period: 15s
 
   api:
